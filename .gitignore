@@ -1,0 +1,15 @@
+# Vivado 자동 생성 파일
+.Xil/
+*.cache/
+*.runs/
+*.sim/
+*.hw/
+
+# Vivado 로그
+*.jou
+*.log
+*.str
+
+# Windows
+Thumbs.db
+Desktop.ini
