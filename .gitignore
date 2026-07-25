@@ -13,3 +13,12 @@
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Vivado 무시 파일 목록
+*.xpr
+*.hw
+*.sim
+*.cache
+*.runs
+*.Xil
+*.ip_user_files
