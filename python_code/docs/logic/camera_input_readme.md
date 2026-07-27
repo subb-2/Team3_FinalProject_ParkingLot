@@ -1,4 +1,4 @@
-# 1단계 : 카메라 영상 입력 확인 (Camera Input)
+# 카메라 영상 입력 확인 (Camera Input)
 
 ## 목적
 
