@@ -3,6 +3,7 @@ import time
 import sys
 import os
 from ultralytics import YOLO
+from flask import Flask, Response
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -131,7 +132,7 @@ class CarDetector:
 
         return frame
 
-# 테스트용 메인 (단독 실행 시 카메라 연결하여 검출 확인)
+# 테스트용 메인 (단독 실행 시 웹캠 서버 열기)
 if __name__ == '__main__':
     print("==========================================")
     print(" B01 : 차량 객체 검출 (Car Detection)")
@@ -146,65 +147,64 @@ if __name__ == '__main__':
         print("[ERROR] 카메라를 열 수 없습니다. 연결 상태를 확인하세요.")
         sys.exit(1)
 
-    print("[INFO] 카메라가 열렸습니다. 차량 검출을 시작합니다.")
-    print("[INFO] 종료: 영상 창에서 'q' 키\n")
-
     # 검출기 초기화
     detector = CarDetector(model_path='yolov8s.pt', conf=0.5, iou=0.45)
 
-    # 메인 루프
-    prev_time = time.time()
-    frame_count = 0
-    fps = 0.0
+    app = Flask(__name__)
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[ERROR] 프레임을 읽어올 수 없습니다.")
-            break
+    def generate_frames_with_detection():
+        prev_time = time.time()
+        frame_count = 0
+        fps = 0.0
 
-        # 검출 실행
-        detections = detector.detect(frame)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        # 검출 결과 시각화
-        detector.draw_detections(frame, detections)
+            # 검출 실행 및 시각화
+            detections = detector.detect(frame)
+            detector.draw_detections(frame, detections)
 
-        # FPS 계산 (0.5초 간격 갱신)
-        current_time = time.time()
-        frame_count += 1
-        if current_time - prev_time >= 0.5:
-            fps = frame_count / (current_time - prev_time)
-            prev_time = current_time
-            frame_count = 0
+            # FPS 계산 (0.5초 간격)
+            current_time = time.time()
+            frame_count += 1
+            if current_time - prev_time >= 0.5:
+                fps = frame_count / (current_time - prev_time)
+                prev_time = current_time
+                frame_count = 0
 
-        # 화면 상단에 FPS 표시
-        cv2.putText(
-            frame, f"FPS: {fps:.1f}",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA
-        )
+            # 화면 텍스트 표시
+            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, f"Vehicles: {len(detections)}", (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # 검출 차량 수 표시
-        cv2.putText(
-            frame, f"Vehicles: {len(detections)}",
-            (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA
-        )
+            # 터미널에 검출 결과 출력 (FPS 갱신 시점마다)
+            if frame_count == 1 and detections:
+                print(f"[FPS: {fps:.1f}] 검출 차량 {len(detections)}대:")
+                for d in detections:
+                    print(f"  {d['class_name']:12s}  conf={d['confidence']:.2f}")
 
-        # 터미널에 검출 결과 출력 (FPS 갱신 시점마다)
-        if frame_count == 1 and detections:
-            print(f"[FPS: {fps:.1f}] 검출 차량 {len(detections)}대:")
-            for d in detections:
-                x1, y1, x2, y2 = d['bbox']
-                w = x2 - x1
-                h = y2 - y1
-                print(f"  {d['class_name']:12s}  x={x1:<4d} y={y1:<4d} w={w:<4d} h={h:<4d}  conf={d['confidence']:.2f}")
+            # JPEG 압축 후 웹 스트리밍 반환
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        # 영상 출력
-        cv2.imshow("B01 Car Detection - YOLOv8s", frame)
+    @app.route('/')
+    def index():
+        return """
+        <html>
+            <head><title>Jetson Car Detection</title></head>
+            <body style="background-color: #222; color: white; text-align: center;">
+                <h2>Jetson Orin Nano - Car Detection (YOLOv8s)</h2>
+                <img src="/video_feed" width="640" height="480">
+            </body>
+        </html>
+        """
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("\n[INFO] 사용자에 의해 종료되었습니다.")
-            break
+    @app.route('/video_feed')
+    def video_feed():
+        return Response(generate_frames_with_detection(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-    # 자원 해제
-    cap.release()
-    cv2.destroyAllWindows()
+    print("\n[INFO] Flask 웹 서버를 시작합니다. http://젯슨IP:5000/ 으로 접속하세요.")
+    app.run(host='0.0.0.0', port=5000, debug=False)
