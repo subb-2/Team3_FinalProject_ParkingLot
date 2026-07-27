@@ -1,4 +1,4 @@
-`timescale 1ns / 1ps `timescale 1ns / 1ps
+`timescale 1ns / 1ps
 
 module BRAM_WEIGHT1 #(
     parameter DEPTH    = 150,
