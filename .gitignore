@@ -22,3 +22,15 @@ Desktop.ini
 *.runs
 *.Xil
 *.ip_user_files
+
+# Document files
+*.hwp
+*.hwpx
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.pdf
+*.jpg
