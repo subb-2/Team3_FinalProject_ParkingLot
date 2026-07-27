@@ -2,7 +2,7 @@ module InfDataController (
     input  logic        clk,
     input  logic        reset,
     input  logic        i_inf_done,
-    input  logic [31:0] i_inf_data,
+    input  logic [15:0] i_inf_data,
     input  logic        i_fifo_full,
     output logic [ 7:0] o_data,
     output logic        o_push
@@ -33,7 +33,7 @@ module InfDataController (
         case(state)
             IDLE: if(i_inf_done)   n_state = POS0;
             POS0: if(!i_fifo_full) n_state = POS1;
-            POS1: if(!i_fifo_full) n_state = POS2;
+            POS1: if(!i_fifo_full) n_state = DONE;
             POS2: if(!i_fifo_full) n_state = POS3;
             POS3: if(!i_fifo_full) n_state = DONE;
             DONE:                  n_state = IDLE;

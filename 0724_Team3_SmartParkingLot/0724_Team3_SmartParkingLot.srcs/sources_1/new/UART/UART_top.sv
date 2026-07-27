@@ -2,7 +2,7 @@ module UART_top(
     input  logic        clk,
     input  logic        reset,
     input  logic        i_inf_done,
-    input  logic [31:0] i_inf_data,
+    input  logic [16:0] i_inf_data,
     output logic        o_tx
 );
 
