@@ -9,6 +9,22 @@ from flask import Flask, Response
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.B00_camera_input import get_camera
 
+# ---------------------------------------------------------
+# 설정 (Configuration)
+# ---------------------------------------------------------
+CONFIG = {
+    # 모델 추론 설정
+    "MODEL_PATH": "yolov8s.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
+    "CONF_THRESH": 0.5,             # Confidence 임계값
+    "IOU_THRESH": 0.45,             # NMS IoU 임계값
+    "IMGSZ": 1280,                  # YOLO 추론 해상도 (기본 640 -> 1280으로 상향)
+
+    # 카메라 설정
+    "CAM_WIDTH": 1280,              # 카메라 가로 해상도 (기본 640 -> 1280으로 상향)
+    "CAM_HEIGHT": 720,              # 카메라 세로 해상도 (기본 480 -> 720으로 상향)
+    "CAM_FPS": 30                   # 카메라 프레임레이트
+}
+
 # COCO 데이터셋 기준 차량 관련 클래스 ID
 # 2: car, 3: motorcycle, 5: bus, 7: truck
 VEHICLE_CLASS_IDS = {2, 3, 5, 7}
@@ -31,19 +47,21 @@ class CarDetector:
     검출 전용이며, 추적(Tracking)은 포함하지 않음.
     """
 
-    def __init__(self, model_path='yolov8s.pt', conf=0.5, iou=0.45):
+    def __init__(self, model_path='yolov8s.engine', conf=0.5, iou=0.45, imgsz=1280):
         """
         CarDetector 초기화.
         
         Args:
-            model_path: YOLOv8 모델 파일 경로 (기본값: yolov8s.pt, 첫 실행 시 자동 다운로드)
-            conf:       Confidence 임계값 (기본값: 0.5)
-            iou:        NMS IoU 임계값 (기본값: 0.45)
+            model_path: YOLOv8 모델 파일 경로
+            conf:       Confidence 임계값
+            iou:        NMS IoU 임계값
+            imgsz:      추론 해상도 (입력 크기)
         """
         print(f"[INFO] YOLOv8s 모델을 로드합니다... ({model_path})")
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, task='detect')
         self.conf = conf
         self.iou = iou
+        self.imgsz = imgsz
         print("[INFO] 모델 로드 완료.")
 
     def detect(self, frame):
@@ -67,7 +85,7 @@ class CarDetector:
         """
 
         # YOLO 추론 실행
-        results = self.model(frame, conf=self.conf, iou=self.iou, verbose=False)
+        results = self.model(frame, conf=self.conf, iou=self.iou, imgsz=self.imgsz, verbose=False)
 
         detections = []
         for result in results:
@@ -140,15 +158,20 @@ if __name__ == '__main__':
     print("==========================================")
 
     # 카메라 열기 (B00_camera_input 모듈 활용)
-    print("[INFO] B00_camera_input 모듈을 통해 카메라를 엽니다...")
-    cap = get_camera(sensor_id=0, width=640, height=480, framerate=30)
+    print(f"[INFO] B00_camera_input 모듈을 통해 카메라를 엽니다... ({CONFIG['CAM_WIDTH']}x{CONFIG['CAM_HEIGHT']})")
+    cap = get_camera(sensor_id=0, width=CONFIG['CAM_WIDTH'], height=CONFIG['CAM_HEIGHT'], framerate=CONFIG['CAM_FPS'])
 
     if not cap.isOpened():
         print("[ERROR] 카메라를 열 수 없습니다. 연결 상태를 확인하세요.")
         sys.exit(1)
 
     # 검출기 초기화
-    detector = CarDetector(model_path='yolov8s.pt', conf=0.5, iou=0.45)
+    detector = CarDetector(
+        model_path=CONFIG['MODEL_PATH'],
+        conf=CONFIG['CONF_THRESH'],
+        iou=CONFIG['IOU_THRESH'],
+        imgsz=CONFIG['IMGSZ']
+    )
 
     app = Flask(__name__)
 
@@ -192,12 +215,12 @@ if __name__ == '__main__':
 
     @app.route('/')
     def index():
-        return """
+        return f"""
         <html>
             <head><title>Jetson Car Detection</title></head>
             <body style="background-color: #222; color: white; text-align: center;">
                 <h2>Jetson Orin Nano - Car Detection (YOLOv8s)</h2>
-                <img src="/video_feed" width="640" height="480">
+                <img src="/video_feed" width="{CONFIG['CAM_WIDTH']}" height="{CONFIG['CAM_HEIGHT']}">
             </body>
         </html>
         """
