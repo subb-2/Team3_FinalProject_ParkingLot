@@ -17,9 +17,17 @@ from logic.B01_car_detection import VEHICLE_CLASS_NAMES
 # 설정 (Configuration)
 # 이 모듈은 '추적'만 담당한다. 검출 관련 설정(모델 경로, conf, imgsz 등)은
 # B01_car_detection.py의 CONFIG에서 관리.
+
+# 프로젝트 전용 ByteTrack 설정 파일 경로.
+# ultralytics 내장 파일을 쓰면 패키지 재설치 시 설정이 날아가므로
+# python_code/config/ 아래에 복사해 두고 그것을 사용한다.
+TRACKER_CFG_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'config', 'bytetrack.yaml')
+)
+
 CONFIG = {
-    # ByteTrack 설정
-    "TRACKER_CFG": "bytetrack.yaml", # ByteTrack 설정 파일 (ultralytics 내장)
+    # ByteTrack 설정 (세부 파라미터는 config/bytetrack.yaml 참고)
+    "TRACKER_CFG": TRACKER_CFG_PATH,
 
     # 추적 <-> 차량번호 매칭 설정
     "MIN_HITS_FOR_ASSIGN": 3,       # 이 프레임 수 이상 연속 추적되어야 차량번호를 부여 (오검출 방지)

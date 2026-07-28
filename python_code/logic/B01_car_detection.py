@@ -13,7 +13,14 @@ from logic.B00_camera_input import get_camera
 CONFIG = {
     # 모델 추론 설정
     "MODEL_PATH": "yolov8s.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
-    "CONF_THRESH": 0.25,             # Confidence 임계값
+
+    # Confidence 임계값을 일부러 낮게 둔다.
+    # ByteTrack은 신뢰도가 낮은 박스를 2차로 재매칭해서 끊긴 추적을 살리는데,
+    # 여기서 미리 걸러버리면 그 박스가 추적기까지 오지 못해 기능이 죽는다.
+    # 실제 필터링은 config/bytetrack.yaml의 track_high_thresh(0.4)가 담당한다.
+    # 주의: 이 값 때문에 B01 단독 실행 화면에는 약한 박스가 많이 보인다.
+    #       파이프라인(C_main)에서는 추적을 통과한 결과만 표시되므로 문제없다.
+    "CONF_THRESH": 0.05,            # Confidence 임계값
     "IOU_THRESH": 0.45,             # NMS IoU 임계값
     "IMGSZ": 640,                  # YOLO 추론 해상도 (기본 640 -> 1280으로 상향)
 
