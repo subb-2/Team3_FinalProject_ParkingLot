@@ -8,7 +8,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from logic.A01_parking_manager import handle_car_entry, remove_car
-from logic.B03_car_mot import enqueue_car_number
+from logic.B02_car_mot import enqueue_car_number
 
 def get_uart_config():
     """
