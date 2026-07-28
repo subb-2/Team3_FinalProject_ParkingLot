@@ -15,7 +15,10 @@ from logic.B02_car_mot import (
     car_number_fifo, enqueue_car_number, simulate_uart_rx
 )
 from logic.C00_navigation import (
-    MarkerMapper, ParkingNavigator, CONFIG as C00_CONFIG
+    MarkerMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE_WORLD_POS
+)
+from logic.C01_path_planner import (
+    ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
 )
 
 # 설정 (Configuration)
@@ -276,8 +279,20 @@ def build_pipeline(cap):
         uturn_threshold=C00_CONFIG['UTURN_ANGLE_THRESHOLD_DEG'],
         min_move_for_heading=C00_CONFIG['MIN_MOVE_CM_FOR_HEADING'],
         heading_window=C00_CONFIG['HEADING_WINDOW'],
-        history_maxlen=C00_CONFIG['HISTORY_MAXLEN']
+        history_maxlen=C00_CONFIG['HISTORY_MAXLEN'],
+        replan_tolerance=C01_CONFIG['REPLAN_TOLERANCE_CM']
     )
+
+    # C01 : 경로 계획기 (주차 구역을 장애물로 두고 통로를 따라 경로 생성)
+    lot_map = ParkingLotMap(
+        navigator.spot_world_pos, GATE_WORLD_POS,
+        resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
+        spot_w=C01_CONFIG['SPOT_W_CM'],
+        spot_h=C01_CONFIG['SPOT_H_CM'],
+        clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
+        lot_margin=C01_CONFIG['LOT_MARGIN_CM'],
+    )
+    navigator.planner = RoutePlanner(lot_map, simplify=C01_CONFIG['SIMPLIFY_PATH'])
 
     return ParkingNavigationPipeline(cap, detector, mot, navigator)
 
@@ -315,6 +330,8 @@ def build_status(pipeline):
                 "target_spot": n["target_spot"],
                 "distance_cm": round(n["distance_cm"], 1) if n["distance_cm"] is not None else None,
                 "guide": n["guide"],
+                "route": [[round(p[0], 1), round(p[1], 1)] for p in n["route"]] if n.get("route") else None,
+                "route_index": n.get("route_index"),
             }
             for n in pipeline.latest_nav
         ],

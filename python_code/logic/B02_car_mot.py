@@ -176,9 +176,8 @@ class CarMOT:
          추적되면, FIFO에서 가장 앞 번호를 꺼내(pop) 해당 트랙에 매칭한다.
       4. 이후 그 Track ID는 계속 같은 차량 번호로 추적된다.
 
-    참고: 추적이 완전히 끊긴 뒤 같은 차량이 새로운 Track ID로 다시
-    잡히면 FIFO의 다음 번호를 소비하게 된다. ByteTrack의 track_buffer와
-    LOST_TTL_FRAMES가 짧은 가려짐(Occlusion) 구간을 보완한다.
+    참고: 추적이 완전히 끊긴 뒤 같은 차량이 새로운 Track ID로 다시 잡히면 FIFO의 다음 번호를 소비. 
+    ByteTrack의 track_buffer와 LOST_TTL_FRAMES가 짧은 가려짐(Occlusion) 구간을 보완.
     """
 
     def __init__(self, tracker_cfg='bytetrack.yaml',
@@ -193,6 +192,7 @@ class CarMOT:
             trajectory_maxlen: 트랙별 궤적 저장 최대 길이
             fifo:              사용할 CarNumberFIFO 인스턴스 (None이면 모듈 전역 큐 사용)
         """
+
         print(f"[INFO] ByteTrack 추적기를 초기화합니다... ({tracker_cfg})")
         cfg = IterableSimpleNamespace(**YAML.load(check_yaml(tracker_cfg)))
         self.tracker = BYTETracker(cfg)
@@ -286,7 +286,7 @@ class CarMOT:
         """
         FIFO에서 가장 먼저 들어온 차량 번호를 꺼내 트랙에 부여.
         큐가 비어있으면(UART 수신이 아직 늦은 경우) 부여하지 않고
-        다음 프레임에 다시 시도한다.
+        다음 프레임에 다시 시도.
         """
         car_id = self.fifo.pop()
         if car_id is None:

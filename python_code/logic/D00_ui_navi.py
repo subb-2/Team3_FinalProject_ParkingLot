@@ -265,7 +265,12 @@ class NavigationMapUI:
                         FONT, 0.45, label_color, 1, cv2.LINE_AA)
 
     def _draw_guide_lines(self, canvas, nav_results):
-        """차량에서 목표 구역까지의 안내선을 그린다."""
+        """
+        차량에서 목표 구역까지의 주행 경로를 그린다.
+
+        직선이 아니라 C01_path_planner가 계산한 경유점을 따라 그리므로,
+        주차 구역을 가로지르지 않고 통로를 따라가는 실제 경로가 보인다.
+        """
         for nav in nav_results:
             if nav.get("target_world") is None:
                 continue
@@ -278,12 +283,27 @@ class NavigationMapUI:
                 cv2.circle(canvas, end, 16, COLOR_ARRIVED, 2)
                 continue
 
-            cv2.arrowedLine(canvas, start, end, COLOR_GUIDE_LINE, 2, tipLength=0.06)
+            route = nav.get("route")
+            if route and len(route) >= 2:
+                # 현재 위치에서 남은 경유점까지만 이어서 그린다
+                idx = min(nav.get("route_index", 1), len(route) - 1)
+                pts = [start] + [self.world_to_map(p) for p in route[idx:]]
+                for a, b in zip(pts[:-1], pts[1:]):
+                    cv2.line(canvas, a, b, COLOR_GUIDE_LINE, 2, cv2.LINE_AA)
+                # 경유점 표시 (목적지 제외)
+                for p in pts[1:-1]:
+                    cv2.circle(canvas, p, 4, COLOR_GUIDE_LINE, -1)
+                cv2.arrowedLine(canvas, pts[-2], pts[-1],
+                                COLOR_GUIDE_LINE, 2, tipLength=0.25)
+                mid = pts[len(pts) // 2]
+            else:
+                # 경로를 찾지 못한 경우에만 직선으로 대체
+                cv2.arrowedLine(canvas, start, end, COLOR_GUIDE_LINE, 2, tipLength=0.06)
+                mid = ((start[0] + end[0]) // 2, (start[1] + end[1]) // 2)
 
-            # 안내선 중앙에 남은 거리 표시
+            # 남은 거리 표시 (경로를 따라간 거리)
             if nav.get("distance_cm") is not None:
-                mx, my = (start[0] + end[0]) // 2, (start[1] + end[1]) // 2
-                cv2.putText(canvas, f"{nav['distance_cm']:.0f}cm", (mx + 6, my - 6),
+                cv2.putText(canvas, f"{nav['distance_cm']:.0f}cm", (mid[0] + 6, mid[1] - 6),
                             FONT, 0.45, COLOR_GUIDE_LINE, 1, cv2.LINE_AA)
 
     def _draw_trajectories(self, canvas, nav_results):

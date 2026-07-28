@@ -8,6 +8,7 @@ from collections import deque
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from logic.C01_path_planner import route_length, distance_to_route
 
 # 설정 (Configuration)
 # 이 모듈은 '위치 추정 및 경로 안내'만 담당.
@@ -369,19 +370,24 @@ class ParkingNavigator:
     B02_car_mot의 추적 결과를 받아 각 차량의 실시간 실좌표를 계산하고,
     배정된 주차 구역까지의 경로를 안내한다.
 
-    이 클래스는 검출/추적을 하지 않는다. B02가 만든 트랙(track)의
-    박스 정중앙점을 입력으로 받아 위치 추정과 안내만 수행한다.
+    이 클래스는 검출/추적/경로계산을 직접 하지 않는다. B02가 만든 트랙의
+    박스 정중앙점을 입력으로 받고, 경로는 C01_path_planner에 맡긴다.
 
     동작 흐름:
       1. MarkerMapper가 ArUco 마커로 호모그래피를 계산한다.
       2. 각 차량의 박스 정중앙점을 실좌표(cm)로 변환한다.
-      3. 위치 이력으로 진행 방향(heading)을 추정한다.
-      4. 목표 주차 구역까지의 방위각과 비교해 좌/우/직진/도착을 안내한다.
+      3. A01_parking_manager가 배정한 주차 구역까지의 경로를
+         C01_path_planner로 계산한다. (주차 구역을 뚫지 않고 통로를 따라감)
+      4. 위치 이력으로 진행 방향(heading)을 추정한다.
+      5. 목적지가 아니라 '다음 경유점' 방향과 비교해 안내한다.
+         목적지 직선 방향으로 안내하면 주차 구역을 가로지르라는 잘못된
+         안내가 되므로, 반드시 경로를 따라 앞서 안내해야 한다.
     """
 
     def __init__(self, mapper=None, marker_to_spot=None,
                  arrival_threshold=15.0, turn_threshold=25.0, uturn_threshold=150.0,
-                 min_move_for_heading=3.0, heading_window=5, history_maxlen=128):
+                 min_move_for_heading=3.0, heading_window=5, history_maxlen=128,
+                 planner=None, waypoint_radius=12.0, replan_tolerance=25.0):
         """
         ParkingNavigator 초기화.
 
@@ -394,6 +400,10 @@ class ParkingNavigator:
             min_move_for_heading: 진행 방향 계산에 필요한 최소 이동 거리 (cm)
             heading_window:       진행 방향 계산에 쓸 최근 위치 개수
             history_maxlen:       차량별 위치 이력 최대 길이
+            planner:              C01_path_planner.RoutePlanner 인스턴스
+                                  (None이면 등록된 주차 구역으로 기본 생성)
+            waypoint_radius:      경유점을 통과한 것으로 볼 거리 (cm)
+            replan_tolerance:     경로에서 이만큼 벗어나면 재계획 (cm)
         """
         self.mapper = mapper if mapper is not None else MarkerMapper()
         self.marker_to_spot = marker_to_spot or MARKER_TO_SPOT
@@ -404,6 +414,8 @@ class ParkingNavigator:
         self.min_move_for_heading = min_move_for_heading
         self.heading_window = heading_window
         self.history_maxlen = history_maxlen
+        self.waypoint_radius = waypoint_radius
+        self.replan_tolerance = replan_tolerance
 
         # 주차 구역 ID -> 실좌표 (cm). 마커 위치로부터 생성.
         self.spot_world_pos = {}
@@ -412,14 +424,35 @@ class ParkingNavigator:
             if world_pt is not None:
                 self.spot_world_pos[spot_id] = world_pt
 
+        # 경로 계획기 (C01). 주차 구역을 장애물로 두고 통로를 따라 경로를 만든다.
+        self.planner = planner if planner is not None else self._build_default_planner()
+
         # 차량번호 -> 실좌표 이력 deque([(x_cm, y_cm), ...])
         self.world_history = {}
         # 차량번호 -> 목표 주차 구역 ID
         self.targets = {}
+        # 차량번호 -> 경로 상태 {"waypoints": [...], "index": int, "spot": 구역ID}
+        self.routes = {}
         # 가장 최근 프레임에서 검출된 마커 {마커ID: (cx, cy)} (시각화 재사용용)
         self.latest_markers = {}
 
         print(f"[INFO] 내비게이터 초기화 완료. (주차 구역 {len(self.spot_world_pos)}개 등록)")
+
+    def _build_default_planner(self):
+        """등록된 주차 구역 배치로 기본 경로 계획기를 생성."""
+        from logic.C01_path_planner import (
+            ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
+        )
+
+        lot_map = ParkingLotMap(
+            self.spot_world_pos, GATE_WORLD_POS,
+            resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
+            spot_w=C01_CONFIG['SPOT_W_CM'],
+            spot_h=C01_CONFIG['SPOT_H_CM'],
+            clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
+            lot_margin=C01_CONFIG['LOT_MARGIN_CM'],
+        )
+        return RoutePlanner(lot_map, simplify=C01_CONFIG['SIMPLIFY_PATH'])
 
     def set_target(self, car_id, spot_id):
         """
@@ -436,6 +469,8 @@ class ParkingNavigator:
             return False
 
         self.targets[car_id] = spot_id
+        # 목표가 바뀌었으므로 기존 경로는 폐기. 다음 프레임에 다시 계획된다.
+        self.routes.pop(car_id, None)
         print(f"[안내] 차량 '{car_id}' 목표 구역 설정: {spot_id}")
         return True
 
@@ -470,10 +505,13 @@ class ParkingNavigator:
                     "heading_deg": 92.5,            # 진행 방향 (없으면 None)
                     "target_spot": "A-1",           # 목표 구역 (없으면 None)
                     "target_world": (0.0, 0.0),     # 목표 실좌표 (없으면 None)
-                    "distance_cm": 45.2,            # 목표까지 남은 거리
+                    "distance_cm": 45.2,            # 경로를 따라 남은 거리
                     "guide": "LEFT",                # 안내 방향 상수
                     "guide_text": "좌회전",          # 한글 안내
                     "nearest_spot": "A-2",          # 현재 가장 가까운 구역
+                    "route": [(x, y), ...],         # 목적지까지의 경유점 (없으면 None)
+                    "route_index": 1,               # 현재 향하고 있는 경유점 번호
+                    "next_waypoint": (x, y),        # 다음 경유점 (없으면 None)
                 },
                 ...
             ]
@@ -509,9 +547,27 @@ class ParkingNavigator:
 
             distance = None
             guide = GUIDE_UNKNOWN
-            if target_world is not None:
-                distance = self._distance(world_pos, target_world)
-                guide = self._compute_guide(world_pos, heading, target_world, distance)
+            route = None
+            route_index = 0
+            next_waypoint = None
+
+            if target_spot and target_world is not None:
+                # 경로를 확보하고 통과한 경유점을 넘긴다
+                state = self._ensure_route(car_id, world_pos, target_spot)
+                if state is not None:
+                    route = state["waypoints"]
+                    route_index = state["index"]
+                    next_waypoint = route[route_index] if route_index < len(route) else None
+                    distance = route_length(route, route_index, world_pos)
+                else:
+                    # 경로를 찾지 못한 경우에도 직선 거리는 알려준다
+                    distance = self._distance(world_pos, target_world)
+
+                # 안내는 목적지가 아니라 '다음 경유점' 기준으로 한다.
+                # 목적지 직선 방향으로 안내하면 주차 구역을 가로지르게 된다.
+                aim = next_waypoint if next_waypoint is not None else target_world
+                remaining = self._distance(world_pos, target_world)
+                guide = self._compute_guide(world_pos, heading, aim, remaining)
 
             results.append({
                 "track_id": trk["track_id"],
@@ -522,12 +578,68 @@ class ParkingNavigator:
                 "target_spot": target_spot,
                 "target_world": target_world,
                 "distance_cm": distance,
+                "route": route,
+                "route_index": route_index,
+                "next_waypoint": next_waypoint,
                 "guide": guide,
                 "guide_text": GUIDE_TEXT_KO.get(guide, guide),
                 "nearest_spot": self.find_nearest_spot(world_pos),
             })
 
         return results
+
+    def _ensure_route(self, car_id, world_pos, target_spot):
+        """
+        차량의 경로를 확보하고 진행 상태를 갱신.
+
+        아래 경우에 경로를 다시 계획한다.
+          - 아직 경로가 없을 때
+          - 목표 구역이 바뀌었을 때
+          - 차량이 경로에서 replan_tolerance 이상 벗어났을 때
+            (안내를 무시하고 다른 길로 갔거나 위치 추정이 튄 경우)
+
+        Returns:
+            경로 상태 딕셔너리. 경로를 찾지 못하면 None.
+        """
+        state = self.routes.get(car_id)
+
+        need_replan = (
+            state is None
+            or state["spot"] != target_spot
+            or distance_to_route(state["waypoints"], world_pos,
+                                 state["index"]) > self.replan_tolerance
+        )
+
+        if need_replan:
+            waypoints = self.planner.plan(world_pos, target_spot)
+            if waypoints is None:
+                if state is not None:
+                    self.routes.pop(car_id, None)
+                return None
+            # 첫 경유점은 현재 위치이므로 다음 지점부터 향한다
+            state = {"waypoints": waypoints, "index": min(1, len(waypoints) - 1),
+                     "spot": target_spot}
+            self.routes[car_id] = state
+
+        self._advance_waypoint(state, world_pos)
+        return state
+
+    def _advance_waypoint(self, state, world_pos):
+        """
+        경유점에 충분히 가까워졌으면 다음 경유점으로 넘어간다.
+        마지막 경유점(목적지)은 도착 판정에 쓰이므로 넘기지 않는다.
+        """
+        waypoints = state["waypoints"]
+        while state["index"] < len(waypoints) - 1:
+            wp = waypoints[state["index"]]
+            if self._distance(world_pos, wp) > self.waypoint_radius:
+                break
+            state["index"] += 1
+
+    def get_route(self, car_id):
+        """차량의 현재 경로 경유점 리스트를 반환. 없으면 None."""
+        state = self.routes.get(car_id)
+        return list(state["waypoints"]) if state else None
 
     def _compute_heading(self, history):
         """
@@ -610,9 +722,10 @@ class ParkingNavigator:
         return list(self.world_history.get(car_id, []))
 
     def clear_vehicle(self, car_id):
-        """출차 등으로 추적이 끝난 차량의 이력과 목표를 제거."""
+        """출차 등으로 추적이 끝난 차량의 이력과 목표, 경로를 제거."""
         self.world_history.pop(car_id, None)
         self.targets.pop(car_id, None)
+        self.routes.pop(car_id, None)
 
     def draw_navigation(self, frame, nav_results, draw_target_line=True):
         """
@@ -637,10 +750,26 @@ class ParkingNavigator:
             if not draw_target_line or nav["target_world"] is None:
                 continue
 
-            # 목표 지점까지 안내선
+            # 경로를 따라 안내선을 그린다. (목적지 직선이 아니라 실제 주행 경로)
+            route = nav.get("route")
+            if route:
+                pts = [self.mapper.world_to_image(p) for p in route]
+                pts = [p for p in pts if p is not None]
+                # 남은 구간만 강조하기 위해 현재 위치에서 이어서 그린다
+                if len(pts) >= 2:
+                    idx = min(nav.get("route_index", 1), len(pts) - 1)
+                    remaining = [(cx, cy)] + pts[idx:]
+                    for a, b in zip(remaining[:-1], remaining[1:]):
+                        cv2.line(frame, a, b, COLOR_PATH, 2, cv2.LINE_AA)
+                    for p in pts[idx:-1]:
+                        cv2.circle(frame, p, 4, COLOR_PATH, -1)
+                    cv2.arrowedLine(frame, remaining[-2], remaining[-1],
+                                    COLOR_PATH, 2, tipLength=0.15)
+
             target_img = self.mapper.world_to_image(nav["target_world"])
             if target_img is not None:
-                cv2.arrowedLine(frame, (cx, cy), target_img, COLOR_PATH, 2, tipLength=0.05)
+                if not route:
+                    cv2.arrowedLine(frame, (cx, cy), target_img, COLOR_PATH, 2, tipLength=0.05)
                 cv2.circle(frame, target_img, 8, COLOR_TARGET, 2)
 
             # 안내 문구 (한글은 OpenCV에서 렌더링되지 않으므로 영문 상수 사용)
