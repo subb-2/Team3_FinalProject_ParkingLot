@@ -9,9 +9,7 @@ from flask import Flask, Response
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.B00_camera_input import get_camera
 
-# ---------------------------------------------------------
 # 설정 (Configuration)
-# ---------------------------------------------------------
 CONFIG = {
     # 모델 추론 설정
     "MODEL_PATH": "yolov8s.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
