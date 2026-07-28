@@ -16,7 +16,7 @@ from logic.B01_car_detection import VEHICLE_CLASS_NAMES
 
 # 설정 (Configuration)
 # 이 모듈은 '추적'만 담당한다. 검출 관련 설정(모델 경로, conf, imgsz 등)은
-# B01_car_detection.py의 CONFIG에서 관리한다.
+# B01_car_detection.py의 CONFIG에서 관리.
 CONFIG = {
     # ByteTrack 설정
     "TRACKER_CFG": "bytetrack.yaml", # ByteTrack 설정 파일 (ultralytics 내장)
@@ -104,7 +104,6 @@ class CarNumberFIFO:
         """큐를 비움."""
         with self._lock:
             self._queue.clear()
-
 
 # 검출 결과 -> ByteTrack 입력 어댑터
 class DetectionResults:

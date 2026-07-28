@@ -111,8 +111,8 @@ class ParkingNavigationPipeline:
     def draw_status(self, frame):
         """FPS, 추적 대수, FIFO 대기 수, 호모그래피 상태를 프레임에 표시."""
         matched = sum(1 for t in self.latest_tracks if t["car_id"])
-        ready = self.navigator.mapper.is_ready()
-        calib = self.navigator.mapper.calibrated_with
+        mapper = self.navigator.mapper
+        ready = mapper.is_ready()
 
         cv2.putText(frame, f"FPS: {self.fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
@@ -121,13 +121,19 @@ class ParkingNavigationPipeline:
         cv2.putText(frame, f"FIFO Waiting: {self.mot.fifo.size()}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # 호모그래피가 없으면 좌표 변환이 불가능하므로 눈에 띄게 경고
-        if ready:
-            cv2.putText(frame, f"Homography: OK (markers {calib})", (10, 125),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+        # 호모그래피 상태를 품질까지 함께 표시.
+        # 확정(LOCKED) 전에는 아직 좌표를 신뢰할 수 없다는 뜻이므로 구분해서 보여준다.
+        if not ready:
+            text, color = "Homography: NOT READY (show markers)", (0, 0, 255)
+        elif mapper.locked:
+            text = f"Homography: LOCKED ({mapper.calibrated_with} markers, {mapper.reproj_error:.1f}cm)"
+            color = (0, 255, 0)
         else:
-            cv2.putText(frame, "Homography: NOT READY (show markers)", (10, 125),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+            text = (f"Homography: PROVISIONAL ({mapper.calibrated_with}/{mapper.lock_markers} "
+                    f"markers, {mapper.reproj_error:.1f}cm)")
+            color = (0, 200, 255)
+        cv2.putText(frame, text, (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
         return frame
 
@@ -257,7 +263,11 @@ def build_pipeline(cap):
     mapper = MarkerMapper(
         aruco_dict_name=C00_CONFIG['ARUCO_DICT'],
         min_markers=C00_CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'],
-        lock_homography=C00_CONFIG['LOCK_HOMOGRAPHY']
+        lock_homography=C00_CONFIG['LOCK_HOMOGRAPHY'],
+        lock_markers=C00_CONFIG['MARKERS_FOR_LOCK'],
+        max_error=C00_CONFIG['MAX_REPROJ_ERROR_CM'],
+        min_spread=C00_CONFIG['MIN_MARKER_SPREAD'],
+        ransac_thresh_cm=C00_CONFIG['RANSAC_THRESH_CM']
     )
     navigator = ParkingNavigator(
         mapper=mapper,
@@ -286,9 +296,14 @@ def open_camera():
 
 def build_status(pipeline):
     """현재 추적/내비게이션 상태를 JSON 직렬화 가능한 딕셔너리로 반환."""
+    mapper = pipeline.navigator.mapper
     return {
         "fps": round(pipeline.fps, 1),
-        "homography_ready": pipeline.navigator.mapper.is_ready(),
+        "homography_ready": mapper.is_ready(),
+        "homography_locked": mapper.locked,
+        "homography_markers": mapper.calibrated_with,
+        "homography_error_cm": (round(mapper.reproj_error, 2)
+                                if mapper.is_ready() else None),
         "markers_detected": sorted(pipeline.navigator.latest_markers.keys()),
         "fifo_waiting": car_number_fifo.snapshot(),
         "vehicles": [

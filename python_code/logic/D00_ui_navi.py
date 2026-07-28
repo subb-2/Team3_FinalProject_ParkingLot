@@ -523,9 +523,15 @@ if __name__ == '__main__':
             """
             import time
             while True:
-                ready = pipeline.navigator.mapper.is_ready()
+                mapper = pipeline.navigator.mapper
+                if not mapper.is_ready():
+                    state = "NOT READY"
+                elif mapper.locked:
+                    state = f"LOCKED {mapper.calibrated_with}pt {mapper.reproj_error:.1f}cm"
+                else:
+                    state = f"PROVISIONAL {mapper.calibrated_with}/{mapper.lock_markers}pt"
                 extra = [
-                    f"homography: {'OK' if ready else 'NOT READY'}",
+                    f"homography: {state}",
                     f"markers: {len(pipeline.navigator.latest_markers)}",
                     f"fifo: {car_number_fifo.size()} waiting",
                 ]

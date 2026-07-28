@@ -16,12 +16,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 CONFIG = {
     # ArUco 마커 설정
     "ARUCO_DICT": "DICT_4X4_50",    # 마커 사전 (실제 출력한 마커와 일치해야 함)
-    "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산에 필요한 최소 마커 수
+    "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
     # 카메라가 고정 설치된 경우 True 권장.
-    # 한 번 계산한 호모그래피를 계속 재사용하므로, 차량이 마커를 가려도
-    # 위치 추정이 끊기지 않는다. 카메라가 움직이면 False로 둘 것.
+    # 품질 기준을 만족한 호모그래피를 고정해 계속 재사용하므로,
+    # 차량이 마커를 가려도 위치 추정이 끊기지 않는다.
+    # 카메라가 움직이면 False로 둘 것.
     "LOCK_HOMOGRAPHY": True,
+
+    # 호모그래피 품질 기준
+    # 마커가 정확히 4개면 대응이 틀려 있어도 그 4점에는 항상 오차 0으로
+    # 맞춰지므로 검증이 불가능하다. 따라서 최소 개수로 성급히 고정하지 않고,
+    # 아래 개수 이상이 보일 때만 확정한다.
+    "MARKERS_FOR_LOCK": 6,          # 이 개수 이상 보일 때만 호모그래피를 확정
+    "MAX_REPROJ_ERROR_CM": 5.0,     # 평균 재투영 오차가 이보다 크면 채택하지 않음
+    "MIN_MARKER_SPREAD": 0.02,      # 마커가 한 줄에 몰려 있으면 거부 (0에 가까울수록 일직선)
+    "RANSAC_THRESH_CM": 5.0,        # RANSAC 이상치 판정 임계값 (실좌표 cm 기준)
 
     # 내비게이션 판정 기준
     "ARRIVAL_THRESHOLD_CM": 15.0,   # 목표 지점 이 거리 이내면 '도착'으로 판정
@@ -35,28 +45,30 @@ CONFIG = {
 # =====================================================================
 # 마커 ID -> 주차장 실제 좌표 (cm)
 # =====================================================================
-# 주의: 아래 값은 navi.png의 마커 배치(상단 5,6,7,8 / 하단 1,2,3,4)를 기준으로 한
-#       '초기 추정값'이다. 반드시 실제 주차장(또는 목업)을 자로 측정해서 수정할 것.
-#       이 값이 부정확하면 차량 위치도 그대로 부정확해진다.
+# 주의: 마커 ID와 좌표의 대응이 실제 배치와 다르면, 호모그래피 오차는 작게
+#       나오면서도(자기 자신과는 일관되므로) 화면에 표시되는 좌우가 뒤집힌다.
+#       마커를 재배치하면 이 표를 반드시 함께 고쳐야 한다.
+#       거리(30cm, 60cm)도 실제 목업을 자로 측정해서 수정할 것.
 #
-# 좌표계: 왼쪽 상단 마커(ID 5)를 원점 (0, 0)으로 하고,
+# 좌표계: 왼쪽 상단 마커(ID 8)를 원점 (0, 0)으로 하고,
 #         x축은 오른쪽 방향(+), y축은 아래쪽 방향(+). 단위는 cm.
 #
+# 실제 배치 (test.mp4 기준. 카메라에서 본 왼쪽 -> 오른쪽 순서):
 #   (0,0)   (30,0)  (60,0)  (90,0)
-#     [5]     [6]     [7]     [8]      <- 상단
+#     [8]     [7]     [6]     [5]      <- 윗줄 (A 구역)
 #
-#     [1]     [2]     [3]     [4]      <- 하단
+#     [4]     [3]     [2]     [1]      <- 아랫줄 (B 구역)
 #   (0,60)  (30,60) (60,60) (90,60)
 MARKER_WORLD_POS = {
-    5: (0.0,  0.0),
-    6: (30.0, 0.0),
-    7: (60.0, 0.0),
-    8: (90.0, 0.0),
+    8: (0.0,  0.0),
+    7: (30.0, 0.0),
+    6: (60.0, 0.0),
+    5: (90.0, 0.0),
 
-    1: (0.0,  60.0),
-    2: (30.0, 60.0),
-    3: (60.0, 60.0),
-    4: (90.0, 60.0),
+    4: (0.0,  60.0),
+    3: (30.0, 60.0),
+    2: (60.0, 60.0),
+    1: (90.0, 60.0),
 }
 
 # 마커 ID -> 주차 구역 ID
@@ -107,15 +119,20 @@ class MarkerMapper:
     """
 
     def __init__(self, aruco_dict_name='DICT_4X4_50', marker_world_pos=None,
-                 min_markers=4, lock_homography=True):
+                 min_markers=4, lock_homography=True, lock_markers=6,
+                 max_error=5.0, min_spread=0.02, ransac_thresh_cm=5.0):
         """
         MarkerMapper 초기화.
 
         Args:
             aruco_dict_name:  ArUco 사전 이름 (예: 'DICT_4X4_50')
             marker_world_pos: {마커ID: (x_cm, y_cm)} 형태의 실좌표 매핑
-            min_markers:      호모그래피 계산에 필요한 최소 마커 수
-            lock_homography:  True면 최초 계산된 호모그래피를 고정 사용
+            min_markers:      호모그래피 계산을 시도할 최소 마커 수
+            lock_homography:  True면 품질 기준 충족 시 호모그래피를 고정
+            lock_markers:     고정을 확정하기 위해 필요한 마커 수
+            max_error:        허용할 최대 평균 재투영 오차 (cm)
+            min_spread:       마커 배치의 최소 퍼짐 정도 (일직선 배치 거부)
+            ransac_thresh_cm: RANSAC 이상치 판정 임계값 (cm, 실좌표 기준)
         """
         dict_id = getattr(aruco, aruco_dict_name)
         self.detector = aruco.ArucoDetector(
@@ -125,12 +142,19 @@ class MarkerMapper:
         self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
         self.min_markers = min_markers
         self.lock_homography = lock_homography
+        self.lock_markers = max(lock_markers, min_markers)
+        self.max_error = max_error
+        self.min_spread = min_spread
+        self.ransac_thresh_cm = ransac_thresh_cm
 
         # 이미지 -> 실좌표 변환 행렬 및 그 역행렬
         self.H = None
         self.H_inv = None
-        # 호모그래피 계산에 사용된 마커 개수 (품질 확인용)
-        self.calibrated_with = 0
+        # 현재 호모그래피의 품질 지표
+        self.calibrated_with = 0      # 계산에 사용된 마커 개수
+        self.reproj_error = float('inf')  # 평균 재투영 오차 (cm)
+        self.locked = False           # 품질 기준을 만족해 고정되었는지
+        self._warned = set()          # 중복 경고 억제용
 
         print(f"[INFO] ArUco 마커 검출기 초기화 완료. ({aruco_dict_name}, "
               f"등록된 마커 {len(self.marker_world_pos)}개)")
@@ -158,9 +182,46 @@ class MarkerMapper:
 
         return found
 
+    @staticmethod
+    def _spread_ratio(points):
+        """
+        점들이 얼마나 넓게 퍼져 있는지(일직선에 가깝지 않은지) 측정.
+
+        공분산 행렬의 최소/최대 고윳값 비율을 반환한다. 0에 가까울수록
+        한 줄에 몰려 있다는 뜻이며, 그런 배치로 만든 호모그래피는 그 줄에서
+        떨어진 지점의 좌표가 폭주한다.
+        """
+        p = np.asarray(points, dtype=np.float64)
+        centered = p - p.mean(axis=0)
+        eig = np.linalg.eigvalsh(centered.T @ centered)
+        if eig[1] <= 0:
+            return 0.0
+        return float(eig[0] / eig[1])
+
+    def _reprojection_error(self, H, img_pts, world_pts):
+        """
+        주어진 호모그래피로 마커를 실좌표로 되돌렸을 때의 평균 오차(cm).
+
+        주의: 계산에 사용한 점이 정확히 4개면 그 4점은 항상 오차 0으로
+        맞춰지므로, 이 값만으로는 잘못된 대응을 걸러낼 수 없다.
+        그래서 채택 조건에 마커 개수(_lock_markers)를 함께 둔다.
+        """
+        src = np.array(img_pts, dtype=np.float32).reshape(-1, 1, 2)
+        dst = cv2.perspectiveTransform(src, H).reshape(-1, 2)
+        truth = np.array(world_pts, dtype=np.float32)
+        return float(np.mean(np.linalg.norm(dst - truth, axis=1)))
+
     def update_homography(self, markers):
         """
         검출된 마커로 이미지 -> 실좌표 변환 행렬을 계산.
+
+        첫 성공을 그대로 고정하지 않고, 더 많은 마커로 더 정확한 해가
+        나오면 갈아탄다. 충분한 품질(마커 수와 재투영 오차)에 도달했을 때만
+        고정하며, 그 전까지는 매 프레임 다시 시도한다.
+
+        이렇게 하는 이유: 마커가 정확히 4개면 대응이 틀려 있어도 그 4점에는
+        항상 오차 0으로 맞춰진다. 즉 4점 해는 검증 자체가 불가능하므로,
+        최소 개수로 성급히 고정하면 잘못된 좌표계가 영구히 굳어버린다.
 
         Args:
             markers: detect_markers()의 반환 결과 {마커ID: (cx, cy)}
@@ -168,8 +229,9 @@ class MarkerMapper:
         Returns:
             호모그래피가 유효하면 True, 아니면 False.
         """
-        # 이미 고정된 호모그래피가 있으면 재계산하지 않음
-        if self.lock_homography and self.H is not None:
+        # 품질 기준을 만족해 고정된 상태면 재계산하지 않음
+        # (차량이 마커를 가려도 좌표 추정이 끊기지 않도록)
+        if self.locked:
             return True
 
         # 실좌표가 등록된 마커만 사용
@@ -181,23 +243,67 @@ class MarkerMapper:
             img_pts.append(img_pt)
             world_pts.append(world_pt)
 
-        if len(img_pts) < self.min_markers:
+        n = len(img_pts)
+        if n < self.min_markers:
+            return self.H is not None
+
+        # 마커가 한 줄에 몰려 있으면 그 줄 밖의 좌표를 신뢰할 수 없다
+        spread = self._spread_ratio(img_pts)
+        if spread < self.min_spread:
+            self._warn_once("spread",
+                            f"[경고] 마커가 한 줄에 몰려 있어 호모그래피를 건너뜁니다. "
+                            f"(퍼짐 정도 {spread:.4f} < {self.min_spread}) "
+                            f"윗줄과 아랫줄 마커가 함께 보이도록 하세요.")
             return self.H is not None
 
         img_arr = np.array(img_pts, dtype=np.float32)
         world_arr = np.array(world_pts, dtype=np.float32)
 
-        # 마커가 4개를 넘으면 RANSAC으로 이상치를 배제
-        method = cv2.RANSAC if len(img_pts) > 4 else 0
-        H, _ = cv2.findHomography(img_arr, world_arr, method, 5.0)
+        # 마커가 4개를 넘으면 RANSAC으로 이상치(ID 오인식 등)를 배제
+        method = cv2.RANSAC if n > 4 else 0
+        H, _ = cv2.findHomography(img_arr, world_arr, method, self.ransac_thresh_cm)
         if H is None:
             return self.H is not None
 
+        error = self._reprojection_error(H, img_pts, world_pts)
+
+        # 오차가 큰 해는 채택하지 않음 (마커 배치와 등록 좌표가 어긋난 상태)
+        if error > self.max_error:
+            self._warn_once("error",
+                            f"[경고] 호모그래피 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
+                            f"MARKER_WORLD_POS가 실제 마커 배치와 일치하는지 확인하세요.")
+            return self.H is not None
+
+        # 기존 해보다 나을 때만 교체 (마커가 더 많거나, 같은 수면 오차가 더 작을 때)
+        better = (
+            self.H is None
+            or n > self.calibrated_with
+            or (n == self.calibrated_with and error < self.reproj_error)
+        )
+        if not better:
+            return True
+
         self.H = H
         self.H_inv = np.linalg.inv(H)
-        self.calibrated_with = len(img_pts)
-        print(f"[INFO] 호모그래피 계산 완료. (마커 {len(img_pts)}개 사용)")
+        self.calibrated_with = n
+        self.reproj_error = error
+
+        # 품질이 충분하면 고정. 그 전까지는 계속 더 나은 해를 찾는다.
+        if self.lock_homography and n >= self.lock_markers:
+            self.locked = True
+            print(f"[INFO] 호모그래피 확정. (마커 {n}개, 평균 오차 {error:.2f}cm)")
+        else:
+            need = self.lock_markers if self.lock_homography else n
+            print(f"[INFO] 호모그래피 갱신. (마커 {n}개, 평균 오차 {error:.2f}cm) "
+                  f"- 마커 {need}개 이상 보이면 확정합니다.")
         return True
+
+    def _warn_once(self, key, message):
+        """같은 경고가 매 프레임 쏟아지지 않도록 한 번만 출력."""
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        print(message)
 
     def is_ready(self):
         """좌표 변환이 가능한 상태인지 확인."""
@@ -240,6 +346,9 @@ class MarkerMapper:
         self.H = None
         self.H_inv = None
         self.calibrated_with = 0
+        self.reproj_error = float('inf')
+        self.locked = False
+        self._warned.clear()
         print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
 
     def draw_markers(self, frame, markers):
@@ -605,22 +714,21 @@ if __name__ == '__main__':
     print(" 단독 테스트 : 좌표 변환 정확도 검증")
     print("==========================================")
 
-    # 참고용 실사진(yolo/navi.png)이 있으면 그것으로, 없으면 마커 보드를 생성해서 검증.
-    # 실사진은 선택 사항이며 없어도 테스트는 정상 동작한다.
-    project_root = os.path.join(os.path.dirname(__file__), '..', '..')
-    image_path = os.path.abspath(os.path.join(project_root, 'yolo', 'navi.png'))
-
-    if os.path.exists(image_path):
-        frame = cv2.imread(image_path)
-        print(f"[INFO] 실사진으로 검증합니다: {image_path} {frame.shape}")
-    else:
-        frame = build_test_board()
-        print(f"[INFO] 실사진이 없어 마커 보드를 생성해 검증합니다. {frame.shape}")
+    # MARKER_WORLD_POS 배치대로 마커 보드를 생성해서 검증한다.
+    # 외부 사진을 쓰지 않는 이유: 사진 속 마커 배치가 현재 MARKER_WORLD_POS와
+    # 다르면(마커를 재배치한 경우) 테스트가 실패하는데, 그건 코드 문제가 아니라
+    # 촬영 시점의 배치가 다른 것뿐이라 원인 파악만 어려워진다.
+    frame = build_test_board()
+    print(f"[INFO] MARKER_WORLD_POS 배치로 마커 보드를 생성했습니다. {frame.shape}")
 
     mapper = MarkerMapper(
         aruco_dict_name=CONFIG['ARUCO_DICT'],
         min_markers=CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'],
-        lock_homography=CONFIG['LOCK_HOMOGRAPHY']
+        lock_homography=CONFIG['LOCK_HOMOGRAPHY'],
+        lock_markers=CONFIG['MARKERS_FOR_LOCK'],
+        max_error=CONFIG['MAX_REPROJ_ERROR_CM'],
+        min_spread=CONFIG['MIN_MARKER_SPREAD'],
+        ransac_thresh_cm=CONFIG['RANSAC_THRESH_CM']
     )
 
     # 1) 마커 검출

@@ -35,6 +35,7 @@ Desktop.ini
 *.pdf
 *.jpg
 *.png
+*.mp4
 
 # 대용량 소스/빌드 산출물
 python_code/logic/torchvision_src/
