@@ -543,27 +543,79 @@ class ParkingNavigator:
         return frame
 
 
+def build_test_board(px_per_cm=8.0, margin_px=90, marker_px=64, tilt=0.06):
+    """
+    MARKER_WORLD_POS의 배치대로 ArUco 마커를 배치한 테스트용 이미지를 생성.
+
+    외부 사진 파일 없이도 마커 검출과 좌표 변환 정확도를 검증할 수 있다.
+    카메라가 비스듬히 내려다보는 상황을 재현하기 위해 원근 왜곡을 적용한다.
+
+    Args:
+        px_per_cm:  1cm를 몇 픽셀로 그릴지
+        margin_px:  이미지 가장자리 여백
+        marker_px:  마커 한 변의 크기 (픽셀)
+        tilt:       원근 왜곡 강도 (0이면 왜곡 없음)
+
+    Returns:
+        생성된 BGR 이미지 (numpy array)
+    """
+    dict_id = getattr(aruco, CONFIG['ARUCO_DICT'])
+    aruco_dict = aruco.getPredefinedDictionary(dict_id)
+
+    xs = [p[0] for p in MARKER_WORLD_POS.values()]
+    ys = [p[1] for p in MARKER_WORLD_POS.values()]
+    min_x, min_y = min(xs), min(ys)
+
+    width = int((max(xs) - min_x) * px_per_cm) + margin_px * 2
+    height = int((max(ys) - min_y) * px_per_cm) + margin_px * 2
+    board = np.full((height, width, 3), 235, dtype=np.uint8)
+
+    half = marker_px // 2
+    for marker_id, (wx, wy) in MARKER_WORLD_POS.items():
+        cx = int((wx - min_x) * px_per_cm) + margin_px
+        cy = int((wy - min_y) * px_per_cm) + margin_px
+
+        img = aruco.generateImageMarker(aruco_dict, marker_id, marker_px)
+        board[cy - half:cy + half, cx - half:cx + half] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    if tilt <= 0:
+        return board
+
+    # 위쪽이 좁아지는 사다리꼴로 왜곡 (비스듬히 설치된 카메라 재현)
+    src = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    dst = np.float32([
+        [width * tilt, height * tilt * 0.5],
+        [width * (1 - tilt), height * tilt * 0.5],
+        [width, height],
+        [0, height],
+    ])
+    warp = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(board, warp, (width, height), borderValue=(235, 235, 235))
+
+
 # =====================================================================
-# 테스트용 메인 (단독 실행 시 navi.png로 마커 검출 및 좌표 변환 검증)
+# 테스트용 메인 (단독 실행 시 마커 검출 및 좌표 변환 정확도 검증)
 # =====================================================================
-# 카메라 없이 저장된 이미지로 호모그래피 정확도를 확인할 수 있다.
-# 카메라 + 검출 + 추적 + 내비게이션 통합 실행은 B_main.py에 연결할 것.
+# 카메라 없이 동작한다. 외부 이미지가 없으면 마커 보드를 직접 생성해서 쓰므로
+# 어떤 환경에서든 그대로 실행된다.
+# 카메라 + 검출 + 추적 + 내비게이션 통합 실행은 C_main.py를 사용할 것.
 if __name__ == '__main__':
     print("==========================================")
     print(" C00 : 주차장 내비게이션 (ArUco + Homography)")
-    print(" 단독 테스트 : navi.png로 좌표 변환 검증")
+    print(" 단독 테스트 : 좌표 변환 정확도 검증")
     print("==========================================")
 
-    # 프로젝트 루트의 yolo/navi.png 사용
+    # 참고용 실사진(yolo/navi.png)이 있으면 그것으로, 없으면 마커 보드를 생성해서 검증.
+    # 실사진은 선택 사항이며 없어도 테스트는 정상 동작한다.
     project_root = os.path.join(os.path.dirname(__file__), '..', '..')
     image_path = os.path.abspath(os.path.join(project_root, 'yolo', 'navi.png'))
 
-    if not os.path.exists(image_path):
-        print(f"[ERROR] 테스트 이미지를 찾을 수 없습니다: {image_path}")
-        sys.exit(1)
-
-    frame = cv2.imread(image_path)
-    print(f"[INFO] 테스트 이미지 로드: {image_path} {frame.shape}")
+    if os.path.exists(image_path):
+        frame = cv2.imread(image_path)
+        print(f"[INFO] 실사진으로 검증합니다: {image_path} {frame.shape}")
+    else:
+        frame = build_test_board()
+        print(f"[INFO] 실사진이 없어 마커 보드를 생성해 검증합니다. {frame.shape}")
 
     mapper = MarkerMapper(
         aruco_dict_name=CONFIG['ARUCO_DICT'],
@@ -602,7 +654,7 @@ if __name__ == '__main__':
         print(f"\n  평균 오차: {sum(errors)/len(errors):.2f} cm | 최대 오차: {max(errors):.2f} cm")
 
     # 4) 내비게이션 안내 시뮬레이션
-    #    navi.png에서 차량이 있던 위치(ID:12 트랙의 정중앙점 부근)를 사용
+    #    차량이 화면 오른쪽에서 왼쪽 아래로 이동하는 상황을 합성 트랙으로 재현
     print(f"\n[TEST] 내비게이션 안내 시뮬레이션")
     navigator = ParkingNavigator(
         mapper=mapper,
@@ -614,12 +666,15 @@ if __name__ == '__main__':
     )
     navigator.set_target("1234", "B-1")
 
-    # 차량이 오른쪽에서 왼쪽으로 이동하는 상황을 합성 트랙으로 재현
+    # 차량이 오른쪽에서 왼쪽으로 이동하는 상황을 합성 트랙으로 재현.
+    # 시작 위치를 프레임 크기 기준으로 잡아 이미지 종류와 무관하게 동작한다.
+    h, w = frame.shape[:2]
+    start_x, start_y = int(w * 0.70), int(h * 0.60)
     for step in range(6):
         fake_track = {
             "track_id": 12,
             "car_id": "1234",
-            "center": (920 - step * 40, 500 + step * 20),
+            "center": (start_x - step * int(w * 0.03), start_y + step * int(h * 0.025)),
         }
         nav_results = navigator.update(frame, [fake_track])
         if not nav_results:
