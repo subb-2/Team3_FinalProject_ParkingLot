@@ -1,0 +1,260 @@
+import cv2
+import time
+import sys
+import os
+import threading
+from flask import Flask, Response
+
+# 상위 디렉토리(python_code)를 import 경로에 추가
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from logic.B00_camera_input import get_camera
+from logic.B01_car_detection import CarDetector, CONFIG as B01_CONFIG
+from logic.B02_car_mot import (
+    CarMOT, CONFIG as B02_CONFIG,
+    car_number_fifo, enqueue_car_number, simulate_uart_rx
+)
+
+# 설정 (Configuration)
+# 각 모듈의 세부 설정은 해당 모듈의 CONFIG에서 관리.
+#   - 카메라 : B00_camera_input.py
+#   - 검출   : B01_car_detection.py  (모델 경로, conf, imgsz 등)
+#   - 추적   : B02_car_mot.py        (ByteTrack, FIFO 매칭 등)
+# 여기서는 통합 실행에 필요한 설정만 관리.
+CONFIG = {
+    # 카메라 설정
+    "CAM_SENSOR_ID": 0,             # 카메라 장치 번호
+    "CAM_WIDTH": 640,              # 카메라 가로 해상도
+    "CAM_HEIGHT": 480,              # 카메라 세로 해상도
+    "CAM_FPS": 30,                  # 카메라 프레임레이트
+
+    # 웹 스트리밍 서버 설정
+    "WEB_HOST": "0.0.0.0",
+    "WEB_PORT": 5000,
+
+    # 차량번호 입력 소스 설정
+    "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
+    "TEST_PRESET_CAR_NUMBERS": ["1234","1998","0828","9999"],  # UART 없이 테스트할 차량번호를 순서대로 입력. 예: ["1234", "5678", "9012"]
+    "TEST_UART_SIMULATOR": False,   # True: 임의의 차량번호를 주기적으로 자동 생성
+    "TEST_UART_INTERVAL_SEC": 5.0,  # 자동 생성 주기(초)
+}
+
+# 통합 파이프라인
+class ParkingVisionPipeline:
+    """
+    B00(카메라) -> B01(검출) -> B02(추적/번호매칭)을 하나의 flow로 연결하는 파이프라인.
+
+    각 단계는 독립 모듈로 분리되어 있고, 이 클래스는 연결만 담당한다.
+      - B00_camera_input : 프레임 획득
+      - B01_car_detection: YOLO 차량 검출 (모델은 여기 한 곳에서만 로드)
+      - B02_car_mot      : ByteTrack 추적 + FIFO 차량번호 매칭
+    """
+
+    def __init__(self, cap, detector, mot):
+        self.cap = cap
+        self.detector = detector
+        self.mot = mot
+
+        # 최근 처리 결과 (다른 모듈/모니터링에서 조회 가능)
+        self.latest_tracks = []
+        self.fps = 0.0
+
+    def process_frame(self, frame):
+        """
+        한 프레임에 대해 검출 -> 추적 -> 시각화를 순서대로 수행.
+
+        Args:
+            frame: OpenCV BGR 이미지 (numpy array, 시각화로 원본이 수정됨)
+
+        Returns:
+            추적 결과 리스트 (B02_car_mot.CarMOT.update()의 반환 형식)
+        """
+        # 1) B01 : 차량 검출
+        detections = self.detector.detect(frame)
+
+        # 2) B02 : ByteTrack 추적 + 차량번호 매칭
+        tracks = self.mot.update(detections)
+
+        # 3) 시각화
+        self.mot.draw_tracks(frame, tracks)
+
+        self.latest_tracks = tracks
+        return tracks
+
+    def draw_status(self, frame, detections_count):
+        """FPS, 추적 대수, FIFO 대기 수를 프레임에 표시."""
+        matched = sum(1 for t in self.latest_tracks if t["car_id"])
+        cv2.putText(frame, f"FPS: {self.fps:.1f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"Tracks: {len(self.latest_tracks)} (Matched: {matched})", (10, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"FIFO Waiting: {self.mot.fifo.size()}", (10, 95),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+        return frame
+
+    def generate_frames(self):
+        """
+        Flask MJPEG 스트리밍용 제너레이터.
+        카메라 -> 검출 -> 추적 -> JPEG 인코딩을 반복한다.
+        """
+        prev_time = time.time()
+        frame_count = 0
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("[ERROR] 카메라 프레임을 읽을 수 없습니다. 스트리밍을 종료합니다.")
+                break
+
+            tracks = self.process_frame(frame)
+
+            # FPS 계산 (0.5초 간격)
+            current_time = time.time()
+            frame_count += 1
+            if current_time - prev_time >= 0.5:
+                self.fps = frame_count / (current_time - prev_time)
+                prev_time = current_time
+                frame_count = 0
+
+            self.draw_status(frame, len(tracks))
+
+            # 터미널에 추적 결과 출력 (FPS 갱신 시점마다)
+            if frame_count == 1 and tracks:
+                print(f"[FPS: {self.fps:.1f}] 추적 차량 {len(tracks)}대:")
+                for t in tracks:
+                    car_str = t["car_id"] if t["car_id"] else "미매칭"
+                    print(f"  ID:{t['track_id']:<3d} {t['class_name']:12s} 번호={car_str:8s} conf={t['confidence']:.2f}")
+
+            # JPEG 압축 후 웹 스트리밍 반환
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+
+# 차량번호 입력 소스 준비
+def setup_car_number_source():
+    """
+    FIFO에 차량번호를 공급할 소스를 설정에 따라 준비한다.
+      - ENABLE_UART            : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
+      - TEST_PRESET_CAR_NUMBERS: 지정한 번호를 순서대로 미리 등록
+      - TEST_UART_SIMULATOR    : 임의 번호를 주기적으로 자동 생성
+
+    Returns:
+        시뮬레이터 종료용 threading.Event
+    """
+    stop_event = threading.Event()
+
+    # 1) 실제 UART 수신 (A00_uart_rx)
+    if CONFIG['ENABLE_UART']:
+        from logic.A00_uart_rx import uart_rx_main
+        threading.Thread(target=uart_rx_main, daemon=True).start()
+        print("[INFO] A00_uart_rx 수신 스레드를 시작했습니다.")
+
+    # 2) 미리 지정해 둔 차량번호를 순서대로 FIFO에 등록
+    for car_id in CONFIG['TEST_PRESET_CAR_NUMBERS']:
+        enqueue_car_number(car_id)
+
+    # 3) 가짜 UART 송신기 (임의 번호 자동 생성)
+    if CONFIG['TEST_UART_SIMULATOR']:
+        threading.Thread(
+            target=simulate_uart_rx,
+            args=(CONFIG['TEST_UART_INTERVAL_SEC'], stop_event),
+            daemon=True
+        ).start()
+
+    return stop_event
+
+
+# 메인 (B00 + B01 + B02 통합 실행)
+if __name__ == '__main__':
+    print("==========================================")
+    print(" B_main : 주차장 비전 파이프라인 통합 실행")
+    print(" B00(카메라) -> B01(검출) -> B02(추적)")
+    print("==========================================")
+
+    # B00 : 카메라 열기
+    print(f"[INFO] 카메라를 엽니다... ({CONFIG['CAM_WIDTH']}x{CONFIG['CAM_HEIGHT']})")
+    cap = get_camera(
+        sensor_id=CONFIG['CAM_SENSOR_ID'],
+        width=CONFIG['CAM_WIDTH'],
+        height=CONFIG['CAM_HEIGHT'],
+        framerate=CONFIG['CAM_FPS']
+    )
+
+    if not cap.isOpened():
+        print("[ERROR] 카메라를 열 수 없습니다. 연결 상태를 확인하세요.")
+        sys.exit(1)
+
+    # B01 : 차량 검출기 초기화 (YOLO 모델은 이 한 곳에서만 로드)
+    detector = CarDetector(
+        model_path=B01_CONFIG['MODEL_PATH'],
+        conf=B01_CONFIG['CONF_THRESH'],
+        iou=B01_CONFIG['IOU_THRESH'],
+        imgsz=B01_CONFIG['IMGSZ']
+    )
+
+    # B02 : ByteTrack 추적기 초기화
+    mot = CarMOT(
+        tracker_cfg=B02_CONFIG['TRACKER_CFG'],
+        min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
+        lost_ttl=B02_CONFIG['LOST_TTL_FRAMES'],
+        trajectory_maxlen=B02_CONFIG['TRAJECTORY_MAXLEN']
+    )
+
+    # 차량번호 입력 소스 준비 (UART 또는 테스트용)
+    uart_sim_stop = setup_car_number_source()
+
+    # 파이프라인 구성
+    pipeline = ParkingVisionPipeline(cap, detector, mot)
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def index():
+        return f"""
+        <html>
+            <head><title>Jetson Parking Vision (B_main)</title></head>
+            <body style="background-color: #222; color: white; text-align: center;">
+                <h2>Jetson Orin Nano - Parking Vision Pipeline</h2>
+                <p>B00(Camera) -&gt; B01(YOLOv8 Detection) -&gt; B02(ByteTrack MOT)</p>
+                <img src="/video_feed" width="{CONFIG['CAM_WIDTH']}" height="{CONFIG['CAM_HEIGHT']}">
+                <p>차량번호 수동 등록: <code>/enqueue/1234</code> | 현재 상태: <code>/status</code></p>
+            </body>
+        </html>
+        """
+
+    @app.route('/video_feed')
+    def video_feed():
+        return Response(pipeline.generate_frames(),
+                        mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @app.route('/enqueue/<car_id>')
+    def enqueue(car_id):
+        """UART 없이 차량번호를 FIFO에 수동 등록하기 위한 라우트."""
+        enqueue_car_number(car_id)
+        return f"FIFO 등록: {car_id} (대기 {car_number_fifo.size()}대) / 현재 큐: {car_number_fifo.snapshot()}"
+
+    @app.route('/status')
+    def status():
+        """현재 추적 상태와 FIFO 대기열을 조회."""
+        return {
+            "fps": round(pipeline.fps, 1),
+            "fifo_waiting": car_number_fifo.snapshot(),
+            "tracks": [
+                {
+                    "track_id": t["track_id"],
+                    "car_id": t["car_id"],
+                    "class_name": t["class_name"],
+                    "bbox": t["bbox"],
+                }
+                for t in pipeline.latest_tracks
+            ],
+        }
+
+    print(f"\n[INFO] Flask 웹 서버를 시작합니다. http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
+    try:
+        app.run(host=CONFIG['WEB_HOST'], port=CONFIG['WEB_PORT'], debug=False)
+    finally:
+        uart_sim_stop.set()
+        cap.release()
+        print("[INFO] 카메라를 해제하고 종료합니다.")
