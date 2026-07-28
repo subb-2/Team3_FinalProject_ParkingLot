@@ -269,8 +269,8 @@ class CarMOT:
             if track_id not in self.track_to_car and self.hit_counts[track_id] >= self.min_hits:
                 self._assign_car_id(track_id)
 
-            # 하단 중앙(Bottom-Center) 기준점 - 노면 위치에 가장 가까운 좌표
-            cx, cy = (x1 + x2) // 2, y2
+            # 박스 중앙(Center) 기준점
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
             traj = self.trajectories.setdefault(
                 track_id, deque(maxlen=self.trajectory_maxlen)
             )
