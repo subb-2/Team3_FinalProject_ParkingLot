@@ -1,6 +1,12 @@
 import serial
 import time
 import datetime
+import sys
+import os
+
+# 상위 디렉토리(python_code)를 import 경로에 추가하여 'logic' 패키지를 인식할 수 있도록 함
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from logic.A01_parking_manager import handle_car_entry, remove_car
 from logic.B03_car_mot import enqueue_car_number
 
