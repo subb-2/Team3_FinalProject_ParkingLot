@@ -34,4 +34,6 @@ Desktop.ini
 *.xlsx
 *.pdf
 *.jpg
-*.png
+*.pngpython_code/logic/torchvision_src/
+torchvision_src/
+*.whl

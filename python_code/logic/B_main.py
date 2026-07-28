@@ -23,8 +23,8 @@ from logic.B02_car_mot import (
 CONFIG = {
     # 카메라 설정
     "CAM_SENSOR_ID": 0,             # 카메라 장치 번호
-    "CAM_WIDTH": 1280,              # 카메라 가로 해상도
-    "CAM_HEIGHT": 720,              # 카메라 세로 해상도
+    "CAM_WIDTH": 640,              # 카메라 가로 해상도
+    "CAM_HEIGHT": 480,              # 카메라 세로 해상도
     "CAM_FPS": 30,                  # 카메라 프레임레이트
 
     # 웹 스트리밍 서버 설정
@@ -33,7 +33,7 @@ CONFIG = {
 
     # 차량번호 입력 소스 설정
     "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
-    "TEST_PRESET_CAR_NUMBERS": [],  # UART 없이 테스트할 차량번호를 순서대로 입력. 예: ["1234", "5678", "9012"]
+    "TEST_PRESET_CAR_NUMBERS": ["1234","1998","0828","9999"],  # UART 없이 테스트할 차량번호를 순서대로 입력. 예: ["1234", "5678", "9012"]
     "TEST_UART_SIMULATOR": False,   # True: 임의의 차량번호를 주기적으로 자동 생성
     "TEST_UART_INTERVAL_SEC": 5.0,  # 자동 생성 주기(초)
 }

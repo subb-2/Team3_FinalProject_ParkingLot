@@ -13,9 +13,9 @@ from logic.B00_camera_input import get_camera
 CONFIG = {
     # 모델 추론 설정
     "MODEL_PATH": "yolov8s.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
-    "CONF_THRESH": 0.5,             # Confidence 임계값
+    "CONF_THRESH": 0.25,             # Confidence 임계값
     "IOU_THRESH": 0.45,             # NMS IoU 임계값
-    "IMGSZ": 1280,                  # YOLO 추론 해상도 (기본 640 -> 1280으로 상향)
+    "IMGSZ": 640,                  # YOLO 추론 해상도 (기본 640 -> 1280으로 상향)
 
     # 카메라 설정
     "CAM_WIDTH": 1280,              # 카메라 가로 해상도 (기본 640 -> 1280으로 상향)

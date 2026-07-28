@@ -25,7 +25,7 @@ CONFIG = {
 
     # 추적 <-> 차량번호 매칭 설정
     "MIN_HITS_FOR_ASSIGN": 3,       # 이 프레임 수 이상 연속 추적되어야 차량번호를 부여 (오검출 방지)
-    "LOST_TTL_FRAMES": 90,          # 추적이 끊긴 뒤 매칭 정보를 유지할 프레임 수 (30fps 기준 약 3초)
+    "LOST_TTL_FRAMES": 150,          # 추적이 끊긴 뒤 매칭 정보를 유지할 프레임 수 (30fps 기준 약 3초)
     "TRAJECTORY_MAXLEN": 64,        # 궤적(Trajectory) 저장 최대 길이
 }
 
