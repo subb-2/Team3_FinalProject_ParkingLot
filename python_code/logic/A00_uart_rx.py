@@ -2,6 +2,7 @@ import serial
 import time
 import datetime
 from logic.A01_parking_manager import handle_car_entry, remove_car
+from logic.B03_car_mot import enqueue_car_number
 
 def get_uart_config():
     """
@@ -73,6 +74,7 @@ def uart_rx_main():
                     
                     # 입차 처리 호출
                     handle_car_entry(car_id, receive_time)
+                    enqueue_car_number(car_id)
 
             # 2. 출차(Exit) 데이터 확인
             if ser_exit and ser_exit.in_waiting >= 1:
