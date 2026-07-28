@@ -550,6 +550,8 @@ class ParkingNavigator:
             route = None
             route_index = 0
             next_waypoint = None
+            maneuver = GUIDE_UNKNOWN
+            maneuver_distance = None
 
             if target_spot and target_world is not None:
                 # 경로를 확보하고 통과한 경유점을 넘긴다
@@ -559,6 +561,8 @@ class ParkingNavigator:
                     route_index = state["index"]
                     next_waypoint = route[route_index] if route_index < len(route) else None
                     distance = route_length(route, route_index, world_pos)
+                    maneuver, maneuver_distance = self.compute_maneuver(
+                        route, route_index, world_pos)
                 else:
                     # 경로를 찾지 못한 경우에도 직선 거리는 알려준다
                     distance = self._distance(world_pos, target_world)
@@ -581,6 +585,8 @@ class ParkingNavigator:
                 "route": route,
                 "route_index": route_index,
                 "next_waypoint": next_waypoint,
+                "maneuver": maneuver,
+                "maneuver_distance_cm": maneuver_distance,
                 "guide": guide,
                 "guide_text": GUIDE_TEXT_KO.get(guide, guide),
                 "nearest_spot": self.find_nearest_spot(world_pos),
@@ -640,6 +646,44 @@ class ParkingNavigator:
         """차량의 현재 경로 경유점 리스트를 반환. 없으면 None."""
         state = self.routes.get(car_id)
         return list(state["waypoints"]) if state else None
+
+    def compute_maneuver(self, route, index, world_pos):
+        """
+        다음 경유점에서 어느 방향으로 꺾어야 하는지와 그 지점까지의 거리를 계산.
+
+        '지금 어디를 향하고 있는가'(guide)와 달리, 이것은 '앞으로 무엇을
+        해야 하는가'다. 자동차 내비게이션의 "300m 앞 우회전"에 해당하며,
+        UI 표시뿐 아니라 RC카에 조향 명령을 보낼 때도 쓸 수 있다.
+
+        Args:
+            route:     경유점 리스트
+            index:     현재 향하고 있는 경유점 인덱스
+            world_pos: 차량의 현재 실좌표
+
+        Returns:
+            (안내 상수, 그 지점까지의 거리 cm) 튜플
+        """
+        if not route or index >= len(route):
+            return GUIDE_ARRIVED, 0.0
+
+        target = route[index]
+        dist = self._distance(world_pos, target)
+
+        # 마지막 경유점이면 목적지 도착
+        if index >= len(route) - 1:
+            return GUIDE_ARRIVED, dist
+
+        # 들어가는 방향과 나가는 방향의 차이가 곧 꺾어야 할 각도
+        in_a = math.degrees(math.atan2(target[1] - world_pos[1], target[0] - world_pos[0]))
+        nxt = route[index + 1]
+        out_a = math.degrees(math.atan2(nxt[1] - target[1], nxt[0] - target[0]))
+        diff = (out_a - in_a + 180) % 360 - 180
+
+        if abs(diff) >= self.uturn_threshold:
+            return GUIDE_UTURN, dist
+        if abs(diff) <= self.turn_threshold:
+            return GUIDE_STRAIGHT, dist
+        return (GUIDE_RIGHT if diff > 0 else GUIDE_LEFT), dist
 
     def _compute_heading(self, history):
         """

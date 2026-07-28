@@ -8,7 +8,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C00_navigation import (
     MARKER_TO_SPOT, MARKER_WORLD_POS, GATE_WORLD_POS,
-    GUIDE_ARRIVED, GUIDE_UNKNOWN,
+    GUIDE_ARRIVED, GUIDE_UNKNOWN, GUIDE_STRAIGHT, GUIDE_LEFT,
+    GUIDE_RIGHT, GUIDE_UTURN,
 )
 
 # 설정 (Configuration)
@@ -35,6 +36,21 @@ CONFIG = {
     "SHOW_TRAJECTORY": True,    # 차량 이동 궤적 표시
     "TRAJECTORY_MAX_POINTS": 60,
     "VEHICLE_RADIUS_PX": 11,
+
+    # ---------------------------------------------------------------
+    # 차량 시점 내비게이션 화면 (NavigationView) 설정
+    # ---------------------------------------------------------------
+    "NAV_WIDTH": 900,           # 화면 크기 (px)
+    "NAV_HEIGHT": 620,
+    "NAV_PX_PER_CM": 7.0,       # 확대 배율. 클수록 차량 주변만 크게 보인다
+    "NAV_CAR_Y_RATIO": 0.74,    # 화면에서 내 차량이 놓이는 세로 위치 비율
+    "NAV_HORIZON_RATIO": 0.30,  # 지평선 높이 비율 (작을수록 멀리까지 보임)
+    "NAV_TOP_WIDTH_RATIO": 0.30, # 원근 상단 폭 비율 (작을수록 원근감이 강함)
+    "NAV_BANNER_H": 118,        # 상단 턴 안내 배너 높이
+    "NAV_HEADING_SMOOTH": 0.25, # 화면 회전 감속 계수 (0~1, 작을수록 부드러움)
+    "NAV_SHOW_MINIMAP": True,   # 좌하단 전체 조감도 표시
+    "NAV_MINIMAP_W": 210,
+    "NAV_MINIMAP_H": 168,
 }
 
 # 색상 (BGR)
@@ -53,7 +69,486 @@ COLOR_TRAJECTORY  = (0, 220, 220)    # 이동 궤적
 COLOR_GUIDE_LINE  = (0, 255, 255)    # 안내선
 COLOR_ARRIVED     = (0, 255, 0)      # 도착 표시
 
+# 차량 시점 화면 색상 (BGR)
+COLOR_NAV_SKY     = (48, 40, 34)     # 지평선 위 (원근 바깥 영역)
+COLOR_NAV_GROUND  = (40, 40, 42)     # 노면
+COLOR_NAV_BANNER  = (26, 26, 28)     # 상단 배너 배경
+COLOR_NAV_ROUTE   = (255, 200, 40)   # 주행 경로 (하늘색 계열)
+COLOR_NAV_ROUTE_E = (255, 235, 150)  # 경로 테두리
+COLOR_NAV_CAR     = (80, 230, 80)    # 내 차량
+COLOR_NAV_ACCENT  = (60, 220, 255)   # 강조 (거리, 화살표)
+
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# 안내 상수 -> 화면에 띄울 짧은 영문 (OpenCV는 한글 렌더링 불가)
+MANEUVER_LABEL = {
+    GUIDE_STRAIGHT: "GO STRAIGHT",
+    GUIDE_LEFT:     "TURN LEFT",
+    GUIDE_RIGHT:    "TURN RIGHT",
+    GUIDE_UTURN:    "MAKE U-TURN",
+    GUIDE_ARRIVED:  "ARRIVING",
+    GUIDE_UNKNOWN:  "SEARCHING",
+}
+
+
+# 차량 시점 내비게이션 화면
+class NavigationView:
+    """
+    자동차 내부 내비게이션처럼 보이는 화면.
+
+    NavigationMapUI가 주차장을 천장에서 내려다보는 관제 화면이라면,
+    이 클래스는 운전자 시점이다. 세 가지가 다르다.
+
+      1. 헤딩업(Heading-up): 차량의 진행 방향이 항상 화면 위쪽이 되도록
+         지도 전체를 회전시킨다. 내 차는 화면 아래쪽에 고정된다.
+      2. 원근 시점: 노면 레이어에 사다리꼴 변환을 걸어, 먼 곳은 좁고
+         가까운 곳은 넓게 보이게 한다.
+      3. 턴 안내 배너: 다음에 무엇을 해야 하는지("30cm 앞 우회전")를
+         화면 상단에 크게 띄운다.
+
+    한 대의 차량('내 차')만 표시한다. 여러 대를 한 번에 보려면
+    NavigationMapUI를 쓸 것.
+    """
+
+    def __init__(self, navigator=None, width=None, height=None,
+                 spot_world_pos=None, gate_world_pos=None):
+        """
+        NavigationView 초기화.
+
+        Args:
+            navigator:      ParkingNavigator 인스턴스 (구역 좌표 조회용)
+            width/height:   화면 크기 (px)
+            spot_world_pos: {구역ID: (x_cm, y_cm)} 매핑
+            gate_world_pos: 입출구 실좌표
+        """
+        self.navigator = navigator
+        self.width = width or CONFIG['NAV_WIDTH']
+        self.height = height or CONFIG['NAV_HEIGHT']
+
+        if spot_world_pos is not None:
+            self.spot_world_pos = dict(spot_world_pos)
+        elif navigator is not None and navigator.spot_world_pos:
+            self.spot_world_pos = dict(navigator.spot_world_pos)
+        else:
+            self.spot_world_pos = {
+                spot_id: MARKER_WORLD_POS[m]
+                for m, spot_id in MARKER_TO_SPOT.items() if m in MARKER_WORLD_POS
+            }
+
+        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE_WORLD_POS
+
+        self.scale = CONFIG['NAV_PX_PER_CM']
+        self.car_y = int(self.height * CONFIG['NAV_CAR_Y_RATIO'])
+        self.banner_h = CONFIG['NAV_BANNER_H']
+
+        # 화면 회전을 부드럽게 만들기 위한 표시용 진행 방향
+        self._display_heading = None
+
+        self._build_perspective()
+
+        print(f"[INFO] 차량 시점 내비게이션 화면 초기화 완료. "
+              f"({self.width}x{self.height}, {self.scale:.1f} px/cm)")
+
+    def _build_perspective(self):
+        """
+        노면 레이어(위에서 본 그림)를 원근 시점으로 바꾸는 변환을 준비.
+
+        위쪽 변을 좁히고 아래로 내려서, 먼 곳이 지평선으로 수렴하는
+        자동차 내비게이션 특유의 시점을 만든다.
+        """
+        w, h = self.width, self.height
+        top_w = w * CONFIG['NAV_TOP_WIDTH_RATIO']
+        hz = h * CONFIG['NAV_HORIZON_RATIO']
+
+        src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        dst = np.float32([
+            [w / 2 - top_w / 2, hz],
+            [w / 2 + top_w / 2, hz],
+            [w, h],
+            [0, h],
+        ])
+        self._warp = cv2.getPerspectiveTransform(src, dst)
+
+    # ---------- 좌표 변환 ----------
+    def _world_to_flat(self, point, car_pos, heading_deg):
+        """
+        실좌표를 '차량 기준 위에서 본' 화면 좌표로 변환.
+        (원근 변환 전 단계)
+
+        차량을 원점으로 옮기고, 진행 방향이 화면 위쪽이 되도록 회전한다.
+        """
+        rad = math.radians(heading_deg)
+        # y축이 아래 방향인 좌표계에서의 전방/우측 단위 벡터
+        fx, fy = math.cos(rad), math.sin(rad)
+        rx, ry = -math.sin(rad), math.cos(rad)
+
+        dx = point[0] - car_pos[0]
+        dy = point[1] - car_pos[1]
+
+        ahead = dx * fx + dy * fy      # 전방 거리
+        right = dx * rx + dy * ry      # 우측 거리
+
+        return (self.width / 2 + right * self.scale,
+                self.car_y - ahead * self.scale)
+
+    def _flat_to_screen(self, pt):
+        """원근 변환을 적용해 최종 화면 좌표를 얻는다. (텍스트 배치용)"""
+        src = np.array([[[float(pt[0]), float(pt[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, self._warp)
+        return int(dst[0][0][0]), int(dst[0][0][1])
+
+    def _update_heading(self, nav):
+        """
+        화면 회전에 쓸 진행 방향을 결정.
+
+        정지 상태라 진행 방향을 모를 때는 다음 경유점 쪽을 바라보게 하고,
+        그것도 없으면 직전 값을 유지한다. 그대로 두면 차가 멈출 때마다
+        화면이 튀어서 보기 어렵다. 급격한 회전도 완만하게 보간한다.
+        """
+        heading = nav.get("heading_deg")
+
+        if heading is None:
+            wp = nav.get("next_waypoint")
+            pos = nav.get("world_pos")
+            if wp is not None and pos is not None:
+                heading = math.degrees(math.atan2(wp[1] - pos[1], wp[0] - pos[0]))
+
+        if heading is None:
+            heading = self._display_heading if self._display_heading is not None else 0.0
+
+        if self._display_heading is None:
+            self._display_heading = heading
+        else:
+            # 각도는 순환하므로 -180~180 범위의 최단 차이로 보간
+            diff = (heading - self._display_heading + 180) % 360 - 180
+            self._display_heading += diff * CONFIG['NAV_HEADING_SMOOTH']
+
+        return self._display_heading
+
+    # ---------- 렌더링 ----------
+    def render(self, nav, spot_status=None, fps=None, extra_info=None):
+        """
+        차량 시점 내비게이션 화면 한 장을 그린다.
+
+        Args:
+            nav:         C00_navigation의 nav 결과 딕셔너리 하나 ('내 차').
+                         None이면 대기 화면을 보여준다.
+            spot_status: {구역ID: "empty"|"full"} 점유 상태
+            fps:         표시할 FPS
+            extra_info:  하단에 추가로 표시할 문자열 리스트
+
+        Returns:
+            렌더링된 BGR 이미지
+        """
+        if spot_status is None:
+            from data.map_data import spot_status as live_status
+            spot_status = live_status
+
+        if nav is None or nav.get("world_pos") is None:
+            return self._render_waiting(fps, extra_info)
+
+        car_pos = nav["world_pos"]
+        heading = self._update_heading(nav)
+
+        # 1) 노면 레이어를 '위에서 본' 상태로 그린 뒤 원근 변환
+        ground = np.full((self.height, self.width, 3), COLOR_NAV_GROUND, dtype=np.uint8)
+        self._draw_ground_grid(ground, car_pos, heading)
+        self._draw_ground_spots(ground, car_pos, heading, spot_status, nav)
+        self._draw_ground_route(ground, car_pos, heading, nav)
+
+        canvas = cv2.warpPerspective(
+            ground, self._warp, (self.width, self.height),
+            borderMode=cv2.BORDER_CONSTANT, borderValue=COLOR_NAV_SKY)
+
+        # 2) 원근 영향을 받지 않아야 하는 요소는 그 위에 직접 그린다
+        self._draw_spot_labels(canvas, car_pos, heading, nav)
+        self._draw_car(canvas)
+        self._draw_banner(canvas, nav)
+        self._draw_bottom_bar(canvas, nav, fps, extra_info)
+        if CONFIG['NAV_SHOW_MINIMAP']:
+            self._draw_minimap(canvas, car_pos, nav, spot_status)
+
+        return canvas
+
+    def _render_waiting(self, fps, extra_info):
+        """추적 중인 차량이 없을 때의 대기 화면."""
+        canvas = np.full((self.height, self.width, 3), COLOR_NAV_GROUND, dtype=np.uint8)
+        cv2.rectangle(canvas, (0, 0), (self.width, self.banner_h), COLOR_NAV_BANNER, -1)
+        cv2.putText(canvas, "WAITING FOR VEHICLE", (28, 68),
+                    FONT, 1.0, COLOR_TEXT_DIM, 2, cv2.LINE_AA)
+        msg = "no tracked vehicle with an assigned spot"
+        cv2.putText(canvas, msg, (28, self.height // 2),
+                    FONT, 0.6, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
+        self._draw_bottom_bar(canvas, None, fps, extra_info)
+        return canvas
+
+    def _draw_ground_grid(self, layer, car_pos, heading):
+        """노면 격자. 차량이 움직이는 느낌(속도감)을 준다."""
+        if not CONFIG['SHOW_GRID']:
+            return
+
+        step = CONFIG['GRID_STEP_CM']
+        span = 260.0    # 격자를 그릴 범위 (cm)
+
+        # 차량 위치를 격자 간격에 맞춰 반올림해 기준점을 잡는다
+        bx = math.floor(car_pos[0] / step) * step
+        by = math.floor(car_pos[1] / step) * step
+
+        n = int(span / step)
+        for i in range(-n, n + 1):
+            x = bx + i * step
+            p1 = self._world_to_flat((x, by - span), car_pos, heading)
+            p2 = self._world_to_flat((x, by + span), car_pos, heading)
+            cv2.line(layer, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
+                     COLOR_GRID, 1, cv2.LINE_AA)
+
+            y = by + i * step
+            p3 = self._world_to_flat((bx - span, y), car_pos, heading)
+            p4 = self._world_to_flat((bx + span, y), car_pos, heading)
+            cv2.line(layer, (int(p3[0]), int(p3[1])), (int(p4[0]), int(p4[1])),
+                     COLOR_GRID, 1, cv2.LINE_AA)
+
+    def _draw_ground_spots(self, layer, car_pos, heading, spot_status, nav):
+        """주차 구역을 회전된 사각형으로 그린다."""
+        hw = CONFIG['SPOT_W_CM'] / 2
+        hh = CONFIG['SPOT_H_CM'] / 2
+        target = nav.get("target_spot")
+
+        for spot_id, (sx, sy) in self.spot_world_pos.items():
+            corners = [(sx - hw, sy - hh), (sx + hw, sy - hh),
+                       (sx + hw, sy + hh), (sx - hw, sy + hh)]
+            pts = np.array([self._world_to_flat(c, car_pos, heading) for c in corners],
+                           dtype=np.int32)
+
+            if spot_id == target:
+                cv2.fillPoly(layer, [pts], (90, 40, 90))
+                cv2.polylines(layer, [pts], True, COLOR_SPOT_TARGET, 3, cv2.LINE_AA)
+            elif spot_status.get(spot_id) == "full":
+                cv2.fillPoly(layer, [pts], COLOR_SPOT_FULL)
+                cv2.polylines(layer, [pts], True, (110, 110, 160), 1, cv2.LINE_AA)
+            else:
+                cv2.polylines(layer, [pts], True, COLOR_SPOT_EMPTY, 2, cv2.LINE_AA)
+
+        # 입출구
+        if self.gate_world_pos is not None:
+            g = self._world_to_flat(self.gate_world_pos, car_pos, heading)
+            cv2.circle(layer, (int(g[0]), int(g[1])),
+                       int(6 * self.scale / 7 + 6), COLOR_GATE, 2, cv2.LINE_AA)
+
+    def _draw_ground_route(self, layer, car_pos, heading, nav):
+        """
+        주행 경로를 굵은 띠로 그린다.
+        내비게이션의 파란 경로선처럼 보이도록 테두리를 덧그린다.
+        """
+        route = nav.get("route")
+        if not route or len(route) < 2:
+            return
+
+        idx = min(nav.get("route_index", 1), len(route) - 1)
+        pts = [self._world_to_flat(car_pos, car_pos, heading)]
+        pts += [self._world_to_flat(p, car_pos, heading) for p in route[idx:]]
+        arr = np.array(pts, dtype=np.int32)
+
+        cv2.polylines(layer, [arr], False, COLOR_NAV_ROUTE_E, 26, cv2.LINE_AA)
+        cv2.polylines(layer, [arr], False, COLOR_NAV_ROUTE, 18, cv2.LINE_AA)
+
+        # 목적지 지점 표시
+        end = arr[-1]
+        cv2.circle(layer, tuple(end), 13, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(layer, tuple(end), 13, COLOR_SPOT_TARGET, 3, cv2.LINE_AA)
+
+    def _draw_spot_labels(self, canvas, car_pos, heading, nav):
+        """
+        구역 이름은 원근 변환 후 좌표에 똑바로 그린다.
+        노면과 함께 변환하면 기울어져서 읽기 어렵다.
+        """
+        target = nav.get("target_spot")
+        for spot_id, pos in self.spot_world_pos.items():
+            flat = self._world_to_flat(pos, car_pos, heading)
+            # 화면 밖이면 건너뛴다
+            if not (-200 < flat[0] < self.width + 200 and -200 < flat[1] < self.height + 200):
+                continue
+            x, y = self._flat_to_screen(flat)
+            if not (0 < x < self.width and self.banner_h < y < self.height):
+                continue
+
+            color = COLOR_SPOT_TARGET if spot_id == target else COLOR_TEXT_DIM
+            scale = 0.5 if spot_id == target else 0.42
+            (tw, _), _ = cv2.getTextSize(spot_id, FONT, scale, 1)
+            cv2.putText(canvas, spot_id, (x - tw // 2, y + 4),
+                        FONT, scale, color, 1, cv2.LINE_AA)
+
+    def _draw_car(self, canvas):
+        """내 차량. 화면 아래쪽 고정 위치에 삼각형으로 그린다."""
+        cx = self.width // 2
+        cy = self._flat_to_screen((self.width / 2, self.car_y))[1]
+
+        pts = np.array([[cx, cy - 20], [cx - 15, cy + 16], [cx, cy + 8], [cx + 15, cy + 16]],
+                       dtype=np.int32)
+        cv2.fillPoly(canvas, [pts], COLOR_NAV_CAR, cv2.LINE_AA)
+        cv2.polylines(canvas, [pts], True, (255, 255, 255), 2, cv2.LINE_AA)
+
+    def _draw_banner(self, canvas, nav):
+        """
+        상단 턴 안내 배너.
+        "무엇을, 얼마 앞에서" 해야 하는지가 내비게이션의 핵심 정보다.
+        """
+        w = self.width
+        cv2.rectangle(canvas, (0, 0), (w, self.banner_h), COLOR_NAV_BANNER, -1)
+        cv2.line(canvas, (0, self.banner_h), (w, self.banner_h), (70, 70, 74), 1)
+
+        maneuver = nav.get("maneuver") or nav.get("guide") or GUIDE_UNKNOWN
+        dist = nav.get("maneuver_distance_cm")
+
+        # 좌측: 방향 화살표 아이콘
+        self._draw_maneuver_icon(canvas, (66, self.banner_h // 2), maneuver)
+
+        # 중앙: 거리 + 지시 문구
+        # 도착 단계에서도 남은 거리를 보여준다. 거리 없이 문구만 뜨면
+        # 얼마나 더 가야 하는지 알 수 없다.
+        tx = 132
+        color = COLOR_ARRIVED if maneuver == GUIDE_ARRIVED else COLOR_NAV_ACCENT
+        if dist is not None:
+            cv2.putText(canvas, f"{dist:.0f}", (tx, 56),
+                        FONT, 1.5, color, 3, cv2.LINE_AA)
+            (dw, _), _ = cv2.getTextSize(f"{dist:.0f}", FONT, 1.5, 3)
+            cv2.putText(canvas, "cm", (tx + dw + 8, 56),
+                        FONT, 0.7, color, 2, cv2.LINE_AA)
+
+        cv2.putText(canvas, MANEUVER_LABEL.get(maneuver, maneuver), (tx, 96),
+                    FONT, 0.85, COLOR_TEXT, 2, cv2.LINE_AA)
+
+        # 우측: 목적지와 남은 총 거리
+        target = nav.get("target_spot") or "-"
+        remain = nav.get("distance_cm")
+        cv2.putText(canvas, "DESTINATION", (w - 250, 40),
+                    FONT, 0.45, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
+        cv2.putText(canvas, str(target), (w - 250, 78),
+                    FONT, 1.1, COLOR_SPOT_TARGET, 2, cv2.LINE_AA)
+        if remain is not None:
+            cv2.putText(canvas, f"{remain:.0f}cm left", (w - 250, 102),
+                        FONT, 0.5, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
+
+    def _draw_maneuver_icon(self, canvas, center, maneuver):
+        """방향 지시 화살표를 그린다."""
+        cx, cy = center
+        c = COLOR_NAV_ACCENT if maneuver != GUIDE_ARRIVED else COLOR_ARRIVED
+        t = 7
+
+        if maneuver == GUIDE_LEFT:
+            cv2.line(canvas, (cx + 16, cy + 26), (cx + 16, cy - 4), c, t, cv2.LINE_AA)
+            cv2.arrowedLine(canvas, (cx + 16, cy - 4), (cx - 20, cy - 4), c, t,
+                            cv2.LINE_AA, tipLength=0.45)
+        elif maneuver == GUIDE_RIGHT:
+            cv2.line(canvas, (cx - 16, cy + 26), (cx - 16, cy - 4), c, t, cv2.LINE_AA)
+            cv2.arrowedLine(canvas, (cx - 16, cy - 4), (cx + 20, cy - 4), c, t,
+                            cv2.LINE_AA, tipLength=0.45)
+        elif maneuver == GUIDE_UTURN:
+            cv2.ellipse(canvas, (cx, cy), (16, 16), 0, 180, 360, c, t, cv2.LINE_AA)
+            cv2.line(canvas, (cx - 16, cy), (cx - 16, cy + 22), c, t, cv2.LINE_AA)
+            cv2.arrowedLine(canvas, (cx + 16, cy), (cx + 16, cy + 24), c, t,
+                            cv2.LINE_AA, tipLength=0.5)
+        elif maneuver == GUIDE_ARRIVED:
+            cv2.circle(canvas, (cx, cy + 6), 17, c, 3, cv2.LINE_AA)
+            cv2.circle(canvas, (cx, cy + 6), 6, c, -1, cv2.LINE_AA)
+        else:
+            cv2.arrowedLine(canvas, (cx, cy + 26), (cx, cy - 20), c, t,
+                            cv2.LINE_AA, tipLength=0.4)
+
+    def _draw_bottom_bar(self, canvas, nav, fps, extra_info):
+        """하단 상태 표시줄."""
+        h, w = self.height, self.width
+        bar = 34
+        cv2.rectangle(canvas, (0, h - bar), (w, h), COLOR_NAV_BANNER, -1)
+
+        parts = []
+        if nav is not None:
+            car_id = nav.get("car_id") or f"#{nav.get('track_id')}"
+            wx, wy = nav["world_pos"]
+            parts.append(f"CAR {car_id}")
+            parts.append(f"({wx:.0f},{wy:.0f})cm")
+        if fps is not None:
+            parts.append(f"{fps:.1f} fps")
+        if extra_info:
+            parts += list(extra_info)
+
+        cv2.putText(canvas, "   |   ".join(parts), (14, h - 11),
+                    FONT, 0.45, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
+
+    def _draw_minimap(self, canvas, car_pos, nav, spot_status):
+        """
+        좌하단 전체 조감도.
+        확대된 시점만 보면 주차장 전체에서 어디쯤인지 알기 어렵다.
+        """
+        mw, mh = CONFIG['NAV_MINIMAP_W'], CONFIG['NAV_MINIMAP_H']
+        x0, y0 = 14, self.height - mh - 46
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + mw, y0 + mh), (20, 20, 22), -1)
+        cv2.addWeighted(overlay, 0.82, canvas, 0.18, 0, canvas)
+        cv2.rectangle(canvas, (x0, y0), (x0 + mw, y0 + mh), (80, 80, 84), 1)
+
+        # 전체 구역이 들어가도록 축척 계산
+        xs = [p[0] for p in self.spot_world_pos.values()] + [self.gate_world_pos[0], car_pos[0]]
+        ys = [p[1] for p in self.spot_world_pos.values()] + [self.gate_world_pos[1], car_pos[1]]
+        pad = 18.0
+        min_x, max_x = min(xs) - pad, max(xs) + pad
+        min_y, max_y = min(ys) - pad, max(ys) + pad
+        s = min((mw - 16) / max(max_x - min_x, 1e-6), (mh - 16) / max(max_y - min_y, 1e-6))
+
+        def to_mini(p):
+            return (int(x0 + 8 + (p[0] - min_x) * s), int(y0 + 8 + (p[1] - min_y) * s))
+
+        target = nav.get("target_spot")
+        hw, hh = CONFIG['SPOT_W_CM'] / 2, CONFIG['SPOT_H_CM'] / 2
+        for spot_id, pos in self.spot_world_pos.items():
+            p1 = to_mini((pos[0] - hw, pos[1] - hh))
+            p2 = to_mini((pos[0] + hw, pos[1] + hh))
+            if spot_id == target:
+                cv2.rectangle(canvas, p1, p2, COLOR_SPOT_TARGET, -1)
+            elif spot_status.get(spot_id) == "full":
+                cv2.rectangle(canvas, p1, p2, COLOR_SPOT_FULL, -1)
+            else:
+                cv2.rectangle(canvas, p1, p2, (100, 100, 100), 1)
+
+        route = nav.get("route")
+        if route and len(route) >= 2:
+            idx = min(nav.get("route_index", 1), len(route) - 1)
+            pts = np.array([to_mini(car_pos)] + [to_mini(p) for p in route[idx:]],
+                           dtype=np.int32)
+            cv2.polylines(canvas, [pts], False, COLOR_NAV_ROUTE, 2, cv2.LINE_AA)
+
+        cv2.circle(canvas, to_mini(car_pos), 5, COLOR_NAV_CAR, -1, cv2.LINE_AA)
+        cv2.circle(canvas, to_mini(car_pos), 5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "OVERVIEW", (x0 + 6, y0 + mh - 6),
+                    FONT, 0.36, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
+
+
+def pick_my_vehicle(nav_results, car_id=None):
+    """
+    여러 추적 결과 중 내비게이션 화면에 띄울 '내 차'를 고른다.
+
+    Args:
+        nav_results: C00_navigation.ParkingNavigator.update()의 반환 결과
+        car_id:      특정 차량번호를 지정 (None이면 자동 선택)
+
+    Returns:
+        선택된 nav 딕셔너리. 없으면 None.
+    """
+    if not nav_results:
+        return None
+
+    if car_id is not None:
+        for n in nav_results:
+            if n.get("car_id") == car_id:
+                return n
+        return None
+
+    # 목표 구역이 배정된 차량을 우선, 그중 목적지가 가장 가까운 차량
+    with_target = [n for n in nav_results if n.get("target_spot")]
+    if with_target:
+        return min(with_target, key=lambda n: n.get("distance_cm") or float('inf'))
+    return nav_results[0]
 
 
 # 내비게이션 맵 UI
@@ -431,75 +926,108 @@ if __name__ == '__main__':
 
     if DEMO_MODE:
         # ---------------------------------------------------------
-        # 데모 모드: 합성 차량 2대가 각자 목표 구역으로 이동하는 장면
+        # 데모 모드: 카메라 없이, 실제 경로 계획기를 태운 합성 차량 주행
+        # 가짜 직선 데이터가 아니라 C00/C01의 실제 코드가 돌아간다.
         # ---------------------------------------------------------
         import time
-        from logic.C00_navigation import GUIDE_STRAIGHT, GUIDE_RIGHT
+        import numpy as _np
+        from logic.C00_navigation import MarkerMapper, ParkingNavigator
+        from logic.C01_path_planner import (
+            ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
+        )
 
-        ui = NavigationMapUI()
+        class _DemoMapper(MarkerMapper):
+            """이미지 좌표 == 실좌표 로 두는 데모용 매퍼 (카메라 불필요)."""
+            def __init__(self):
+                self.marker_world_pos = MARKER_WORLD_POS
+                self.H = _np.eye(3, dtype=_np.float32)
+                self.H_inv = _np.eye(3, dtype=_np.float32)
+                self.calibrated_with, self.reproj_error = 8, 0.0
+                self.locked, self.lock_markers, self._warned = True, 6, set()
+            def detect_markers(self, frame):
+                return {}
+            def update_homography(self, markers):
+                return True
 
-        # 데모용 점유 상태 (실제 spot_status 대신 사용)
-        demo_status = {spot_id: "empty" for spot_id in ui.spot_world_pos}
+        spots = {s: MARKER_WORLD_POS[m] for m, s in MARKER_TO_SPOT.items()
+                 if m in MARKER_WORLD_POS}
+        lot = ParkingLotMap(
+            spots, GATE_WORLD_POS,
+            resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
+            spot_w=C01_CONFIG['SPOT_W_CM'], spot_h=C01_CONFIG['SPOT_H_CM'],
+            clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
+            lot_margin=C01_CONFIG['LOT_MARGIN_CM'])
+        demo_nav = ParkingNavigator(mapper=_DemoMapper(),
+                                    planner=RoutePlanner(lot, simplify=True),
+                                    waypoint_radius=10.0)
+
+        view = NavigationView(navigator=demo_nav)
+        overview = NavigationMapUI(navigator=demo_nav)
+
+        demo_status = {s: "empty" for s in spots}
         demo_status["A-3"] = "full"
         demo_status["B-2"] = "full"
 
-        def demo_frames():
-            step = 0
+        # 목적지를 바꿔가며 반복 주행
+        _goals = ["A-1", "B-1", "A-4", "B-3"]
+        _state = {"pos": (-30.0, 30.0), "goal": 0, "results": []}
+        demo_nav.set_target("1234", _goals[0])
+
+        def _tick():
+            """데모 차량을 경로를 따라 한 걸음 전진시키고 nav 결과를 갱신."""
+            blank = _np.zeros((4, 4, 3), dtype=_np.uint8)
+            res = demo_nav.update(blank, [{"track_id": 1, "car_id": "1234",
+                                           "center": _state["pos"]}])
+            _state["results"] = res
+            if not res:
+                return None
+
+            nav = res[0]
+            wp = nav.get("next_waypoint")
+            if wp is None or nav.get("guide") == GUIDE_ARRIVED:
+                # 도착하면 잠시 멈췄다가 다음 목적지로
+                _state["goal"] = (_state["goal"] + 1) % len(_goals)
+                _state["pos"] = GATE_WORLD_POS
+                demo_nav.clear_vehicle("1234")
+                demo_nav.set_target("1234", _goals[_state["goal"]])
+                return nav
+
+            p = _state["pos"]
+            d = math.hypot(wp[0] - p[0], wp[1] - p[1])
+            if d > 1e-6:
+                _state["pos"] = (p[0] + (wp[0] - p[0]) / d * 2.0,
+                                 p[1] + (wp[1] - p[1]) / d * 2.0)
+            return nav
+
+        def nav_frames():
+            """차량 시점 내비게이션 화면 스트리밍."""
             while True:
-                t = (step % 120) / 120.0    # 0.0 ~ 1.0 반복
-
-                # 차량 1: 입출구 -> A-1 로 이동
-                start1, goal1 = (-30.0, 30.0), ui.spot_world_pos["A-1"]
-                pos1 = (start1[0] + (goal1[0] - start1[0]) * t,
-                        start1[1] + (goal1[1] - start1[1]) * t)
-                dist1 = math.hypot(goal1[0] - pos1[0], goal1[1] - pos1[1])
-
-                # 차량 2: 오른쪽에서 B-4 로 이동
-                start2, goal2 = (110.0, 10.0), ui.spot_world_pos["B-4"]
-                pos2 = (start2[0] + (goal2[0] - start2[0]) * t,
-                        start2[1] + (goal2[1] - start2[1]) * t)
-                dist2 = math.hypot(goal2[0] - pos2[0], goal2[1] - pos2[1])
-
-                nav_results = [
-                    {
-                        "track_id": 1, "car_id": "1234",
-                        "image_pos": (0, 0), "world_pos": pos1,
-                        "heading_deg": math.degrees(math.atan2(goal1[1] - start1[1],
-                                                               goal1[0] - start1[0])),
-                        "target_spot": "A-1", "target_world": goal1,
-                        "distance_cm": dist1,
-                        "guide": GUIDE_ARRIVED if dist1 < 15 else GUIDE_STRAIGHT,
-                        "guide_text": "", "nearest_spot": "A-1",
-                    },
-                    {
-                        "track_id": 2, "car_id": "1998",
-                        "image_pos": (0, 0), "world_pos": pos2,
-                        "heading_deg": math.degrees(math.atan2(goal2[1] - start2[1],
-                                                               goal2[0] - start2[0])),
-                        "target_spot": "B-4", "target_world": goal2,
-                        "distance_cm": dist2,
-                        "guide": GUIDE_ARRIVED if dist2 < 15 else GUIDE_RIGHT,
-                        "guide_text": "", "nearest_spot": "B-4",
-                    },
-                ]
-
-                canvas = ui.render(
-                    nav_results,
-                    spot_status=demo_status,
-                    fps=30.0,
-                    extra_info=["DEMO MODE", "no camera / no UART"]
-                )
-
-                ret, buffer = cv2.imencode('.jpg', canvas)
+                nav = _tick()
+                canvas = view.render(nav, spot_status=demo_status, fps=30.0,
+                                     extra_info=["DEMO", "no camera / no UART"])
+                ret, buf = cv2.imencode('.jpg', canvas)
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-                step += 1
+                       b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
                 time.sleep(1 / 30)
+
+        def map_frames():
+            """관제용 조감도 스트리밍 (같은 상태를 위에서 본 화면)."""
+            while True:
+                canvas = overview.render(_state["results"], spot_status=demo_status,
+                                         fps=30.0, extra_info=["DEMO MODE"])
+                ret, buf = cv2.imencode('.jpg', canvas)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+                time.sleep(1 / 15)
+
+        @app.route('/nav_feed')
+        def nav_feed():
+            return Response(nav_frames(),
+                            mimetype='multipart/x-mixed-replace; boundary=frame')
 
         @app.route('/map_feed')
         def map_feed():
-            return Response(demo_frames(),
+            return Response(map_frames(),
                             mimetype='multipart/x-mixed-replace; boundary=frame')
 
         @app.route('/')
@@ -507,11 +1035,16 @@ if __name__ == '__main__':
             return f"""
             <html>
                 <head><title>Parking Navigation UI (DEMO)</title></head>
-                <body style="background-color:#222; color:white; text-align:center;">
-                    <h2>Parking Navigation UI - DEMO MODE</h2>
-                    <p>합성 데이터로 맵 UI만 확인하는 모드입니다.
+                <body style="background-color:#1a1a1a; color:white; text-align:center;
+                             font-family:sans-serif;">
+                    <h2>Parking Navigation - DEMO MODE</h2>
+                    <p style="color:#aaa;">카메라 없이 실제 경로 계획기로 주행하는 화면입니다.
                        실제 연동은 DEMO_MODE = False 로 변경하세요.</p>
-                    <img src="/map_feed" width="{CONFIG['MAP_WIDTH']}" height="{CONFIG['MAP_HEIGHT']}">
+                    <img src="/nav_feed"
+                         width="{CONFIG['NAV_WIDTH']}" height="{CONFIG['NAV_HEIGHT']}">
+                    <h3 style="font-weight:normal; color:#aaa;">Overview (관제 화면)</h3>
+                    <img src="/map_feed"
+                         width="{CONFIG['MAP_WIDTH']}" height="{CONFIG['MAP_HEIGHT']}">
                 </body>
             </html>
             """
@@ -533,30 +1066,48 @@ if __name__ == '__main__':
 
         pipeline = build_pipeline(cap)
         uart_sim_stop = setup_car_number_source()
+        view = NavigationView(navigator=pipeline.navigator)
         ui = NavigationMapUI(navigator=pipeline.navigator)
+
+        # /nav_feed 에서 어느 차량을 '내 차'로 볼지. None이면 자동 선택.
+        MY_CAR = {"id": None}
+
+        def _extra_info():
+            """호모그래피/마커/FIFO 상태 문자열."""
+            mapper = pipeline.navigator.mapper
+            if not mapper.is_ready():
+                state = "NOT READY"
+            elif mapper.locked:
+                state = f"LOCKED {mapper.calibrated_with}pt {mapper.reproj_error:.1f}cm"
+            else:
+                state = f"PROVISIONAL {mapper.calibrated_with}/{mapper.lock_markers}pt"
+            return [
+                f"homography: {state}",
+                f"markers: {len(pipeline.navigator.latest_markers)}",
+                f"fifo: {car_number_fifo.size()} waiting",
+            ]
+
+        def nav_frames():
+            """차량 시점 내비게이션 화면. 파이프라인의 최신 결과를 읽어 그린다."""
+            import time
+            while True:
+                nav = pick_my_vehicle(pipeline.latest_nav, MY_CAR["id"])
+                canvas = view.render(nav, fps=pipeline.fps, extra_info=_extra_info())
+                ret, buf = cv2.imencode('.jpg', canvas)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+                time.sleep(1 / 20)
 
         def map_frames():
             """
-            파이프라인이 갱신한 최신 결과로 맵을 그린다.
+            관제용 조감도. 여러 차량을 한 번에 본다.
             영상 처리는 /video_feed 쪽 제너레이터가 수행하므로,
             여기서는 최신 상태를 읽어 그리기만 한다.
             """
             import time
             while True:
-                mapper = pipeline.navigator.mapper
-                if not mapper.is_ready():
-                    state = "NOT READY"
-                elif mapper.locked:
-                    state = f"LOCKED {mapper.calibrated_with}pt {mapper.reproj_error:.1f}cm"
-                else:
-                    state = f"PROVISIONAL {mapper.calibrated_with}/{mapper.lock_markers}pt"
-                extra = [
-                    f"homography: {state}",
-                    f"markers: {len(pipeline.navigator.latest_markers)}",
-                    f"fifo: {car_number_fifo.size()} waiting",
-                ]
-                canvas = ui.render(pipeline.latest_nav, fps=pipeline.fps, extra_info=extra)
-
+                canvas = ui.render(pipeline.latest_nav, fps=pipeline.fps,
+                                   extra_info=_extra_info())
                 ret, buffer = cv2.imencode('.jpg', canvas)
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
@@ -567,10 +1118,21 @@ if __name__ == '__main__':
             return Response(pipeline.generate_frames(),
                             mimetype='multipart/x-mixed-replace; boundary=frame')
 
+        @app.route('/nav_feed')
+        def nav_feed():
+            return Response(nav_frames(),
+                            mimetype='multipart/x-mixed-replace; boundary=frame')
+
         @app.route('/map_feed')
         def map_feed():
             return Response(map_frames(),
                             mimetype='multipart/x-mixed-replace; boundary=frame')
+
+        @app.route('/follow/<car_id>')
+        def follow(car_id):
+            """내비게이션 화면에 띄울 차량을 지정. 'auto'면 자동 선택."""
+            MY_CAR["id"] = None if car_id == "auto" else car_id
+            return f"내비게이션 대상: {MY_CAR['id'] or '자동 선택'}"
 
         @app.route('/enqueue/<car_id>')
         def enqueue(car_id):
@@ -586,21 +1148,26 @@ if __name__ == '__main__':
             return f"""
             <html>
                 <head><title>Parking Navigation UI</title></head>
-                <body style="background-color:#222; color:white; text-align:center;">
-                    <h2>Jetson Orin Nano - Parking Navigation UI</h2>
+                <body style="background-color:#1a1a1a; color:white; text-align:center;
+                             font-family:sans-serif;">
+                    <h2>Jetson Orin Nano - Parking Navigation</h2>
+                    <img src="/nav_feed"
+                         width="{CONFIG['NAV_WIDTH']}" height="{CONFIG['NAV_HEIGHT']}">
                     <div style="display:flex; justify-content:center; gap:16px;
-                                flex-wrap:wrap; align-items:flex-start;">
+                                flex-wrap:wrap; align-items:flex-start; margin-top:18px;">
                         <div>
-                            <h3 style="font-weight:normal;">Camera</h3>
+                            <h3 style="font-weight:normal; color:#aaa;">Camera</h3>
                             <img src="/video_feed"
                                  width="{C_CONFIG['CAM_WIDTH']}" height="{C_CONFIG['CAM_HEIGHT']}">
                         </div>
                         <div>
-                            <h3 style="font-weight:normal;">Navigation Map</h3>
+                            <h3 style="font-weight:normal; color:#aaa;">Overview (관제)</h3>
                             <img src="/map_feed"
                                  width="{CONFIG['MAP_WIDTH']}" height="{CONFIG['MAP_HEIGHT']}">
                         </div>
                     </div>
+                    <p style="color:#888;">내비 대상 지정: <code>/follow/1234</code>
+                       | 자동: <code>/follow/auto</code></p>
                     <p>차량번호 수동 등록: <code>/enqueue/1234</code> | 상태: <code>/status</code></p>
                 </body>
             </html>
