@@ -1,0 +1,634 @@
+import cv2
+import sys
+import os
+import math
+import numpy as np
+import cv2.aruco as aruco
+from collections import deque
+
+# 상위 디렉토리(python_code)를 import 경로에 추가
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# 설정 (Configuration)
+# 이 모듈은 '위치 추정 및 경로 안내'만 담당.
+#   - 검출 : B01_car_detection.py
+#   - 추적 : B02_car_mot.py  (여기서 나온 박스 정중앙점을 입력으로 사용)
+CONFIG = {
+    # ArUco 마커 설정
+    "ARUCO_DICT": "DICT_4X4_50",    # 마커 사전 (실제 출력한 마커와 일치해야 함)
+    "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산에 필요한 최소 마커 수
+
+    # 카메라가 고정 설치된 경우 True 권장.
+    # 한 번 계산한 호모그래피를 계속 재사용하므로, 차량이 마커를 가려도
+    # 위치 추정이 끊기지 않는다. 카메라가 움직이면 False로 둘 것.
+    "LOCK_HOMOGRAPHY": True,
+
+    # 내비게이션 판정 기준
+    "ARRIVAL_THRESHOLD_CM": 15.0,   # 목표 지점 이 거리 이내면 '도착'으로 판정
+    "TURN_ANGLE_THRESHOLD_DEG": 25.0, # 이 각도 이내면 '직진'으로 안내
+    "UTURN_ANGLE_THRESHOLD_DEG": 150.0, # 이 각도 이상이면 '유턴'으로 안내
+    "MIN_MOVE_CM_FOR_HEADING": 3.0, # 진행 방향 계산에 필요한 최소 이동 거리
+    "HEADING_WINDOW": 5,            # 진행 방향 계산에 사용할 최근 위치 개수
+    "HISTORY_MAXLEN": 128,          # 차량별 위치 이력 최대 길이
+}
+
+# =====================================================================
+# 마커 ID -> 주차장 실제 좌표 (cm)
+# =====================================================================
+# 주의: 아래 값은 navi.png의 마커 배치(상단 5,6,7,8 / 하단 1,2,3,4)를 기준으로 한
+#       '초기 추정값'이다. 반드시 실제 주차장(또는 목업)을 자로 측정해서 수정할 것.
+#       이 값이 부정확하면 차량 위치도 그대로 부정확해진다.
+#
+# 좌표계: 왼쪽 상단 마커(ID 5)를 원점 (0, 0)으로 하고,
+#         x축은 오른쪽 방향(+), y축은 아래쪽 방향(+). 단위는 cm.
+#
+#   (0,0)   (30,0)  (60,0)  (90,0)
+#     [5]     [6]     [7]     [8]      <- 상단
+#
+#     [1]     [2]     [3]     [4]      <- 하단
+#   (0,60)  (30,60) (60,60) (90,60)
+MARKER_WORLD_POS = {
+    5: (0.0,  0.0),
+    6: (30.0, 0.0),
+    7: (60.0, 0.0),
+    8: (90.0, 0.0),
+
+    1: (0.0,  60.0),
+    2: (30.0, 60.0),
+    3: (60.0, 60.0),
+    4: (90.0, 60.0),
+}
+
+# 마커 ID -> 주차 구역 ID
+# 마커가 주차 자리(또는 그 자리를 표시하는 기둥)를 나타내는 경우의 매핑.
+# data/map_data.py의 spot_status 키와 이름을 맞춰야 A01_parking_manager와 연동된다.
+MARKER_TO_SPOT = {
+    5: "A-1", 6: "A-2", 7: "A-3", 8: "A-4",
+    1: "B-1", 2: "B-2", 3: "B-3", 4: "B-4",
+}
+
+# 입출구(GATE)의 실제 좌표 (cm). 경로 안내 시작점으로 사용.
+GATE_WORLD_POS = (-30.0, 30.0)
+
+# 시각화 색상 (BGR)
+COLOR_MARKER = (255, 200, 0)    # 마커       - 하늘색
+COLOR_PATH   = (0, 255, 255)    # 안내 경로  - 노랑
+COLOR_TARGET = (255, 0, 255)    # 목표 지점  - 자홍
+
+
+# 안내 방향 상수
+GUIDE_STRAIGHT = "STRAIGHT"
+GUIDE_LEFT     = "LEFT"
+GUIDE_RIGHT    = "RIGHT"
+GUIDE_UTURN    = "UTURN"
+GUIDE_ARRIVED  = "ARRIVED"
+GUIDE_UNKNOWN  = "UNKNOWN"      # 진행 방향을 아직 알 수 없음(정지 상태 등)
+
+GUIDE_TEXT_KO = {
+    GUIDE_STRAIGHT: "직진",
+    GUIDE_LEFT:     "좌회전",
+    GUIDE_RIGHT:    "우회전",
+    GUIDE_UTURN:    "유턴",
+    GUIDE_ARRIVED:  "도착",
+    GUIDE_UNKNOWN:  "방향탐색중",
+}
+
+
+# 마커 기반 좌표 변환기
+class MarkerMapper:
+    """
+    ArUco 마커를 검출하여 이미지 좌표 <-> 주차장 실좌표(cm) 변환을 담당.
+
+    카메라가 비스듬히 설치되어 있어도, 바닥 평면 위의 마커 4개 이상이
+    보이면 호모그래피(Homography)로 정확한 평면 좌표를 복원할 수 있다.
+
+    LOCK_HOMOGRAPHY가 True면 한 번 계산한 변환 행렬을 계속 재사용하므로,
+    이후 차량이 마커를 가려도 위치 추정이 끊기지 않는다.
+    """
+
+    def __init__(self, aruco_dict_name='DICT_4X4_50', marker_world_pos=None,
+                 min_markers=4, lock_homography=True):
+        """
+        MarkerMapper 초기화.
+
+        Args:
+            aruco_dict_name:  ArUco 사전 이름 (예: 'DICT_4X4_50')
+            marker_world_pos: {마커ID: (x_cm, y_cm)} 형태의 실좌표 매핑
+            min_markers:      호모그래피 계산에 필요한 최소 마커 수
+            lock_homography:  True면 최초 계산된 호모그래피를 고정 사용
+        """
+        dict_id = getattr(aruco, aruco_dict_name)
+        self.detector = aruco.ArucoDetector(
+            aruco.getPredefinedDictionary(dict_id),
+            aruco.DetectorParameters()
+        )
+        self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
+        self.min_markers = min_markers
+        self.lock_homography = lock_homography
+
+        # 이미지 -> 실좌표 변환 행렬 및 그 역행렬
+        self.H = None
+        self.H_inv = None
+        # 호모그래피 계산에 사용된 마커 개수 (품질 확인용)
+        self.calibrated_with = 0
+
+        print(f"[INFO] ArUco 마커 검출기 초기화 완료. ({aruco_dict_name}, "
+              f"등록된 마커 {len(self.marker_world_pos)}개)")
+
+    def detect_markers(self, frame):
+        """
+        프레임에서 ArUco 마커를 검출.
+
+        Args:
+            frame: OpenCV BGR 이미지 (numpy array)
+
+        Returns:
+            {마커ID: (cx, cy)} 형태의 딕셔너리. cx, cy는 마커 중심의 이미지 좌표.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self.detector.detectMarkers(gray)
+
+        found = {}
+        if ids is None:
+            return found
+
+        for corner, marker_id in zip(corners, ids.flatten()):
+            center = corner[0].mean(axis=0)
+            found[int(marker_id)] = (float(center[0]), float(center[1]))
+
+        return found
+
+    def update_homography(self, markers):
+        """
+        검출된 마커로 이미지 -> 실좌표 변환 행렬을 계산.
+
+        Args:
+            markers: detect_markers()의 반환 결과 {마커ID: (cx, cy)}
+
+        Returns:
+            호모그래피가 유효하면 True, 아니면 False.
+        """
+        # 이미 고정된 호모그래피가 있으면 재계산하지 않음
+        if self.lock_homography and self.H is not None:
+            return True
+
+        # 실좌표가 등록된 마커만 사용
+        img_pts, world_pts = [], []
+        for marker_id, img_pt in markers.items():
+            world_pt = self.marker_world_pos.get(marker_id)
+            if world_pt is None:
+                continue
+            img_pts.append(img_pt)
+            world_pts.append(world_pt)
+
+        if len(img_pts) < self.min_markers:
+            return self.H is not None
+
+        img_arr = np.array(img_pts, dtype=np.float32)
+        world_arr = np.array(world_pts, dtype=np.float32)
+
+        # 마커가 4개를 넘으면 RANSAC으로 이상치를 배제
+        method = cv2.RANSAC if len(img_pts) > 4 else 0
+        H, _ = cv2.findHomography(img_arr, world_arr, method, 5.0)
+        if H is None:
+            return self.H is not None
+
+        self.H = H
+        self.H_inv = np.linalg.inv(H)
+        self.calibrated_with = len(img_pts)
+        print(f"[INFO] 호모그래피 계산 완료. (마커 {len(img_pts)}개 사용)")
+        return True
+
+    def is_ready(self):
+        """좌표 변환이 가능한 상태인지 확인."""
+        return self.H is not None
+
+    def image_to_world(self, point):
+        """
+        이미지 좌표를 주차장 실좌표(cm)로 변환.
+
+        Args:
+            point: (x, y) 이미지 좌표
+
+        Returns:
+            (x_cm, y_cm) 실좌표. 호모그래피가 없으면 None.
+        """
+        if self.H is None:
+            return None
+        src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, self.H)
+        return float(dst[0][0][0]), float(dst[0][0][1])
+
+    def world_to_image(self, point):
+        """
+        주차장 실좌표(cm)를 이미지 좌표로 변환. (경로 시각화용)
+
+        Args:
+            point: (x_cm, y_cm) 실좌표
+
+        Returns:
+            (x, y) 이미지 좌표. 호모그래피가 없으면 None.
+        """
+        if self.H_inv is None:
+            return None
+        src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, self.H_inv)
+        return int(dst[0][0][0]), int(dst[0][0][1])
+
+    def reset(self):
+        """호모그래피를 초기화. (카메라를 다시 설치했을 때 사용)"""
+        self.H = None
+        self.H_inv = None
+        self.calibrated_with = 0
+        print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
+
+    def draw_markers(self, frame, markers):
+        """검출된 마커의 위치와 ID를 프레임에 표시."""
+        for marker_id, (cx, cy) in markers.items():
+            cx, cy = int(cx), int(cy)
+            cv2.circle(frame, (cx, cy), 6, COLOR_MARKER, -1)
+            spot_id = MARKER_TO_SPOT.get(marker_id, "")
+            label = f"{marker_id}:{spot_id}" if spot_id else str(marker_id)
+            cv2.putText(frame, label, (cx + 8, cy - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_MARKER, 2, cv2.LINE_AA)
+        return frame
+
+
+# 차량 위치 추정 및 경로 안내
+class ParkingNavigator:
+    """
+    B02_car_mot의 추적 결과를 받아 각 차량의 실시간 실좌표를 계산하고,
+    배정된 주차 구역까지의 경로를 안내한다.
+
+    이 클래스는 검출/추적을 하지 않는다. B02가 만든 트랙(track)의
+    박스 정중앙점을 입력으로 받아 위치 추정과 안내만 수행한다.
+
+    동작 흐름:
+      1. MarkerMapper가 ArUco 마커로 호모그래피를 계산한다.
+      2. 각 차량의 박스 정중앙점을 실좌표(cm)로 변환한다.
+      3. 위치 이력으로 진행 방향(heading)을 추정한다.
+      4. 목표 주차 구역까지의 방위각과 비교해 좌/우/직진/도착을 안내한다.
+    """
+
+    def __init__(self, mapper=None, marker_to_spot=None,
+                 arrival_threshold=15.0, turn_threshold=25.0, uturn_threshold=150.0,
+                 min_move_for_heading=3.0, heading_window=5, history_maxlen=128):
+        """
+        ParkingNavigator 초기화.
+
+        Args:
+            mapper:               MarkerMapper 인스턴스 (None이면 기본 설정으로 생성)
+            marker_to_spot:       {마커ID: 주차구역ID} 매핑
+            arrival_threshold:    도착 판정 거리 (cm)
+            turn_threshold:       직진으로 볼 각도 허용치 (도)
+            uturn_threshold:      유턴으로 안내할 각도 (도)
+            min_move_for_heading: 진행 방향 계산에 필요한 최소 이동 거리 (cm)
+            heading_window:       진행 방향 계산에 쓸 최근 위치 개수
+            history_maxlen:       차량별 위치 이력 최대 길이
+        """
+        self.mapper = mapper if mapper is not None else MarkerMapper()
+        self.marker_to_spot = marker_to_spot or MARKER_TO_SPOT
+
+        self.arrival_threshold = arrival_threshold
+        self.turn_threshold = turn_threshold
+        self.uturn_threshold = uturn_threshold
+        self.min_move_for_heading = min_move_for_heading
+        self.heading_window = heading_window
+        self.history_maxlen = history_maxlen
+
+        # 주차 구역 ID -> 실좌표 (cm). 마커 위치로부터 생성.
+        self.spot_world_pos = {}
+        for marker_id, spot_id in self.marker_to_spot.items():
+            world_pt = self.mapper.marker_world_pos.get(marker_id)
+            if world_pt is not None:
+                self.spot_world_pos[spot_id] = world_pt
+
+        # 차량번호 -> 실좌표 이력 deque([(x_cm, y_cm), ...])
+        self.world_history = {}
+        # 차량번호 -> 목표 주차 구역 ID
+        self.targets = {}
+        # 가장 최근 프레임에서 검출된 마커 {마커ID: (cx, cy)} (시각화 재사용용)
+        self.latest_markers = {}
+
+        print(f"[INFO] 내비게이터 초기화 완료. (주차 구역 {len(self.spot_world_pos)}개 등록)")
+
+    def set_target(self, car_id, spot_id):
+        """
+        차량의 목표 주차 구역을 지정.
+
+        A01_parking_manager가 빈자리를 배정한 뒤 호출하면 된다.
+
+        Args:
+            car_id:  차량 번호 4자리 문자열
+            spot_id: 목표 주차 구역 ID (예: "A-1")
+        """
+        if spot_id not in self.spot_world_pos:
+            print(f"[경고] 주차 구역 '{spot_id}'의 실좌표가 등록되지 않았습니다.")
+            return False
+
+        self.targets[car_id] = spot_id
+        print(f"[안내] 차량 '{car_id}' 목표 구역 설정: {spot_id}")
+        return True
+
+    def sync_targets_from_parking_manager(self):
+        """
+        A01_parking_manager가 관리하는 입차 정보(cars_info)를 읽어
+        각 차량의 목표 구역을 자동으로 동기화.
+        """
+        from data.car_data import cars_info
+
+        for car_id, info in cars_info.items():
+            spot_id = info.get("spot_id")
+            if spot_id and self.targets.get(car_id) != spot_id:
+                self.set_target(car_id, spot_id)
+
+    def update(self, frame, tracks):
+        """
+        한 프레임 분량의 추적 결과로 각 차량의 위치와 안내 정보를 갱신.
+
+        Args:
+            frame:  OpenCV BGR 이미지 (마커 검출용)
+            tracks: B02_car_mot.CarMOT.update()의 반환 결과 리스트
+
+        Returns:
+            내비게이션 결과 리스트. 각 항목은 딕셔너리:
+            [
+                {
+                    "track_id": 5,
+                    "car_id": "1234",
+                    "image_pos": (cx, cy),          # 이미지 좌표
+                    "world_pos": (x_cm, y_cm),      # 주차장 실좌표
+                    "heading_deg": 92.5,            # 진행 방향 (없으면 None)
+                    "target_spot": "A-1",           # 목표 구역 (없으면 None)
+                    "target_world": (0.0, 0.0),     # 목표 실좌표 (없으면 None)
+                    "distance_cm": 45.2,            # 목표까지 남은 거리
+                    "guide": "LEFT",                # 안내 방향 상수
+                    "guide_text": "좌회전",          # 한글 안내
+                    "nearest_spot": "A-2",          # 현재 가장 가까운 구역
+                },
+                ...
+            ]
+        """
+        # 1) 마커 검출 및 호모그래피 갱신
+        markers = self.mapper.detect_markers(frame)
+        self.latest_markers = markers
+        self.mapper.update_homography(markers)
+
+        results = []
+        if not self.mapper.is_ready():
+            # 아직 좌표 변환이 불가능한 상태 (마커가 충분히 보이지 않음)
+            return results
+
+        for trk in tracks:
+            car_id = trk.get("car_id")
+            image_pos = trk["center"]
+
+            world_pos = self.mapper.image_to_world(image_pos)
+            if world_pos is None:
+                continue
+
+            # 위치 이력 갱신 (차량번호가 없으면 track_id로 임시 키 사용)
+            key = car_id if car_id else f"track_{trk['track_id']}"
+            history = self.world_history.setdefault(
+                key, deque(maxlen=self.history_maxlen)
+            )
+            history.append(world_pos)
+
+            heading = self._compute_heading(history)
+            target_spot = self.targets.get(car_id) if car_id else None
+            target_world = self.spot_world_pos.get(target_spot) if target_spot else None
+
+            distance = None
+            guide = GUIDE_UNKNOWN
+            if target_world is not None:
+                distance = self._distance(world_pos, target_world)
+                guide = self._compute_guide(world_pos, heading, target_world, distance)
+
+            results.append({
+                "track_id": trk["track_id"],
+                "car_id": car_id,
+                "image_pos": image_pos,
+                "world_pos": world_pos,
+                "heading_deg": heading,
+                "target_spot": target_spot,
+                "target_world": target_world,
+                "distance_cm": distance,
+                "guide": guide,
+                "guide_text": GUIDE_TEXT_KO.get(guide, guide),
+                "nearest_spot": self.find_nearest_spot(world_pos),
+            })
+
+        return results
+
+    def _compute_heading(self, history):
+        """
+        최근 위치 이력으로 차량의 진행 방향(도)을 계산.
+
+        좌표계가 y축 아래 방향(+)이므로, 각도는 시계 방향으로 증가한다.
+        (0도 = 오른쪽, 90도 = 아래쪽)
+
+        Returns:
+            진행 방향 각도. 이동량이 너무 적으면 None.
+        """
+        if len(history) < 2:
+            return None
+
+        recent = list(history)[-self.heading_window:]
+        start, end = recent[0], recent[-1]
+        dx, dy = end[0] - start[0], end[1] - start[1]
+
+        # 정지 상태에서는 방향을 신뢰할 수 없음
+        if math.hypot(dx, dy) < self.min_move_for_heading:
+            return None
+
+        return math.degrees(math.atan2(dy, dx))
+
+    def _compute_guide(self, world_pos, heading, target_world, distance):
+        """
+        현재 위치/진행 방향과 목표 지점을 비교해 안내 방향을 결정.
+        """
+        if distance <= self.arrival_threshold:
+            return GUIDE_ARRIVED
+
+        if heading is None:
+            return GUIDE_UNKNOWN
+
+        # 목표 지점의 방위각
+        dx = target_world[0] - world_pos[0]
+        dy = target_world[1] - world_pos[1]
+        bearing = math.degrees(math.atan2(dy, dx))
+
+        # 진행 방향과의 차이를 [-180, 180] 범위로 정규화
+        diff = (bearing - heading + 180) % 360 - 180
+
+        if abs(diff) >= self.uturn_threshold:
+            return GUIDE_UTURN
+        if abs(diff) <= self.turn_threshold:
+            return GUIDE_STRAIGHT
+        # y축이 아래 방향이므로 각도가 커지는 쪽이 시계 방향(우회전)
+        return GUIDE_RIGHT if diff > 0 else GUIDE_LEFT
+
+    @staticmethod
+    def _distance(p1, p2):
+        """두 실좌표 사이의 거리(cm)."""
+        return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+    def find_nearest_spot(self, world_pos):
+        """
+        주어진 실좌표에서 가장 가까운 주차 구역 ID를 반환.
+
+        Args:
+            world_pos: (x_cm, y_cm) 실좌표
+
+        Returns:
+            가장 가까운 구역 ID. 등록된 구역이 없으면 None.
+        """
+        if not self.spot_world_pos:
+            return None
+
+        return min(
+            self.spot_world_pos,
+            key=lambda s: self._distance(world_pos, self.spot_world_pos[s])
+        )
+
+    def get_world_position(self, car_id):
+        """차량 번호로 현재 실좌표를 조회. 이력이 없으면 None."""
+        history = self.world_history.get(car_id)
+        return history[-1] if history else None
+
+    def get_world_trajectory(self, car_id):
+        """차량 번호로 실좌표 이동 궤적 리스트를 반환."""
+        return list(self.world_history.get(car_id, []))
+
+    def clear_vehicle(self, car_id):
+        """출차 등으로 추적이 끝난 차량의 이력과 목표를 제거."""
+        self.world_history.pop(car_id, None)
+        self.targets.pop(car_id, None)
+
+    def draw_navigation(self, frame, nav_results, draw_target_line=True):
+        """
+        내비게이션 정보를 프레임에 시각화.
+
+        Args:
+            frame:            OpenCV BGR 이미지 (원본이 수정됨)
+            nav_results:      update() 메서드의 반환 결과 리스트
+            draw_target_line: 목표 지점까지 안내선을 그릴지 여부
+
+        Returns:
+            시각화가 적용된 프레임
+        """
+        for nav in nav_results:
+            cx, cy = int(nav["image_pos"][0]), int(nav["image_pos"][1])
+            wx, wy = nav["world_pos"]
+
+            # 실좌표 표시
+            cv2.putText(frame, f"({wx:.0f},{wy:.0f})cm", (cx - 40, cy + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
+
+            if not draw_target_line or nav["target_world"] is None:
+                continue
+
+            # 목표 지점까지 안내선
+            target_img = self.mapper.world_to_image(nav["target_world"])
+            if target_img is not None:
+                cv2.arrowedLine(frame, (cx, cy), target_img, COLOR_PATH, 2, tipLength=0.05)
+                cv2.circle(frame, target_img, 8, COLOR_TARGET, 2)
+
+            # 안내 문구 (한글은 OpenCV에서 렌더링되지 않으므로 영문 상수 사용)
+            dist = nav["distance_cm"]
+            label = f"{nav['target_spot']} {nav['guide']} {dist:.0f}cm"
+            cv2.putText(frame, label, (cx - 40, cy + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TARGET, 2, cv2.LINE_AA)
+
+        return frame
+
+
+# =====================================================================
+# 테스트용 메인 (단독 실행 시 navi.png로 마커 검출 및 좌표 변환 검증)
+# =====================================================================
+# 카메라 없이 저장된 이미지로 호모그래피 정확도를 확인할 수 있다.
+# 카메라 + 검출 + 추적 + 내비게이션 통합 실행은 B_main.py에 연결할 것.
+if __name__ == '__main__':
+    print("==========================================")
+    print(" C00 : 주차장 내비게이션 (ArUco + Homography)")
+    print(" 단독 테스트 : navi.png로 좌표 변환 검증")
+    print("==========================================")
+
+    # 프로젝트 루트의 yolo/navi.png 사용
+    project_root = os.path.join(os.path.dirname(__file__), '..', '..')
+    image_path = os.path.abspath(os.path.join(project_root, 'yolo', 'navi.png'))
+
+    if not os.path.exists(image_path):
+        print(f"[ERROR] 테스트 이미지를 찾을 수 없습니다: {image_path}")
+        sys.exit(1)
+
+    frame = cv2.imread(image_path)
+    print(f"[INFO] 테스트 이미지 로드: {image_path} {frame.shape}")
+
+    mapper = MarkerMapper(
+        aruco_dict_name=CONFIG['ARUCO_DICT'],
+        min_markers=CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'],
+        lock_homography=CONFIG['LOCK_HOMOGRAPHY']
+    )
+
+    # 1) 마커 검출
+    markers = mapper.detect_markers(frame)
+    print(f"\n[TEST] 검출된 마커 {len(markers)}개: {sorted(markers.keys())}")
+    for marker_id in sorted(markers):
+        cx, cy = markers[marker_id]
+        print(f"  ID {marker_id}: 이미지 좌표 ({cx:7.1f}, {cy:7.1f})")
+
+    # 2) 호모그래피 계산
+    if not mapper.update_homography(markers):
+        print("[ERROR] 호모그래피를 계산할 수 없습니다. 마커가 충분히 보이는지 확인하세요.")
+        sys.exit(1)
+
+    # 3) 역변환 정확도 검증
+    #    검출된 마커를 실좌표로 되돌렸을 때 등록값과 얼마나 일치하는지 확인한다.
+    print(f"\n[TEST] 좌표 변환 정확도 검증 (등록값 대비 오차)")
+    print(f"{'ID':>4} {'등록 좌표(cm)':>18} {'변환 결과(cm)':>18} {'오차(cm)':>10}")
+    errors = []
+    for marker_id in sorted(markers):
+        expected = MARKER_WORLD_POS.get(marker_id)
+        if expected is None:
+            continue
+        actual = mapper.image_to_world(markers[marker_id])
+        err = math.hypot(actual[0] - expected[0], actual[1] - expected[1])
+        errors.append(err)
+        print(f"{marker_id:>4} {str(expected):>18} "
+              f"{f'({actual[0]:.1f}, {actual[1]:.1f})':>18} {err:>10.2f}")
+
+    if errors:
+        print(f"\n  평균 오차: {sum(errors)/len(errors):.2f} cm | 최대 오차: {max(errors):.2f} cm")
+
+    # 4) 내비게이션 안내 시뮬레이션
+    #    navi.png에서 차량이 있던 위치(ID:12 트랙의 정중앙점 부근)를 사용
+    print(f"\n[TEST] 내비게이션 안내 시뮬레이션")
+    navigator = ParkingNavigator(
+        mapper=mapper,
+        arrival_threshold=CONFIG['ARRIVAL_THRESHOLD_CM'],
+        turn_threshold=CONFIG['TURN_ANGLE_THRESHOLD_DEG'],
+        uturn_threshold=CONFIG['UTURN_ANGLE_THRESHOLD_DEG'],
+        min_move_for_heading=CONFIG['MIN_MOVE_CM_FOR_HEADING'],
+        heading_window=CONFIG['HEADING_WINDOW']
+    )
+    navigator.set_target("1234", "B-1")
+
+    # 차량이 오른쪽에서 왼쪽으로 이동하는 상황을 합성 트랙으로 재현
+    for step in range(6):
+        fake_track = {
+            "track_id": 12,
+            "car_id": "1234",
+            "center": (920 - step * 40, 500 + step * 20),
+        }
+        nav_results = navigator.update(frame, [fake_track])
+        if not nav_results:
+            continue
+        nav = nav_results[0]
+        heading_str = f"{nav['heading_deg']:6.1f}도" if nav['heading_deg'] is not None else "  탐색중"
+        dist_str = f"{nav['distance_cm']:6.1f}cm" if nav['distance_cm'] is not None else "     -"
+        print(f"  step {step}: 실좌표=({nav['world_pos'][0]:6.1f}, {nav['world_pos'][1]:6.1f})cm "
+              f"| 방향={heading_str} | 목표까지={dist_str} | 안내={nav['guide_text']} "
+              f"| 최근접={nav['nearest_spot']}")
+
+    print(f"\n[TEST] 완료. MARKER_WORLD_POS를 실제 측정값으로 수정해야 정확한 좌표가 나옵니다.")

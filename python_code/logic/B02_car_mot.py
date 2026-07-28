@@ -14,9 +14,7 @@ from ultralytics.utils.checks import check_yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.B01_car_detection import VEHICLE_CLASS_NAMES
 
-# ---------------------------------------------------------
 # 설정 (Configuration)
-# ---------------------------------------------------------
 # 이 모듈은 '추적'만 담당한다. 검출 관련 설정(모델 경로, conf, imgsz 등)은
 # B01_car_detection.py의 CONFIG에서 관리한다.
 CONFIG = {
@@ -34,21 +32,19 @@ COLOR_MATCHED = (0, 255, 0)     # 번호 매칭 완료 - 초록
 COLOR_PENDING = (0, 165, 255)   # 번호 대기 중   - 주황
 
 
-# =====================================================================
 # 차량번호 FIFO 큐
-# =====================================================================
 class CarNumberFIFO:
     """
     UART로 수신된 차량 번호를 들어온 순서대로 관리하는 FIFO 큐.
 
     입구에서 차량이 검출되면 Zybo가 UART로 차량 번호를 송신하고,
-    Jetson은 그 번호를 이 큐에 순서대로 적재한다.
+    Jetson은 그 번호를 이 큐에 순서대로 적재.
 
     이후 카메라에 새로운 차량이 검출(추적 시작)되면
-    큐의 가장 앞(가장 먼저 들어온) 번호를 꺼내어 해당 트랙에 부여한다.
+    큐의 가장 앞(가장 먼저 들어온) 번호를 꺼내어 해당 트랙에 부여.
 
     UART 수신 스레드와 영상 처리 스레드가 동시에 접근하므로
-    모든 연산은 Lock으로 보호한다.
+    모든 연산은 Lock으로 보호.
     """
 
     def __init__(self):
@@ -110,9 +106,7 @@ class CarNumberFIFO:
             self._queue.clear()
 
 
-# =====================================================================
 # 검출 결과 -> ByteTrack 입력 어댑터
-# =====================================================================
 class DetectionResults:
     """
     B01_car_detection의 검출 결과(list of dict)를 ByteTrack이 요구하는
@@ -167,16 +161,14 @@ class DetectionResults:
         return DetectionResults(self.xywh[mask], self.conf[mask], self.cls[mask])
 
 
-# =====================================================================
 # ByteTrack 기반 차량 추적 + 차량번호 매칭
-# =====================================================================
 class CarMOT:
     """
     ByteTrack을 이용한 다중 객체 추적(MOT) 및 차량번호 매칭 클래스.
 
-    이 클래스는 '추적'만 담당하며 YOLO 모델을 직접 들고 있지 않는다.
-    검출은 B01_car_detection.CarDetector가 수행하고, 그 결과를
-    update()의 인자로 전달받는다. (검출/추적 책임 분리)
+    이 클래스는 '추적'만 담당하며 YOLO 모델을 직접 들고 있지 않음.
+    검출은 B01_car_detection.CarDetector가 수행하고, 
+    그 결과를 update()의 인자로 전달받는다. (검출/추적 책임 분리)
 
     동작 흐름:
       1. UART로 수신된 차량 번호가 CarNumberFIFO에 순서대로 쌓인다.
@@ -240,7 +232,7 @@ class CarMOT:
                     "class_id": 2,
                     "class_name": "Car",
                     "bbox": [x1, y1, x2, y2],
-                    "center": (cx, cy),        # 하단 중앙 기준점
+                    "center": (cx, cy),        # 박스 정중앙 기준점
                     "confidence": 0.94
                 },
                 ...
