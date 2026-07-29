@@ -44,7 +44,7 @@
 현재 `"full"` 상태인 주차 중인 구역 ID의 set을 반환.
 
 ### `get_empty_spots()`
-현재 `"empty"` 상태인 비어있는 구역 ID의 set을 반환. `logic.path_finder`의 `find_nearest_empty_spot()` 함수에 인자로 넘겨 빈자리 추천 초고속 탐색에 활용.
+현재 `"empty"` 상태인 비어있는 구역 ID의 set을 반환. `logic.A01_parking_manager`의 빈자리 배정에 사용.
 
 ### `get_car_info(car_id)`
 차량 번호로 주차 정보를 조회. (`cars_info` 직접 조회)

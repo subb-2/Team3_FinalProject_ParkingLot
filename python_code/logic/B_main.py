@@ -11,7 +11,7 @@ from logic.B00_camera_input import get_camera
 from logic.B01_car_detection import CarDetector, CONFIG as B01_CONFIG
 from logic.B02_car_mot import (
     CarMOT, CONFIG as B02_CONFIG,
-    car_number_fifo, enqueue_car_number, simulate_uart_rx
+    car_number_fifo, enqueue_car_number
 )
 
 # 설정 (Configuration)
@@ -34,8 +34,6 @@ CONFIG = {
     # 차량번호 입력 소스 설정
     "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
     "TEST_PRESET_CAR_NUMBERS": ["1234","1998","0828","9999"],  # UART 없이 테스트할 차량번호를 순서대로 입력. 예: ["1234", "5678", "9012"]
-    "TEST_UART_SIMULATOR": False,   # True: 임의의 차량번호를 주기적으로 자동 생성
-    "TEST_UART_INTERVAL_SEC": 5.0,  # 자동 생성 주기(초)
 }
 
 # 통합 파이프라인
@@ -137,13 +135,7 @@ def setup_car_number_source():
     FIFO에 차량번호를 공급할 소스를 설정에 따라 준비한다.
       - ENABLE_UART            : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
       - TEST_PRESET_CAR_NUMBERS: 지정한 번호를 순서대로 미리 등록
-      - TEST_UART_SIMULATOR    : 임의 번호를 주기적으로 자동 생성
-
-    Returns:
-        시뮬레이터 종료용 threading.Event
     """
-    stop_event = threading.Event()
-
     # 1) 실제 UART 수신 (A00_uart_rx)
     if CONFIG['ENABLE_UART']:
         from logic.A00_uart_rx import uart_rx_main
@@ -153,16 +145,6 @@ def setup_car_number_source():
     # 2) 미리 지정해 둔 차량번호를 순서대로 FIFO에 등록
     for car_id in CONFIG['TEST_PRESET_CAR_NUMBERS']:
         enqueue_car_number(car_id)
-
-    # 3) 가짜 UART 송신기 (임의 번호 자동 생성)
-    if CONFIG['TEST_UART_SIMULATOR']:
-        threading.Thread(
-            target=simulate_uart_rx,
-            args=(CONFIG['TEST_UART_INTERVAL_SEC'], stop_event),
-            daemon=True
-        ).start()
-
-    return stop_event
 
 
 # 메인 (B00 + B01 + B02 통합 실행)
@@ -197,12 +179,11 @@ if __name__ == '__main__':
     mot = CarMOT(
         tracker_cfg=B02_CONFIG['TRACKER_CFG'],
         min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
-        lost_ttl=B02_CONFIG['LOST_TTL_FRAMES'],
         trajectory_maxlen=B02_CONFIG['TRAJECTORY_MAXLEN']
     )
 
     # 차량번호 입력 소스 준비 (UART 또는 테스트용)
-    uart_sim_stop = setup_car_number_source()
+    setup_car_number_source()
 
     # 파이프라인 구성
     pipeline = ParkingVisionPipeline(cap, detector, mot)
@@ -255,6 +236,5 @@ if __name__ == '__main__':
     try:
         app.run(host=CONFIG['WEB_HOST'], port=CONFIG['WEB_PORT'], debug=False)
     finally:
-        uart_sim_stop.set()
         cap.release()
         print("[INFO] 카메라를 해제하고 종료합니다.")

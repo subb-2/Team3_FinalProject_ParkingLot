@@ -7,9 +7,14 @@ import numpy as np
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C00_navigation import (
-    MARKER_TO_SPOT, MARKER_WORLD_POS, GATE_WORLD_POS,
+    MARKER_WORLD_POS, SPOT_WORLD_POS, GATE1_WORLD_POS, GATE2_WORLD_POS,
     GUIDE_ARRIVED, GUIDE_UNKNOWN, GUIDE_STRAIGHT, GUIDE_LEFT,
     GUIDE_RIGHT, GUIDE_UTURN,
+)
+from logic.C02_lot_layout import cell_to_world, CONFIG as C02_CONFIG
+from data.map_data import (
+    grid_map, coord_to_spot, PILL_MARKER_ID,
+    WALL, ROAD, SPOT, GATE1, GATE2, PILL, get_rows, get_cols,
 )
 
 # 설정 (Configuration)
@@ -24,11 +29,16 @@ CONFIG = {
 
     # 맵 여백 및 축척
     "MARGIN_PX": 50,            # 맵 영역 바깥 여백
-    "PAD_CM": 25.0,             # 주차 구역 바깥으로 확보할 여유 공간
+    "PAD_CM": 8.0,              # 격자 바깥으로 확보할 여유 공간 (주차장 크기에 맞게 조정)
 
-    # 주차 구역 크기 (cm) - 실제 목업 치수에 맞게 조정
-    "SPOT_W_CM": 22.0,
-    "SPOT_H_CM": 16.0,
+    # 주차 구역 크기 (cm).
+    # 격자 한 칸(C02의 CELL_W/H_CM)에서 자동으로 가져오되, 칸을 꽉 채우면
+    # 옆 칸과 붙어 보이므로 아래 비율만큼 줄여서 그린다.
+    "SPOT_FILL_RATIO": 0.86,
+
+    # 맵에 격자 배경(벽/도로/기둥)을 그릴지 여부
+    "SHOW_LAYOUT": True,
+    "SHOW_PILLAR_ID": True,     # 기둥에 ArUco 마커 ID 표시
 
     # 표시 옵션
     "SHOW_GRID": True,          # 배경 격자 표시
@@ -63,6 +73,12 @@ COLOR_SPOT_EMPTY  = (130, 130, 130)  # 빈자리 테두리
 COLOR_SPOT_FULL   = (70, 70, 200)    # 주차중 (붉은 계열)
 COLOR_SPOT_TARGET = (255, 0, 255)    # 목표 구역 (자홍)
 COLOR_GATE        = (0, 200, 255)    # 입출구 (주황)
+COLOR_WALL        = (52, 52, 56)     # 벽
+COLOR_WALL_EDGE   = (72, 72, 78)     # 벽 테두리
+COLOR_ROAD        = (44, 44, 46)     # 도로 (통로)
+COLOR_PILL        = (74, 80, 92)     # 기둥 (ArUco 마커 위치) - 콘크리트 느낌
+COLOR_PILL_EDGE   = (105, 118, 138)  # 기둥 테두리
+COLOR_PILL_TEXT   = (150, 175, 205)  # 기둥의 마커 ID
 COLOR_VEHICLE     = (0, 230, 0)      # 차량 (번호 매칭됨)
 COLOR_VEHICLE_UNK = (0, 165, 255)    # 차량 (번호 미매칭)
 COLOR_TRAJECTORY  = (0, 220, 220)    # 이동 궤적
@@ -130,12 +146,9 @@ class NavigationView:
         elif navigator is not None and navigator.spot_world_pos:
             self.spot_world_pos = dict(navigator.spot_world_pos)
         else:
-            self.spot_world_pos = {
-                spot_id: MARKER_WORLD_POS[m]
-                for m, spot_id in MARKER_TO_SPOT.items() if m in MARKER_WORLD_POS
-            }
+            self.spot_world_pos = dict(SPOT_WORLD_POS)
 
-        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE_WORLD_POS
+        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE1_WORLD_POS
 
         self.scale = CONFIG['NAV_PX_PER_CM']
         self.car_y = int(self.height * CONFIG['NAV_CAR_Y_RATIO'])
@@ -310,8 +323,9 @@ class NavigationView:
 
     def _draw_ground_spots(self, layer, car_pos, heading, spot_status, nav):
         """주차 구역을 회전된 사각형으로 그린다."""
-        hw = CONFIG['SPOT_W_CM'] / 2
-        hh = CONFIG['SPOT_H_CM'] / 2
+        ratio = CONFIG['SPOT_FILL_RATIO']
+        hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
+        hh = C02_CONFIG['CELL_H_CM'] * ratio / 2
         target = nav.get("target_spot")
 
         for spot_id, (sx, sy) in self.spot_world_pos.items():
@@ -500,7 +514,9 @@ class NavigationView:
             return (int(x0 + 8 + (p[0] - min_x) * s), int(y0 + 8 + (p[1] - min_y) * s))
 
         target = nav.get("target_spot")
-        hw, hh = CONFIG['SPOT_W_CM'] / 2, CONFIG['SPOT_H_CM'] / 2
+        ratio = CONFIG['SPOT_FILL_RATIO']
+        hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
+        hh = C02_CONFIG['CELL_H_CM'] * ratio / 2
         for spot_id, pos in self.spot_world_pos.items():
             p1 = to_mini((pos[0] - hw, pos[1] - hh))
             p2 = to_mini((pos[0] + hw, pos[1] + hh))
@@ -587,13 +603,9 @@ class NavigationMapUI:
         elif navigator is not None and navigator.spot_world_pos:
             self.spot_world_pos = dict(navigator.spot_world_pos)
         else:
-            self.spot_world_pos = {
-                spot_id: MARKER_WORLD_POS[marker_id]
-                for marker_id, spot_id in MARKER_TO_SPOT.items()
-                if marker_id in MARKER_WORLD_POS
-            }
+            self.spot_world_pos = dict(SPOT_WORLD_POS)
 
-        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE_WORLD_POS
+        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE1_WORLD_POS
 
         # 맵 영역과 패널 영역의 가로 크기
         self.panel_w = int(self.width * CONFIG['PANEL_RATIO'])
@@ -608,20 +620,24 @@ class NavigationMapUI:
 
     def _compute_transform(self):
         """
-        등록된 주차 구역과 입출구가 모두 화면에 들어오도록
+        주차장 격자 전체(벽 포함)가 화면에 들어오도록
         실좌표 -> 화면좌표 변환(축척과 원점)을 자동 계산.
         """
-        xs = [p[0] for p in self.spot_world_pos.values()]
-        ys = [p[1] for p in self.spot_world_pos.values()]
+        # 격자 바깥 테두리(벽)까지 포함한 범위
+        cell_w = C02_CONFIG['CELL_W_CM']
+        cell_h = C02_CONFIG['CELL_H_CM']
+        top_left = cell_to_world((0, 0))
+        bottom_right = cell_to_world((get_rows() - 1, get_cols() - 1))
+
+        xs = [top_left[0] - cell_w / 2, bottom_right[0] + cell_w / 2]
+        ys = [top_left[1] - cell_h / 2, bottom_right[1] + cell_h / 2]
+
+        # 격자 바깥에 있는 구역/입출구가 있어도 잘리지 않도록 포함시킨다
+        xs += [p[0] for p in self.spot_world_pos.values()]
+        ys += [p[1] for p in self.spot_world_pos.values()]
         if self.gate_world_pos is not None:
             xs.append(self.gate_world_pos[0])
             ys.append(self.gate_world_pos[1])
-
-        if not xs:
-            # 등록된 좌표가 하나도 없을 때의 안전한 기본값
-            self.min_x, self.min_y = 0.0, 0.0
-            self.scale = 1.0
-            return
 
         pad = CONFIG['PAD_CM']
         self.min_x, self.max_x = min(xs) - pad, max(xs) + pad
@@ -679,6 +695,7 @@ class NavigationMapUI:
         target_spots = {n["target_spot"] for n in nav_results if n.get("target_spot")}
 
         self._draw_grid(canvas)
+        self._draw_layout(canvas)
         self._draw_gate(canvas)
         self._draw_spots(canvas, spot_status, target_spots)
         self._draw_guide_lines(canvas, nav_results)
@@ -718,20 +735,72 @@ class NavigationMapUI:
         cv2.putText(canvas, f"grid {step:.0f}cm", (10, self.height - 12),
                     FONT, 0.45, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
 
-    def _draw_gate(self, canvas):
-        """입출구 위치를 표시."""
-        if self.gate_world_pos is None:
+    def _cell_rect(self, cell, fill_ratio=1.0):
+        """map_data 격자 한 칸의 화면 사각형 좌표 (p1, p2)를 계산."""
+        cx, cy = cell_to_world(cell)
+        half_w = C02_CONFIG['CELL_W_CM'] * fill_ratio * self.scale / 2
+        half_h = C02_CONFIG['CELL_H_CM'] * fill_ratio * self.scale / 2
+        px, py = self.world_to_map((cx, cy))
+        return ((int(px - half_w), int(py - half_h)),
+                (int(px + half_w), int(py + half_h)))
+
+    def _draw_layout(self, canvas):
+        """
+        주차장 구조(벽 / 도로 / 기둥)를 격자에서 읽어 그린다.
+
+        주차 구역(SPOT)은 점유 상태에 따라 색이 달라지므로 _draw_spots가 따로 그리고,
+        여기서는 배경 구조만 그린다. 중앙 섬도 이 함수가 그린 기둥/벽으로 드러난다.
+        """
+        if not CONFIG['SHOW_LAYOUT']:
             return
 
-        gx, gy = self.world_to_map(self.gate_world_pos)
-        cv2.circle(canvas, (gx, gy), 13, COLOR_GATE, 2)
-        cv2.putText(canvas, "GATE", (gx - 20, gy - 20),
-                    FONT, 0.5, COLOR_GATE, 2, cv2.LINE_AA)
+        for row in range(get_rows()):
+            for col in range(get_cols()):
+                cell_type = grid_map[row][col]
+                if cell_type == SPOT:
+                    continue    # _draw_spots가 담당
+
+                p1, p2 = self._cell_rect((row, col))
+
+                if cell_type == WALL:
+                    cv2.rectangle(canvas, p1, p2, COLOR_WALL, -1)
+                    cv2.rectangle(canvas, p1, p2, COLOR_WALL_EDGE, 1)
+                elif cell_type in (ROAD, GATE1, GATE2):
+                    cv2.rectangle(canvas, p1, p2, COLOR_ROAD, -1)
+                elif cell_type == PILL:
+                    cv2.rectangle(canvas, p1, p2, COLOR_PILL, -1)
+                    cv2.rectangle(canvas, p1, p2, COLOR_PILL_EDGE, 1)
+
+                    if CONFIG['SHOW_PILLAR_ID']:
+                        marker_id = PILL_MARKER_ID.get((row, col))
+                        if marker_id is not None:
+                            text = str(marker_id)
+                            (tw, th), _ = cv2.getTextSize(text, FONT, 0.4, 1)
+                            cx = (p1[0] + p2[0]) // 2
+                            cy = (p1[1] + p2[1]) // 2
+                            cv2.putText(canvas, text,
+                                        (cx - tw // 2, cy + th // 2),
+                                        FONT, 0.4, COLOR_PILL_TEXT, 1, cv2.LINE_AA)
+
+    def _draw_gate(self, canvas):
+        """입구(GATE1)와 출구(GATE2)를 구분해서 표시."""
+        for world_pt, label, color in (
+            (GATE1_WORLD_POS, "IN", COLOR_GATE),
+            (GATE2_WORLD_POS, "OUT", COLOR_ARRIVED),
+        ):
+            if world_pt is None:
+                continue
+            gx, gy = self.world_to_map(world_pt)
+            cv2.circle(canvas, (gx, gy), 11, color, 2)
+            (tw, _), _ = cv2.getTextSize(label, FONT, 0.45, 2)
+            cv2.putText(canvas, label, (gx - tw // 2, gy - 16),
+                        FONT, 0.45, color, 2, cv2.LINE_AA)
 
     def _draw_spots(self, canvas, spot_status, target_spots):
         """주차 구역을 점유 상태에 따라 색을 달리하여 그린다."""
-        half_w = CONFIG['SPOT_W_CM'] * self.scale / 2
-        half_h = CONFIG['SPOT_H_CM'] * self.scale / 2
+        ratio = CONFIG['SPOT_FILL_RATIO']
+        half_w = C02_CONFIG['CELL_W_CM'] * ratio * self.scale / 2
+        half_h = C02_CONFIG['CELL_H_CM'] * ratio * self.scale / 2
 
         for spot_id, world_pt in sorted(self.spot_world_pos.items()):
             cx, cy = self.world_to_map(world_pt)
@@ -741,11 +810,12 @@ class NavigationMapUI:
             is_full = spot_status.get(spot_id) == "full"
             is_target = spot_id in target_spots
 
-            # 주차중인 구역은 채워서, 빈 구역은 테두리만
+            # 주차중인 구역은 채워서, 빈 구역은 어둡게 깔고 테두리만
             if is_full:
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_FULL, -1)
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_EMPTY, 1)
             else:
+                cv2.rectangle(canvas, p1, p2, (30, 34, 30), -1)
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_EMPTY, 1)
 
             # 목표 구역은 굵은 자홍 테두리로 강조
@@ -754,10 +824,15 @@ class NavigationMapUI:
                               (p1[0] - 3, p1[1] - 3), (p2[0] + 3, p2[1] + 3),
                               COLOR_SPOT_TARGET, 2)
 
+            # 칸이 좁으므로 라벨은 칸 폭에 맞춰 축소한다
             label_color = COLOR_SPOT_TARGET if is_target else COLOR_TEXT
-            (tw, _), _ = cv2.getTextSize(spot_id, FONT, 0.45, 1)
-            cv2.putText(canvas, spot_id, (cx - tw // 2, cy + 5),
-                        FONT, 0.45, label_color, 1, cv2.LINE_AA)
+            font_scale = 0.4
+            (tw, th), _ = cv2.getTextSize(spot_id, FONT, font_scale, 1)
+            while tw > (p2[0] - p1[0]) and font_scale > 0.25:
+                font_scale -= 0.05
+                (tw, th), _ = cv2.getTextSize(spot_id, FONT, font_scale, 1)
+            cv2.putText(canvas, spot_id, (cx - tw // 2, cy + th // 2),
+                        FONT, font_scale, label_color, 1, cv2.LINE_AA)
 
     def _draw_guide_lines(self, canvas, nav_results):
         """
@@ -942,35 +1017,31 @@ if __name__ == '__main__':
                 self.marker_world_pos = MARKER_WORLD_POS
                 self.H = _np.eye(3, dtype=_np.float32)
                 self.H_inv = _np.eye(3, dtype=_np.float32)
-                self.calibrated_with, self.reproj_error = 8, 0.0
+                self.calibrated_with = len(MARKER_WORLD_POS)
+                self.reproj_error = 0.0
                 self.locked, self.lock_markers, self._warned = True, 6, set()
             def detect_markers(self, frame):
                 return {}
             def update_homography(self, markers):
                 return True
 
-        spots = {s: MARKER_WORLD_POS[m] for m, s in MARKER_TO_SPOT.items()
-                 if m in MARKER_WORLD_POS}
         lot = ParkingLotMap(
-            spots, GATE_WORLD_POS,
             resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
-            spot_w=C01_CONFIG['SPOT_W_CM'], spot_h=C01_CONFIG['SPOT_H_CM'],
-            clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
-            lot_margin=C01_CONFIG['LOT_MARGIN_CM'])
+            clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'])
         demo_nav = ParkingNavigator(mapper=_DemoMapper(),
                                     planner=RoutePlanner(lot, simplify=True),
-                                    waypoint_radius=10.0)
+                                    waypoint_radius=5.0)
 
         view = NavigationView(navigator=demo_nav)
         overview = NavigationMapUI(navigator=demo_nav)
 
-        demo_status = {s: "empty" for s in spots}
+        demo_status = {s: "empty" for s in SPOT_WORLD_POS}
         demo_status["A-3"] = "full"
         demo_status["B-2"] = "full"
 
-        # 목적지를 바꿔가며 반복 주행
-        _goals = ["A-1", "B-1", "A-4", "B-3"]
-        _state = {"pos": (-30.0, 30.0), "goal": 0, "results": []}
+        # 목적지를 바꿔가며 반복 주행 (왼쪽 열 / 중앙 섬 / 오른쪽 열을 골고루)
+        _goals = ["A-1", "C-1", "B-4", "A-4", "C-2", "B-1"]
+        _state = {"pos": GATE1_WORLD_POS, "goal": 0, "results": []}
         demo_nav.set_target("1234", _goals[0])
 
         def _tick():
@@ -987,7 +1058,7 @@ if __name__ == '__main__':
             if wp is None or nav.get("guide") == GUIDE_ARRIVED:
                 # 도착하면 잠시 멈췄다가 다음 목적지로
                 _state["goal"] = (_state["goal"] + 1) % len(_goals)
-                _state["pos"] = GATE_WORLD_POS
+                _state["pos"] = GATE1_WORLD_POS
                 demo_nav.clear_vehicle("1234")
                 demo_nav.set_target("1234", _goals[_state["goal"]])
                 return nav
@@ -1065,7 +1136,7 @@ if __name__ == '__main__':
             sys.exit(1)
 
         pipeline = build_pipeline(cap)
-        uart_sim_stop = setup_car_number_source()
+        setup_car_number_source()
         view = NavigationView(navigator=pipeline.navigator)
         ui = NavigationMapUI(navigator=pipeline.navigator)
 

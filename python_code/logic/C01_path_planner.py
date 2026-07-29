@@ -6,98 +6,102 @@ import numpy as np
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from data.map_data import (
+    grid_map, coord_to_spot, DRIVABLE_CELLS, SPOT, get_rows, get_cols,
+)
+from logic.C02_lot_layout import (
+    SPOT_WORLD_POS, GATE1_WORLD_POS, cell_to_world, CONFIG as C02_CONFIG,
+)
 
 # 설정 (Configuration)
 # 이 모듈은 '경로 계산'만 담당.
-#   - 위치 추정 / 안내 : C00_navigation.py
-#   - 마커 실좌표 정의 : C00_navigation.py의 MARKER_WORLD_POS
+#   - 주차장 배치   : data/map_data.py (격자) + C02_lot_layout.py (실좌표 변환)
+#   - 위치 추정/안내 : C00_navigation.py
+#
+# 주차장 크기와 구역 위치는 여기서 정하지 않는다. 격자에서 자동으로 온다.
 CONFIG = {
     # 격자 해상도 (cm). 작을수록 정밀하지만 계산량이 늘어난다.
-    "GRID_RESOLUTION_CM": 4.0,
-
-    # 주차 구역 크기 (cm). D00_ui_navi의 표시 크기와 맞추는 것을 권장.
-    "SPOT_W_CM": 22.0,
-    "SPOT_H_CM": 16.0,
+    # 통로 폭(격자 한 칸)보다 충분히 작아야 한다.
+    "GRID_RESOLUTION_CM": 1.0,
 
     # 차량이 장애물에 얼마나 가까이 갈 수 있는지 (cm).
-    # 장애물을 이 값만큼 부풀려서 경로가 벽에 붙지 않게 한다.
-    "VEHICLE_CLEARANCE_CM": 7.0,
-
-    # 주차 구역 바깥으로 확보할 주행 가능 영역 (cm).
-    # 이 값이 차량 폭보다 크면 주차 구역 뒤로 돌아가는 경로가 생길 수 있다.
-    "LOT_MARGIN_CM": 10.0,
+    # 벽/기둥/주차구역을 이 값만큼 부풀려서 경로가 붙지 않게 한다.
+    # 주의: 통로 폭이 좁으므로 이 값을 키우면 통로가 막혀 경로를 못 찾는다.
+    #       통로 폭 = C02의 CELL_W_CM (현재 10cm) 이고, 양쪽에서 부풀리므로
+    #       실제로 남는 폭은 (CELL_W_CM - 2 x VEHICLE_CLEARANCE_CM) 이다.
+    "VEHICLE_CLEARANCE_CM": 2.0,
 
     # 경로 단순화: 직선으로 갈 수 있는 구간을 하나의 경유점으로 합친다.
     "SIMPLIFY_PATH": True,
 
     # 경로에서 이 거리 이상 벗어나면 다시 계획한다 (cm).
-    "REPLAN_TOLERANCE_CM": 25.0,
+    "REPLAN_TOLERANCE_CM": 12.0,
 }
 
 
 # 주차장 점유 격자
 class ParkingLotMap:
     """
-    주차장 실좌표(cm)를 격자로 변환하고, 주행 가능 여부를 판정하는 지도.
+    data/map_data.py의 격자를 실좌표(cm) 점유 격자로 바꾸고, 주행 가능 여부를 판정하는 지도.
 
-    주차 구역은 기본적으로 주행 불가 영역이다. 차량이 통로를 따라
-    이동하도록 강제하기 위함이며, 목적지로 지정된 구역만 예외적으로
-    진입 가능하게 열어준다.
+    격자의 셀 타입을 그대로 따른다.
+      - 벽(WALL), 기둥(PILL) : 항상 주행 불가
+      - 도로(ROAD), 입출구   : 주행 가능
+      - 주차 구역(SPOT)      : 기본 주행 불가. 목적지로 지정된 구역만 열어준다.
+        (차량이 통로를 따라 이동하도록 강제하기 위함)
 
-    장애물은 VEHICLE_CLEARANCE_CM만큼 부풀려서(inflation) 표시하므로,
-    경로 계산 시 차량을 점으로 취급해도 실제로는 여유가 확보된다.
+    장애물은 clearance만큼 부풀려서(inflation) 표시하므로, 경로 계산 시
+    차량을 점으로 취급해도 실제로는 여유가 확보된다.
     """
 
-    def __init__(self, spot_world_pos, gate_world_pos=None,
-                 resolution=4.0, spot_w=22.0, spot_h=16.0,
-                 clearance=7.0, lot_margin=10.0):
+    def __init__(self, spot_world_pos=None, resolution=1.0, clearance=2.0,
+                 cell_w=None, cell_h=None):
         """
         ParkingLotMap 초기화.
 
         Args:
-            spot_world_pos: {구역ID: (x_cm, y_cm)} 주차 구역 중심 좌표
-            gate_world_pos: 입출구 좌표 (x_cm, y_cm). 주행 영역에 포함시킨다.
-            resolution:     격자 한 칸 크기 (cm)
-            spot_w/spot_h:  주차 구역 크기 (cm)
+            spot_world_pos: {구역ID: (x_cm, y_cm)}. None이면 C02의 기본 배치 사용
+            resolution:     점유 격자 한 칸 크기 (cm)
             clearance:      장애물을 부풀릴 거리 (cm)
-            lot_margin:     주차 구역 바깥 주행 가능 여유 (cm)
+            cell_w/cell_h:  map_data 격자 한 칸의 실제 크기 (cm). None이면 C02 CONFIG
         """
-        self.spot_world_pos = dict(spot_world_pos)
-        self.gate_world_pos = gate_world_pos
+        self.spot_world_pos = dict(
+            spot_world_pos if spot_world_pos is not None else SPOT_WORLD_POS
+        )
         self.resolution = resolution
-        self.spot_w = spot_w
-        self.spot_h = spot_h
         self.clearance = clearance
-        self.lot_margin = lot_margin
+        self.cell_w = C02_CONFIG['CELL_W_CM'] if cell_w is None else cell_w
+        self.cell_h = C02_CONFIG['CELL_H_CM'] if cell_h is None else cell_h
 
         self._compute_bounds()
 
-        # 현재 열려 있는 목적지 구역과 점유 상태 (재구축 판단용)
+        # 현재 열려 있는 목적지 구역 (재구축 판단용)
         self._open_spot = None
-        self._blocked_key = None
         self.grid = None
         self.rebuild()
 
     def _compute_bounds(self):
-        """주차 구역과 입출구를 모두 포함하는 격자 범위를 계산."""
-        xs, ys = [], []
-        for x, y in self.spot_world_pos.values():
-            xs += [x - self.spot_w / 2, x + self.spot_w / 2]
-            ys += [y - self.spot_h / 2, y + self.spot_h / 2]
+        """map_data 격자 전체를 덮는 범위를 계산."""
+        top_left = cell_to_world((0, 0))
+        bottom_right = cell_to_world((get_rows() - 1, get_cols() - 1))
 
-        if self.gate_world_pos is not None:
-            xs.append(self.gate_world_pos[0])
-            ys.append(self.gate_world_pos[1])
-
-        if not xs:
-            xs, ys = [0.0], [0.0]
-
-        m = self.lot_margin
-        self.min_x, self.max_x = min(xs) - m, max(xs) + m
-        self.min_y, self.max_y = min(ys) - m, max(ys) + m
+        self.min_x = top_left[0] - self.cell_w / 2
+        self.max_x = bottom_right[0] + self.cell_w / 2
+        self.min_y = top_left[1] - self.cell_h / 2
+        self.max_y = bottom_right[1] + self.cell_h / 2
 
         self.cols = max(int(math.ceil((self.max_x - self.min_x) / self.resolution)), 1)
         self.rows = max(int(math.ceil((self.max_y - self.min_y) / self.resolution)), 1)
+
+    def _block_cell(self, grid, map_cell):
+        """map_data 격자 한 칸을 clearance만큼 부풀려 주행 불가로 표시."""
+        cx, cy = cell_to_world(map_cell)
+        pad = self.clearance
+        c1, r1 = self.world_to_cell(
+            (cx - self.cell_w / 2 - pad, cy - self.cell_h / 2 - pad), clamp=True)
+        c2, r2 = self.world_to_cell(
+            (cx + self.cell_w / 2 + pad, cy + self.cell_h / 2 + pad), clamp=True)
+        grid[r1:r2 + 1, c1:c2 + 1] = False
 
     def rebuild(self, spot_status=None, open_spot=None):
         """
@@ -114,21 +118,15 @@ class ParkingLotMap:
         # True = 주행 가능
         grid = np.ones((self.rows, self.cols), dtype=bool)
 
-        # 장애물을 부풀릴 반경(격자 칸 수)
-        pad = self.clearance
-
-        for spot_id, (cx, cy) in self.spot_world_pos.items():
-            if spot_id == open_spot:
-                continue    # 목적지 구역은 진입해야 하므로 열어둔다
-
-            x1 = cx - self.spot_w / 2 - pad
-            x2 = cx + self.spot_w / 2 + pad
-            y1 = cy - self.spot_h / 2 - pad
-            y2 = cy + self.spot_h / 2 + pad
-
-            c1, r1 = self.world_to_cell((x1, y1), clamp=True)
-            c2, r2 = self.world_to_cell((x2, y2), clamp=True)
-            grid[r1:r2 + 1, c1:c2 + 1] = False
+        for row in range(get_rows()):
+            for col in range(get_cols()):
+                cell_type = grid_map[row][col]
+                if cell_type in DRIVABLE_CELLS:
+                    continue
+                # 목적지 구역은 진입해야 하므로 열어둔다
+                if cell_type == SPOT and coord_to_spot.get((row, col)) == open_spot:
+                    continue
+                self._block_cell(grid, (row, col))
 
         self.grid = grid
 
@@ -408,36 +406,28 @@ def _point_segment_distance(p, a, b):
 # 카메라 없이 동작한다. C00의 마커 배치를 그대로 읽어 경로를 계산하고
 # 터미널에 주차장 격자와 경로를 그려서 보여준다.
 if __name__ == '__main__':
-    from logic.C00_navigation import MARKER_WORLD_POS, MARKER_TO_SPOT, GATE_WORLD_POS
-
     print("==========================================")
     print(" C01 : 주차장 경로 계획 (A* + 경로 단순화)")
     print(" 단독 테스트 : 통로를 따라가는 경로 검증")
     print("==========================================")
 
-    spot_world_pos = {
-        spot_id: MARKER_WORLD_POS[marker_id]
-        for marker_id, spot_id in MARKER_TO_SPOT.items()
-        if marker_id in MARKER_WORLD_POS
-    }
-
     lot = ParkingLotMap(
-        spot_world_pos, GATE_WORLD_POS,
         resolution=CONFIG['GRID_RESOLUTION_CM'],
-        spot_w=CONFIG['SPOT_W_CM'], spot_h=CONFIG['SPOT_H_CM'],
         clearance=CONFIG['VEHICLE_CLEARANCE_CM'],
-        lot_margin=CONFIG['LOT_MARGIN_CM'],
     )
     planner = RoutePlanner(lot, simplify=CONFIG['SIMPLIFY_PATH'])
 
-    print(f"\n[INFO] 격자 {lot.cols}x{lot.rows} "
+    print(f"\n[INFO] 점유격자 {lot.cols}x{lot.rows} "
           f"({lot.resolution}cm/칸), 범위 x[{lot.min_x:.0f},{lot.max_x:.0f}] "
           f"y[{lot.min_y:.0f},{lot.max_y:.0f}]")
+    print(f"[INFO] 통로 폭 {lot.cell_w:.0f}cm, 여유 {lot.clearance:.0f}cm "
+          f"-> 실제 주행 가능 폭 {lot.cell_w - 2 * lot.clearance:.0f}cm")
 
-    for goal in ("A-1", "B-3"):
+    # 왼쪽 열 / 중앙 섬 / 오른쪽 열을 하나씩 확인
+    for goal in ("A-1", "C-2", "B-4"):
         print(f"\n{'='*60}")
-        print(f"[TEST] 입출구 {GATE_WORLD_POS} -> {goal} 경로")
-        route = planner.plan(GATE_WORLD_POS, goal)
+        print(f"[TEST] 입구 {GATE1_WORLD_POS} -> {goal} 경로")
+        route = planner.plan(GATE1_WORLD_POS, goal)
 
         if route is None:
             print("  경로를 찾지 못했습니다.")
@@ -447,8 +437,8 @@ if __name__ == '__main__':
         for i, (x, y) in enumerate(route):
             print(f"    {i}: ({x:6.1f}, {y:6.1f})")
 
-        # 터미널에 격자 시각화
-        print("\n  [격자]  #=주차구역/장애물  .=주행가능  *=경로  G=입출구  T=목적지")
+        # 터미널에 격자 시각화 (해상도가 높으므로 몇 칸씩 건너뛰어 그린다)
+        print("\n  [격자]  #=벽/기둥/주차구역  .=주행가능  *=경로  G=입구  T=목적지")
         route_cells = set()
         for a, b in zip(route[:-1], route[1:]):
             ca = lot.world_to_cell(a, clamp=True)
@@ -458,17 +448,24 @@ if __name__ == '__main__':
                 route_cells.add((round(ca[0] + (cb[0] - ca[0]) * s / steps),
                                  round(ca[1] + (cb[1] - ca[1]) * s / steps)))
 
-        gate_cell = lot.world_to_cell(GATE_WORLD_POS, clamp=True)
-        goal_cell = lot.world_to_cell(spot_world_pos[goal], clamp=True)
+        gate_cell = lot.world_to_cell(GATE1_WORLD_POS, clamp=True)
+        goal_cell = lot.world_to_cell(lot.spot_world_pos[goal], clamp=True)
 
-        for r in range(lot.rows):
+        # 화면에 들어오도록 축소 표시
+        step_c = max(lot.cols // 60, 1)
+        step_r = max(lot.rows // 40, 1)
+        for r in range(0, lot.rows, step_r):
             line = "  "
-            for c in range(lot.cols):
-                if (c, r) == gate_cell:
+            for c in range(0, lot.cols, step_c):
+                block_r = range(r, min(r + step_r, lot.rows))
+                block_c = range(c, min(c + step_c, lot.cols))
+                cells = {(cc, rr) for rr in block_r for cc in block_c}
+
+                if gate_cell in cells:
                     line += "G"
-                elif (c, r) == goal_cell:
+                elif goal_cell in cells:
                     line += "T"
-                elif (c, r) in route_cells:
+                elif cells & route_cells:
                     line += "*"
                 elif lot.grid[r, c]:
                     line += "."
@@ -477,4 +474,4 @@ if __name__ == '__main__':
             print(line)
 
     print(f"\n{'='*60}")
-    print("[TEST] 경로가 주차 구역(#)을 통과하지 않고 통로를 따라가는지 확인하세요.")
+    print("[TEST] 경로가 벽/기둥/중앙 섬을 통과하지 않고 통로를 따라가는지 확인하세요.")

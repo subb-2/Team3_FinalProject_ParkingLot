@@ -26,62 +26,41 @@ CONFIG = {
     "LOCK_HOMOGRAPHY": True,
 
     # 호모그래피 품질 기준
-    # 마커가 정확히 4개면 대응이 틀려 있어도 그 4점에는 항상 오차 0으로
-    # 맞춰지므로 검증이 불가능하다. 따라서 최소 개수로 성급히 고정하지 않고,
-    # 아래 개수 이상이 보일 때만 확정한다.
+    # 마커가 정확히 4개면 대응이 틀려 있어도 그 4점에는 항상 오차 0으로 맞춰지므로 검증이 불가능
+    # 따라서 최소 개수로 성급히 고정하지 않고, 아래 개수 이상이 보일 때만 확정.
     "MARKERS_FOR_LOCK": 6,          # 이 개수 이상 보일 때만 호모그래피를 확정
     "MAX_REPROJ_ERROR_CM": 5.0,     # 평균 재투영 오차가 이보다 크면 채택하지 않음
     "MIN_MARKER_SPREAD": 0.02,      # 마커가 한 줄에 몰려 있으면 거부 (0에 가까울수록 일직선)
     "RANSAC_THRESH_CM": 5.0,        # RANSAC 이상치 판정 임계값 (실좌표 cm 기준)
 
     # 내비게이션 판정 기준
-    "ARRIVAL_THRESHOLD_CM": 15.0,   # 목표 지점 이 거리 이내면 '도착'으로 판정
+    # 거리 기준은 주차장 규모에 맞춰야 한다. 현재 목업은 40 x 140cm이고
+    # 통로 폭이 10cm, 자리 간격이 35cm이므로 값들이 작다.
+    # 주차장을 키우면 C02의 CELL_W/H_CM과 함께 이 값들도 조정할 것.
+    "ARRIVAL_THRESHOLD_CM": 5.0,    # 목표 지점 이 거리 이내면 '도착'으로 판정
     "TURN_ANGLE_THRESHOLD_DEG": 25.0, # 이 각도 이내면 '직진'으로 안내
     "UTURN_ANGLE_THRESHOLD_DEG": 150.0, # 이 각도 이상이면 '유턴'으로 안내
-    "MIN_MOVE_CM_FOR_HEADING": 3.0, # 진행 방향 계산에 필요한 최소 이동 거리
+    "MIN_MOVE_CM_FOR_HEADING": 1.5, # 진행 방향 계산에 필요한 최소 이동 거리
     "HEADING_WINDOW": 5,            # 진행 방향 계산에 사용할 최근 위치 개수
     "HISTORY_MAXLEN": 128,          # 차량별 위치 이력 최대 길이
 }
 
-# =====================================================================
-# 마커 ID -> 주차장 실제 좌표 (cm)
-# =====================================================================
-# 주의: 마커 ID와 좌표의 대응이 실제 배치와 다르면, 호모그래피 오차는 작게
-#       나오면서도(자기 자신과는 일관되므로) 화면에 표시되는 좌우가 뒤집힌다.
-#       마커를 재배치하면 이 표를 반드시 함께 고쳐야 한다.
-#       거리(30cm, 60cm)도 실제 목업을 자로 측정해서 수정할 것.
+# 주차장 배치(마커/자리/입출구의 실좌표)는 C02_lot_layout이 격자에서 만든다.
 #
-# 좌표계: 왼쪽 상단 마커(ID 8)를 원점 (0, 0)으로 하고,
+# 마커는 '기둥'이며 주차 자리가 아니다. 자리의 좌표는 그 자리를 감싸는
+# 위아래 기둥 마커의 중점으로 계산된다. 자세한 규칙은 MAIN_README.md 3절 참고.
+#
+# 좌표계: 왼쪽 위 기둥(마커 ID 1)이 원점 (0, 0),
 #         x축은 오른쪽 방향(+), y축은 아래쪽 방향(+). 단위는 cm.
 #
-# 실제 배치 (test.mp4 기준. 카메라에서 본 왼쪽 -> 오른쪽 순서):
-#   (0,0)   (30,0)  (60,0)  (90,0)
-#     [8]     [7]     [6]     [5]      <- 윗줄 (A 구역)
-#
-#     [4]     [3]     [2]     [1]      <- 아랫줄 (B 구역)
-#   (0,60)  (30,60) (60,60) (90,60)
-MARKER_WORLD_POS = {
-    8: (0.0,  0.0),
-    7: (30.0, 0.0),
-    6: (60.0, 0.0),
-    5: (90.0, 0.0),
-
-    4: (0.0,  60.0),
-    3: (30.0, 60.0),
-    2: (60.0, 60.0),
-    1: (90.0, 60.0),
-}
-
-# 마커 ID -> 주차 구역 ID
-# 마커가 주차 자리(또는 그 자리를 표시하는 기둥)를 나타내는 경우의 매핑.
-# data/map_data.py의 spot_status 키와 이름을 맞춰야 A01_parking_manager와 연동된다.
-MARKER_TO_SPOT = {
-    5: "A-1", 6: "A-2", 7: "A-3", 8: "A-4",
-    1: "B-1", 2: "B-2", 3: "B-3", 4: "B-4",
-}
-
-# 입출구(GATE)의 실제 좌표 (cm). 경로 안내 시작점으로 사용.
-GATE_WORLD_POS = (-30.0, 30.0)
+# 배치를 바꾸려면 data/map_data.py의 grid_map과 PILL_MARKER_ID를 고칠 것.
+# 여기서는 아무것도 하드코딩하지 않는다.
+from logic.C02_lot_layout import (
+    MARKER_WORLD_POS,     # {마커ID: (x_cm, y_cm)}  기둥 위치
+    SPOT_WORLD_POS,       # {구역ID: (x_cm, y_cm)}  기둥 사이 중점
+    GATE1_WORLD_POS,      # 입구 (경로 안내 시작점)
+    GATE2_WORLD_POS,      # 출구
+)
 
 # 시각화 색상 (BGR)
 COLOR_MARKER = (255, 200, 0)    # 마커       - 하늘색
@@ -353,12 +332,17 @@ class MarkerMapper:
         print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
 
     def draw_markers(self, frame, markers):
-        """검출된 마커의 위치와 ID를 프레임에 표시."""
+        """
+        검출된 마커(기둥)의 위치와 ID를 프레임에 표시.
+
+        마커는 기둥이므로 주차 구역 이름을 붙이지 않는다.
+        좌표표에 없는 ID는 호모그래피에 쓰이지 않으므로 '?'로 구분해 표시한다.
+        """
         for marker_id, (cx, cy) in markers.items():
             cx, cy = int(cx), int(cy)
-            cv2.circle(frame, (cx, cy), 6, COLOR_MARKER, -1)
-            spot_id = MARKER_TO_SPOT.get(marker_id, "")
-            label = f"{marker_id}:{spot_id}" if spot_id else str(marker_id)
+            known = marker_id in self.marker_world_pos
+            cv2.circle(frame, (cx, cy), 6, COLOR_MARKER if known else (0, 0, 255), -1)
+            label = str(marker_id) if known else f"{marker_id}?"
             cv2.putText(frame, label, (cx + 8, cy - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_MARKER, 2, cv2.LINE_AA)
         return frame
@@ -384,16 +368,17 @@ class ParkingNavigator:
          안내가 되므로, 반드시 경로를 따라 앞서 안내해야 한다.
     """
 
-    def __init__(self, mapper=None, marker_to_spot=None,
+    def __init__(self, mapper=None, spot_world_pos=None,
                  arrival_threshold=15.0, turn_threshold=25.0, uturn_threshold=150.0,
                  min_move_for_heading=3.0, heading_window=5, history_maxlen=128,
-                 planner=None, waypoint_radius=12.0, replan_tolerance=25.0):
+                 planner=None, waypoint_radius=5.0, replan_tolerance=12.0):
         """
         ParkingNavigator 초기화.
 
         Args:
             mapper:               MarkerMapper 인스턴스 (None이면 기본 설정으로 생성)
-            marker_to_spot:       {마커ID: 주차구역ID} 매핑
+            spot_world_pos:       {구역ID: (x_cm, y_cm)} 주차 구역 좌표
+                                  (None이면 C02_lot_layout이 만든 기본 배치 사용)
             arrival_threshold:    도착 판정 거리 (cm)
             turn_threshold:       직진으로 볼 각도 허용치 (도)
             uturn_threshold:      유턴으로 안내할 각도 (도)
@@ -406,7 +391,6 @@ class ParkingNavigator:
             replan_tolerance:     경로에서 이만큼 벗어나면 재계획 (cm)
         """
         self.mapper = mapper if mapper is not None else MarkerMapper()
-        self.marker_to_spot = marker_to_spot or MARKER_TO_SPOT
 
         self.arrival_threshold = arrival_threshold
         self.turn_threshold = turn_threshold
@@ -417,12 +401,10 @@ class ParkingNavigator:
         self.waypoint_radius = waypoint_radius
         self.replan_tolerance = replan_tolerance
 
-        # 주차 구역 ID -> 실좌표 (cm). 마커 위치로부터 생성.
-        self.spot_world_pos = {}
-        for marker_id, spot_id in self.marker_to_spot.items():
-            world_pt = self.mapper.marker_world_pos.get(marker_id)
-            if world_pt is not None:
-                self.spot_world_pos[spot_id] = world_pt
+        # 주차 구역 ID -> 실좌표 (cm). C02가 기둥 마커의 중점으로 계산해 둔 값.
+        self.spot_world_pos = dict(
+            spot_world_pos if spot_world_pos is not None else SPOT_WORLD_POS
+        )
 
         # 경로 계획기 (C01). 주차 구역을 장애물로 두고 통로를 따라 경로를 만든다.
         self.planner = planner if planner is not None else self._build_default_planner()
@@ -445,12 +427,9 @@ class ParkingNavigator:
         )
 
         lot_map = ParkingLotMap(
-            self.spot_world_pos, GATE_WORLD_POS,
+            self.spot_world_pos,
             resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
-            spot_w=C01_CONFIG['SPOT_W_CM'],
-            spot_h=C01_CONFIG['SPOT_H_CM'],
             clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
-            lot_margin=C01_CONFIG['LOT_MARGIN_CM'],
         )
         return RoutePlanner(lot_map, simplify=C01_CONFIG['SIMPLIFY_PATH'])
 

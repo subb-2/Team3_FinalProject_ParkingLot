@@ -2,7 +2,6 @@ import cv2
 import time
 import sys
 import os
-import random
 import threading
 import numpy as np
 from collections import deque
@@ -15,12 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.B01_car_detection import VEHICLE_CLASS_NAMES
 
 # 설정 (Configuration)
-# 이 모듈은 '추적'만 담당한다. 검출 관련 설정(모델 경로, conf, imgsz 등)은
-# B01_car_detection.py의 CONFIG에서 관리.
+# 이 모듈은 '추적'만 담당. 검출 관련 설정(모델 경로, conf, imgsz 등)은 B01_car_detection.py의 CONFIG에서 관리.
 
 # 프로젝트 전용 ByteTrack 설정 파일 경로.
-# ultralytics 내장 파일을 쓰면 패키지 재설치 시 설정이 날아가므로
-# python_code/config/ 아래에 복사해 두고 그것을 사용한다.
+# ultralytics 내장 파일을 쓰면 패키지 재설치 시 설정이 날아가므로 python_code/config/ 아래에 복사해 두고 그것을 사용함.
 TRACKER_CFG_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', 'config', 'bytetrack.yaml')
 )
@@ -30,10 +27,11 @@ CONFIG = {
     "TRACKER_CFG": TRACKER_CFG_PATH,
 
     # 추적 <-> 차량번호 매칭 설정
-    "MIN_HITS_FOR_ASSIGN": 3,       # 이 프레임 수 이상 연속 추적되어야 차량번호를 부여 (오검출 방지)
-    "LOST_TTL_FRAMES": 150,          # 추적이 끊긴 뒤 매칭 정보를 유지할 프레임 수 (30fps 기준 약 3초)
+    "MIN_HITS_FOR_ASSIGN": 30,      # 이 프레임 수 이상 '연속' 추적되어야 차량번호를 부여 (30fps 기준 1초)
     "TRAJECTORY_MAXLEN": 64,        # 궤적(Trajectory) 저장 최대 길이
 }
+
+# 트랙이 같은 ID로 되살아날 수 있는 기간은 전적으로 ByteTrack이 결정(track_buffer),
 
 # 차량번호가 부여된 트랙 / 대기 중인 트랙 색상 (BGR)
 COLOR_MATCHED = (0, 255, 0)     # 번호 매칭 완료 - 초록
@@ -116,8 +114,7 @@ class CarNumberFIFO:
 # 검출 결과 -> ByteTrack 입력 어댑터
 class DetectionResults:
     """
-    B01_car_detection의 검출 결과(list of dict)를 ByteTrack이 요구하는
-    형식으로 변환하는 어댑터.
+    B01_car_detection의 검출 결과(list of dict)를 ByteTrack이 요구하는 형식으로 변환하는 어댑터.
 
     BYTETracker.update()는 아래 인터페이스를 요구한다.
       - xywh : (N, 4) 중심좌표 기반 박스 배열
@@ -180,23 +177,27 @@ class CarMOT:
     동작 흐름:
       1. UART로 수신된 차량 번호가 CarNumberFIFO에 순서대로 쌓인다.
       2. B01이 검출한 결과를 ByteTrack에 넣어 Track ID를 부여한다.
-      3. 새로운 Track ID가 MIN_HITS_FOR_ASSIGN 프레임 이상 안정적으로
+      3. 새로운 Track ID가 MIN_HITS_FOR_ASSIGN 프레임 이상 '연속으로'
          추적되면, FIFO에서 가장 앞 번호를 꺼내(pop) 해당 트랙에 매칭한다.
+         중간에 한 프레임이라도 끊기면 카운트는 0으로 초기화된다.
       4. 이후 그 Track ID는 계속 같은 차량 번호로 추적된다.
 
-    참고: 추적이 완전히 끊긴 뒤 같은 차량이 새로운 Track ID로 다시 잡히면 FIFO의 다음 번호를 소비. 
-    ByteTrack의 track_buffer와 LOST_TTL_FRAMES가 짧은 가려짐(Occlusion) 구간을 보완.
+    참고: 추적이 완전히 끊긴 뒤 같은 차량이 새로운 Track ID로 다시 잡히면 FIFO의 다음 번호를 소비.
+    짧은 가려짐(Occlusion) 구간은 ByteTrack의 track_buffer와 2차 연관(track_low_thresh)이 보완.
     """
 
     def __init__(self, tracker_cfg='bytetrack.yaml',
-                 min_hits=3, lost_ttl=90, trajectory_maxlen=64, fifo=None):
+                 min_hits=30, lost_ttl=None, trajectory_maxlen=64, fifo=None):
         """
         CarMOT 초기화.
 
         Args:
             tracker_cfg:       ByteTrack 설정 파일 (ultralytics 내장 'bytetrack.yaml')
-            min_hits:          차량번호 부여에 필요한 최소 연속 추적 프레임 수
-            lost_ttl:          추적 소실 후 매칭 정보를 유지할 프레임 수
+            min_hits:          차량번호 부여에 필요한 최소 '연속' 추적 프레임 수
+            lost_ttl:          추적 소실 후 매칭 정보를 유지할 프레임 수.
+                               None이면 tracker_cfg의 track_buffer를 그대로 사용한다.
+                               ByteTrack이 트랙을 버리는 시점과 일치시키는 것이 기본 동작이므로
+                               특별한 이유가 없으면 None으로 둘 것.
             trajectory_maxlen: 트랙별 궤적 저장 최대 길이
             fifo:              사용할 CarNumberFIFO 인스턴스 (None이면 모듈 전역 큐 사용)
         """
@@ -206,7 +207,9 @@ class CarMOT:
         self.tracker = BYTETracker(cfg)
 
         self.min_hits = min_hits
-        self.lost_ttl = lost_ttl
+        # BYTETracker는 track_buffer 프레임을 넘겨 소실된 트랙을 버리고, 같은 차량이
+        # 다시 잡혀도 새 ID를 발급한다. 그 시점 이후의 매칭 정보는 복구에 쓰일 수 없다.
+        self.lost_ttl = cfg.track_buffer if lost_ttl is None else lost_ttl
         self.trajectory_maxlen = trajectory_maxlen
 
         self.fifo = fifo if fifo is not None else car_number_fifo
@@ -214,6 +217,7 @@ class CarMOT:
         # Track ID -> 차량 번호 매핑 (예: {5: "1234"})
         self.track_to_car = {}
         # Track ID -> 연속 검출 프레임 수 (오검출로 FIFO가 소모되는 것 방지)
+        # 한 프레임이라도 관측되지 않으면 0으로 리셋된다.
         self.hit_counts = {}
         # Track ID -> 추적이 끊긴 뒤 경과한 프레임 수
         self.lost_counts = {}
@@ -307,11 +311,20 @@ class CarMOT:
     def _cleanup_lost(self, alive_ids):
         """
         이번 프레임에 검출되지 않은 트랙의 소실 카운트를 증가시키고,
-        LOST_TTL_FRAMES를 초과하면 매칭 정보와 궤적을 제거한다.
+        lost_ttl(기본값: bytetrack.yaml의 track_buffer)을 초과하면
+        매칭 정보와 궤적을 제거한다.
+
+        아직 번호를 부여받지 못한 트랙은 이 시점에 연속 카운트(hit_counts)를
+        0으로 되돌린다. min_hits는 '연속' 관측을 요구하므로, 끊긴 적이 있는
+        트랙은 처음부터 다시 세어야 한다.
         """
         for track_id in list(self.hit_counts.keys()):
             if track_id in alive_ids:
                 continue
+
+            # 연속성이 깨졌으므로 매칭 대기 중인 트랙의 카운트를 리셋
+            if track_id not in self.track_to_car:
+                self.hit_counts[track_id] = 0
 
             self.lost_counts[track_id] = self.lost_counts.get(track_id, 0) + 1
             if self.lost_counts[track_id] < self.lost_ttl:
@@ -407,27 +420,8 @@ def enqueue_car_number(car_id):
     car_number_fifo.push(car_id)
 
 
-def simulate_uart_rx(interval_sec=5.0, stop_event=None):
-    """
-    실제 UART(A00_uart_rx.py) 없이 FIFO 매칭 로직을 테스트하기 위한 가짜 송신기.
-    Zybo가 보내는 것과 동일하게 4자리 차량번호를 주기적으로 생성해 FIFO에 등록한다.
-    별도 스레드에서 실행해야 카메라 스트리밍을 막지 않는다.
-
-    Args:
-        interval_sec: 차량번호 생성 주기(초)
-        stop_event:   threading.Event. set()되면 루프를 종료
-    """
-    print(f"[TEST] 가짜 UART 송신 시작 ({interval_sec}초 간격으로 임의 차량번호 생성)")
-    while stop_event is None or not stop_event.is_set():
-        car_id = f"{random.randint(0, 9999):04d}"
-        enqueue_car_number(car_id)
-        time.sleep(interval_sec)
-
-
-# =====================================================================
 # 테스트용 메인 (단독 실행 시 합성 검출 데이터로 추적/매칭 로직 검증)
-# =====================================================================
-# 이 모듈은 추적 전용이므로 카메라와 YOLO 모델 없이도 단독 검증이 가능하다.
+# 이 모듈은 추적 전용이므로 카메라와 YOLO 모델 없이도 단독 검증이 가능.
 # 카메라 + 검출 + 추적 통합 실행은 B_main.py를 사용할 것.
 if __name__ == '__main__':
     print("==========================================")
@@ -443,24 +437,33 @@ if __name__ == '__main__':
     mot = CarMOT(
         tracker_cfg=CONFIG['TRACKER_CFG'],
         min_hits=CONFIG['MIN_HITS_FOR_ASSIGN'],
-        lost_ttl=CONFIG['LOST_TTL_FRAMES'],
         trajectory_maxlen=CONFIG['TRAJECTORY_MAXLEN']
     )
 
     # 차량 3대가 순차적으로 등장하여 오른쪽으로 이동하는 시나리오
     # (등장 프레임, 시작 x좌표, y좌표)
-    scenario = [(0, 50, 200), (12, 50, 320), (24, 50, 440)]
-    TOTAL_FRAMES = 40
+    # min_hits(30프레임 연속)를 채우려면 등장 간격도 그만큼 벌려야 한다.
+    scenario = [(0, 50, 200), (40, 50, 320), (80, 50, 440)]
+    TOTAL_FRAMES = 130
+    MOVE_PER_FRAME = 4  # 프레임당 이동량(px)
 
-    print(f"\n[TEST] 합성 시나리오 시작: 차량 {len(scenario)}대가 순차 등장\n")
+    # 연속 카운트 리셋 검증용: 2번째 차량(index 1)을 잠시 검출에서 누락시킨다.
+    # 이 구간 때문에 2번 차량은 카운트가 0으로 리셋되고 번호 부여가 그만큼 늦어져야 한다.
+    DROPOUT = {1: range(55, 58)}
+
+    print(f"\n[TEST] 합성 시나리오 시작: 차량 {len(scenario)}대 순차 등장")
+    print(f"[TEST] min_hits={mot.min_hits} (연속), lost_ttl={mot.lost_ttl} (track_buffer에서 자동 적용)")
+    print(f"[TEST] 2번 차량은 frame {DROPOUT[1].start}~{DROPOUT[1].stop - 1} 구간에서 검출 누락\n")
 
     for frame_idx in range(TOTAL_FRAMES):
         # 이번 프레임의 합성 검출 결과 생성 (B01의 detect() 반환 형식과 동일)
         detections = []
-        for appear_at, start_x, y in scenario:
+        for car_idx, (appear_at, start_x, y) in enumerate(scenario):
             if frame_idx < appear_at:
                 continue
-            x = start_x + (frame_idx - appear_at) * 12  # 프레임당 12px 이동
+            if frame_idx in DROPOUT.get(car_idx, ()):
+                continue
+            x = start_x + (frame_idx - appear_at) * MOVE_PER_FRAME
             detections.append({
                 "class_id": 2,
                 "class_name": "Car",
@@ -470,12 +473,16 @@ if __name__ == '__main__':
 
         tracks = mot.update(detections)
 
-        # 매칭 상태가 바뀌는 시점만 출력
-        if frame_idx in (2, 3, 14, 15, 26, 27, TOTAL_FRAMES - 1):
-            print(f"--- frame {frame_idx:2d} | 추적 {len(tracks)}대 | FIFO 잔여 {mot.fifo.size()}대")
+        # 매칭 상태가 바뀌는 시점 위주로 출력
+        if frame_idx in (29, 30, 54, 58, 70, 86, 87, 109, 110, TOTAL_FRAMES - 1):
+            print(f"--- frame {frame_idx:3d} | 추적 {len(tracks)}대 | FIFO 잔여 {mot.fifo.size()}대")
             for t in tracks:
                 car_str = t["car_id"] if t["car_id"] else "미매칭"
-                print(f"      ID:{t['track_id']:<3d} 번호={car_str:8s} bbox={t['bbox']}")
+                hits = mot.hit_counts.get(t["track_id"], 0)
+                print(f"      ID:{t['track_id']:<3d} 번호={car_str:8s} 연속={hits:<3d} bbox={t['bbox']}")
 
     print(f"\n[TEST] 최종 Track ID -> 차량번호 매핑: {mot.track_to_car}")
-    print("[TEST] 검출된 순서대로 FIFO 번호가 부여되었는지 확인하세요.")
+    print("[TEST] 확인 사항")
+    print("       1) 검출된 순서대로 FIFO 번호가 부여되었는가")
+    print(f"       2) 각 차량이 등장 후 정확히 {mot.min_hits}프레임째에 번호를 받았는가")
+    print("       3) 검출이 누락된 2번 차량은 그만큼 번호 부여가 밀렸는가")

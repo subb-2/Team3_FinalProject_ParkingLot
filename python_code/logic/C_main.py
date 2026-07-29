@@ -12,10 +12,10 @@ from logic.B00_camera_input import get_camera
 from logic.B01_car_detection import CarDetector, CONFIG as B01_CONFIG
 from logic.B02_car_mot import (
     CarMOT, CONFIG as B02_CONFIG,
-    car_number_fifo, enqueue_car_number, simulate_uart_rx
+    car_number_fifo, enqueue_car_number
 )
 from logic.C00_navigation import (
-    MarkerMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE_WORLD_POS
+    MarkerMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE1_WORLD_POS
 )
 from logic.C01_path_planner import (
     ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
@@ -42,8 +42,6 @@ CONFIG = {
     # 차량번호 입력 소스 설정
     "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
     "TEST_PRESET_CAR_NUMBERS": ["1234", "1998", "0828", "9999"],  # UART 없이 테스트할 차량번호(순서대로 FIFO 등록)
-    "TEST_UART_SIMULATOR": False,   # True: 임의의 차량번호를 주기적으로 자동 생성
-    "TEST_UART_INTERVAL_SEC": 5.0,  # 자동 생성 주기(초)
 
     # 내비게이션 연동 설정
     "AUTO_ASSIGN_SPOT": True,       # 차량번호 등록 시 A01_parking_manager로 빈자리를 자동 배정
@@ -206,13 +204,7 @@ def setup_car_number_source():
     FIFO에 차량번호를 공급할 소스를 설정에 따라 준비.
       - ENABLE_UART            : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
       - TEST_PRESET_CAR_NUMBERS: 지정한 번호를 순서대로 미리 등록
-      - TEST_UART_SIMULATOR    : 임의 번호를 주기적으로 자동 생성
-
-    Returns:
-        시뮬레이터 종료용 threading.Event
     """
-    stop_event = threading.Event()
-
     # 1) 실제 UART 수신 (A00_uart_rx)
     #    A00은 내부에서 handle_car_entry와 enqueue_car_number를 모두 호출하므로
     #    별도의 빈자리 배정이 필요 없다.
@@ -224,16 +216,6 @@ def setup_car_number_source():
     # 2) 미리 지정해 둔 차량번호를 순서대로 등록 (빈자리 배정 + FIFO)
     for car_id in CONFIG['TEST_PRESET_CAR_NUMBERS']:
         register_car_number(car_id)
-
-    # 3) 가짜 UART 송신기 (임의 번호 자동 생성)
-    if CONFIG['TEST_UART_SIMULATOR']:
-        threading.Thread(
-            target=simulate_uart_rx,
-            args=(CONFIG['TEST_UART_INTERVAL_SEC'], stop_event),
-            daemon=True
-        ).start()
-
-    return stop_event
 
 
 def build_pipeline(cap):
@@ -258,7 +240,6 @@ def build_pipeline(cap):
     mot = CarMOT(
         tracker_cfg=B02_CONFIG['TRACKER_CFG'],
         min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
-        lost_ttl=B02_CONFIG['LOST_TTL_FRAMES'],
         trajectory_maxlen=B02_CONFIG['TRAJECTORY_MAXLEN']
     )
 
@@ -283,14 +264,11 @@ def build_pipeline(cap):
         replan_tolerance=C01_CONFIG['REPLAN_TOLERANCE_CM']
     )
 
-    # C01 : 경로 계획기 (주차 구역을 장애물로 두고 통로를 따라 경로 생성)
+    # C01 : 경로 계획기 (격자의 벽/기둥/주차구역을 장애물로 두고 통로를 따라 경로 생성)
     lot_map = ParkingLotMap(
-        navigator.spot_world_pos, GATE_WORLD_POS,
+        navigator.spot_world_pos,
         resolution=C01_CONFIG['GRID_RESOLUTION_CM'],
-        spot_w=C01_CONFIG['SPOT_W_CM'],
-        spot_h=C01_CONFIG['SPOT_H_CM'],
         clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
-        lot_margin=C01_CONFIG['LOT_MARGIN_CM'],
     )
     navigator.planner = RoutePlanner(lot_map, simplify=C01_CONFIG['SIMPLIFY_PATH'])
 
@@ -353,7 +331,7 @@ if __name__ == '__main__':
     pipeline = build_pipeline(cap)
 
     # 차량번호 입력 소스 준비 (UART 또는 테스트용)
-    uart_sim_stop = setup_car_number_source()
+    setup_car_number_source()
 
     app = Flask(__name__)
 
@@ -398,6 +376,5 @@ if __name__ == '__main__':
     try:
         app.run(host=CONFIG['WEB_HOST'], port=CONFIG['WEB_PORT'], debug=False)
     finally:
-        uart_sim_stop.set()
         cap.release()
         print("[INFO] 카메라를 해제하고 종료합니다.")
