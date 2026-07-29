@@ -101,14 +101,18 @@ class MarkerMapper:
     이후 차량이 마커를 가려도 위치 추정이 끊기지 않는다.
     """
 
-    def __init__(self, aruco_dict_name='DICT_4X4_50', marker_world_pos=None,
-                 min_markers=4, lock_homography=True, lock_markers=6,
-                 max_error=5.0, min_spread=0.02, ransac_thresh_cm=5.0):
+    def __init__(self, aruco_dict_name=None, marker_world_pos=None,
+                 min_markers=None, lock_homography=None, lock_markers=None,
+                 max_error=None, min_spread=None, ransac_thresh_cm=None):
         """
         MarkerMapper 초기화.
 
+        모든 인자의 기본값은 이 모듈 상단의 CONFIG에서 가져온다.
+        여기에 값을 직접 적으면 CONFIG를 고쳐도 반영되지 않는 경로가 생기므로
+        숫자나 사전 이름을 하드코딩하지 말 것. (MAIN_README 5절)
+
         Args:
-            aruco_dict_name:  ArUco 사전 이름 (예: 'DICT_4X4_50')
+            aruco_dict_name:  ArUco 사전 이름 (None이면 CONFIG['ARUCO_DICT'])
             marker_world_pos: {마커ID: (x_cm, y_cm)} 형태의 실좌표 매핑
             min_markers:      호모그래피 계산을 시도할 최소 마커 수
             lock_homography:  True면 품질 기준 충족 시 호모그래피를 고정
@@ -117,6 +121,14 @@ class MarkerMapper:
             min_spread:       마커 배치의 최소 퍼짐 정도 (일직선 배치 거부)
             ransac_thresh_cm: RANSAC 이상치 판정 임계값 (cm, 실좌표 기준)
         """
+        aruco_dict_name = CONFIG['ARUCO_DICT'] if aruco_dict_name is None else aruco_dict_name
+        min_markers = CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'] if min_markers is None else min_markers
+        lock_homography = CONFIG['LOCK_HOMOGRAPHY'] if lock_homography is None else lock_homography
+        lock_markers = CONFIG['MARKERS_FOR_LOCK'] if lock_markers is None else lock_markers
+        max_error = CONFIG['MAX_REPROJ_ERROR_CM'] if max_error is None else max_error
+        min_spread = CONFIG['MIN_MARKER_SPREAD'] if min_spread is None else min_spread
+        ransac_thresh_cm = CONFIG['RANSAC_THRESH_CM'] if ransac_thresh_cm is None else ransac_thresh_cm
+
         dict_id = getattr(aruco, aruco_dict_name)
         self.detector = aruco.ArucoDetector(
             aruco.getPredefinedDictionary(dict_id),
@@ -372,11 +384,14 @@ class ParkingNavigator:
     """
 
     def __init__(self, mapper=None, spot_world_pos=None,
-                 arrival_threshold=15.0, turn_threshold=25.0, uturn_threshold=150.0,
-                 min_move_for_heading=3.0, heading_window=5, history_maxlen=128,
-                 planner=None, waypoint_radius=5.0, replan_tolerance=12.0):
+                 arrival_threshold=None, turn_threshold=None, uturn_threshold=None,
+                 min_move_for_heading=None, heading_window=None, history_maxlen=None,
+                 planner=None, waypoint_radius=5.0, replan_tolerance=None):
         """
         ParkingNavigator 초기화.
+
+        판정 기준의 기본값은 이 모듈 상단의 CONFIG에서 가져온다.
+        (waypoint_radius만 CONFIG 항목이 없어 여기서 기본값을 갖는다)
 
         Args:
             mapper:               MarkerMapper 인스턴스 (None이면 기본 설정으로 생성)
@@ -393,16 +408,25 @@ class ParkingNavigator:
             waypoint_radius:      경유점을 통과한 것으로 볼 거리 (cm)
             replan_tolerance:     경로에서 이만큼 벗어나면 재계획 (cm)
         """
+        from logic.C01_path_planner import CONFIG as C01_CONFIG
+
         self.mapper = mapper if mapper is not None else MarkerMapper()
 
-        self.arrival_threshold = arrival_threshold
-        self.turn_threshold = turn_threshold
-        self.uturn_threshold = uturn_threshold
-        self.min_move_for_heading = min_move_for_heading
-        self.heading_window = heading_window
-        self.history_maxlen = history_maxlen
+        self.arrival_threshold = (
+            CONFIG['ARRIVAL_THRESHOLD_CM'] if arrival_threshold is None else arrival_threshold)
+        self.turn_threshold = (
+            CONFIG['TURN_ANGLE_THRESHOLD_DEG'] if turn_threshold is None else turn_threshold)
+        self.uturn_threshold = (
+            CONFIG['UTURN_ANGLE_THRESHOLD_DEG'] if uturn_threshold is None else uturn_threshold)
+        self.min_move_for_heading = (
+            CONFIG['MIN_MOVE_CM_FOR_HEADING'] if min_move_for_heading is None else min_move_for_heading)
+        self.heading_window = (
+            CONFIG['HEADING_WINDOW'] if heading_window is None else heading_window)
+        self.history_maxlen = (
+            CONFIG['HISTORY_MAXLEN'] if history_maxlen is None else history_maxlen)
         self.waypoint_radius = waypoint_radius
-        self.replan_tolerance = replan_tolerance
+        self.replan_tolerance = (
+            C01_CONFIG['REPLAN_TOLERANCE_CM'] if replan_tolerance is None else replan_tolerance)
 
         # 주차 구역 ID -> 실좌표 (cm). C02가 기둥 마커의 중점으로 계산해 둔 값.
         self.spot_world_pos = dict(

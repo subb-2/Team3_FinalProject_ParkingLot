@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Aruco Markers</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        background-color: #f0f0f0;
+    }
+    .page {
+        width: 210mm;
+        height: 297mm;
+        padding: 15mm;
+        margin: 10mm auto;
+        background: white;
+        box-sizing: border-box;
+        page-break-after: always;
+    }
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(5, 1fr);
+        gap: 10px;
+        height: 100%;
+        align-items: center;
+        justify-items: center;
+    }
+    .marker {
+        text-align: center;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        font-weight: bold;
+    }
+    .marker img {
+        width: 140px;
+        height: 140px;
+        border: 1px solid #ccc;
+    }
+    @media print {
+        body { background-color: white; }
+        .page { margin: 0; width: 100%; height: 100%; border: none; box-shadow: none; page-break-after: always; }
+    }
+</style>
+</head>
+<body>
+
+<!-- 첫 번째 장 (1~15) -->
+<div class="page">
+    <div class="grid">
+        <div class="marker"><img src="dataset/aruco-1.svg" alt="aruco-1"><br>ID: 1</div>
+        <div class="marker"><img src="dataset/aruco-2.svg" alt="aruco-2"><br>ID: 2</div>
+        <div class="marker"><img src="dataset/aruco-3.svg" alt="aruco-3"><br>ID: 3</div>
+        <div class="marker"><img src="dataset/aruco-4.svg" alt="aruco-4"><br>ID: 4</div>
+        <div class="marker"><img src="dataset/aruco-5.svg" alt="aruco-5"><br>ID: 5</div>
+        <div class="marker"><img src="dataset/aruco-6.svg" alt="aruco-6"><br>ID: 6</div>
+        <div class="marker"><img src="dataset/aruco-7.svg" alt="aruco-7"><br>ID: 7</div>
+        <div class="marker"><img src="dataset/aruco-8.svg" alt="aruco-8"><br>ID: 8</div>
+        <div class="marker"><img src="dataset/aruco-9.svg" alt="aruco-9"><br>ID: 9</div>
+        <div class="marker"><img src="dataset/aruco-10.svg" alt="aruco-10"><br>ID: 10</div>
+        <div class="marker"><img src="dataset/aruco-11.svg" alt="aruco-11"><br>ID: 11</div>
+        <div class="marker"><img src="dataset/aruco-12.svg" alt="aruco-12"><br>ID: 12</div>
+        <div class="marker"><img src="dataset/aruco-13.svg" alt="aruco-13"><br>ID: 13</div>
+        <div class="marker"><img src="dataset/aruco-14.svg" alt="aruco-14"><br>ID: 14</div>
+        <div class="marker"><img src="dataset/aruco-15.svg" alt="aruco-15"><br>ID: 15</div>
+    </div>
+</div>
+
+<!-- 두 번째 장 (16~30) -->
+<div class="page">
+    <div class="grid">
+        <div class="marker"><img src="dataset/aruco-16.svg" alt="aruco-16"><br>ID: 16</div>
+        <div class="marker"><img src="dataset/aruco-17.svg" alt="aruco-17"><br>ID: 17</div>
+        <div class="marker"><img src="dataset/aruco-18.svg" alt="aruco-18"><br>ID: 18</div>
+        <div class="marker"><img src="dataset/aruco-19.svg" alt="aruco-19"><br>ID: 19</div>
+        <div class="marker"><img src="dataset/aruco-20.svg" alt="aruco-20"><br>ID: 20</div>
+        <div class="marker"><img src="dataset/aruco-21.svg" alt="aruco-21"><br>ID: 21</div>
+        <div class="marker"><img src="dataset/aruco-22.svg" alt="aruco-22"><br>ID: 22</div>
+        <div class="marker"><img src="dataset/aruco-23.svg" alt="aruco-23"><br>ID: 23</div>
+        <div class="marker"><img src="dataset/aruco-24.svg" alt="aruco-24"><br>ID: 24</div>
+        <div class="marker"><img src="dataset/aruco-25.svg" alt="aruco-25"><br>ID: 25</div>
+        <div class="marker"><img src="dataset/aruco-26.svg" alt="aruco-26"><br>ID: 26</div>
+        <div class="marker"><img src="dataset/aruco-27.svg" alt="aruco-27"><br>ID: 27</div>
+        <div class="marker"><img src="dataset/aruco-28.svg" alt="aruco-28"><br>ID: 28</div>
+        <div class="marker"><img src="dataset/aruco-29.svg" alt="aruco-29"><br>ID: 29</div>
+        <div class="marker"><img src="dataset/aruco-30.svg" alt="aruco-30"><br>ID: 30</div>
+    </div>
+</div>
+
+</body>
+</html>

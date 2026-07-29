@@ -3,6 +3,8 @@ import time
 import sys
 import os
 import threading
+import traceback
+import numpy as np
 from datetime import datetime
 from flask import Flask, Response
 
@@ -138,6 +140,33 @@ class ParkingNavigationPipeline:
 
         return frame
 
+    def _report_error(self, exc):
+        """프레임 처리 예외를 터미널에 한 번만 자세히 출력한다. (매 프레임 도배 방지)"""
+        key = f"{type(exc).__name__}: {exc}"
+        if key == getattr(self, "_last_error", None):
+            return
+        self._last_error = key
+        print(f"\n[ERROR] 프레임 처리 실패: {key}")
+        traceback.print_exc()
+
+    @staticmethod
+    def _error_frame(frame, exc):
+        """오류 내용을 적은 프레임을 MJPEG 청크로 만들어 반환."""
+        canvas = np.zeros_like(frame)
+        msg = f"{type(exc).__name__}: {exc}"
+        cv2.putText(canvas, "PIPELINE ERROR", (20, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 255), 2, cv2.LINE_AA)
+        # 긴 메시지를 화면 폭에 맞춰 줄바꿈
+        for i in range(0, len(msg), 60):
+            cv2.putText(canvas, msg[i:i + 60], (20, 110 + (i // 60) * 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "see terminal for full traceback", (20, canvas.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
+
+        ok, buf = cv2.imencode('.jpg', canvas)
+        return (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+
     def generate_frames(self):
         """
         Flask MJPEG 스트리밍용 제너레이터.
@@ -152,7 +181,16 @@ class ParkingNavigationPipeline:
                 print("[ERROR] 카메라 프레임을 읽을 수 없습니다. 스트리밍을 종료합니다.")
                 break
 
-            tracks, nav_results = self.process_frame(frame)
+            # 처리 중 예외가 나면 제너레이터가 죽어 스트림이 조용히 끊긴다.
+            # 브라우저에는 깨진 이미지만 보여 원인을 알 수 없으므로,
+            # 오류를 화면에 그대로 띄우고 스트리밍은 유지한다.
+            try:
+                tracks, nav_results = self.process_frame(frame)
+            except Exception as exc:
+                self._report_error(exc)
+                yield self._error_frame(frame, exc)
+                time.sleep(0.5)
+                continue
 
             # FPS 계산 (0.5초 간격)
             current_time = time.time()
