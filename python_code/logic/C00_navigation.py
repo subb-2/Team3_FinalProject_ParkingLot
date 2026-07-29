@@ -16,7 +16,10 @@ from logic.C01_path_planner import route_length, distance_to_route
 #   - 추적 : B02_car_mot.py  (여기서 나온 박스 정중앙점을 입력으로 사용)
 CONFIG = {
     # ArUco 마커 설정
-    "ARUCO_DICT": "DICT_4X4_50",    # 마커 사전 (실제 출력한 마커와 일치해야 함)
+    # 사전이 실제 인쇄물과 다르면 마커가 '하나도' 검출되지 않는다.
+    # (오검출이 아니라 완전 무검출이므로 화면에 아무 표시도 안 뜬다)
+    # 현재 인쇄물: dataset/aruco-*.svg = 5x5 비트, DICT_ARUCO_ORIGINAL 의 ID 1~13.
+    "ARUCO_DICT": "DICT_ARUCO_ORIGINAL",  # 마커 사전 (실제 출력한 마커와 일치해야 함)
     "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
     # 카메라가 고정 설치된 경우 True 권장.
