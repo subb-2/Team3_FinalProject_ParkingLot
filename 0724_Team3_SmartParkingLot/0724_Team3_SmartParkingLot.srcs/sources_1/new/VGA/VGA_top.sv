@@ -24,7 +24,6 @@ module VGA_top(
 
     FrameController U_FrameController(
         .reset(reset),
-        .i_capture(i_capture),
         .i_RGB(i_RGB),
         .i_x_pixel(i_x_pixel),
         .i_y_pixel(i_y_pixel),

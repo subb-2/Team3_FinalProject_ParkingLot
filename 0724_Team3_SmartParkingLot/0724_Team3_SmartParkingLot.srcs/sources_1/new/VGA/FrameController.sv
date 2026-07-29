@@ -2,9 +2,6 @@ module FrameController(
     input  logic i_pixel_clk,
     input  logic reset,
 
-    // from SR04
-    input  logic i_capture,
-
     // from PS(Pcam)
     input  logic [23:0] i_RGB,
     input  logic [10:0] i_x_pixel,
