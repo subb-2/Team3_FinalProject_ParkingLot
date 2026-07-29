@@ -41,3 +41,8 @@ Desktop.ini
 python_code/logic/torchvision_src/
 torchvision_src/
 *.whl
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
