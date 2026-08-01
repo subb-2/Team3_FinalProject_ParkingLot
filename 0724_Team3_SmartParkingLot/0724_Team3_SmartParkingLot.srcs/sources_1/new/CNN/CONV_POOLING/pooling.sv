@@ -26,8 +26,6 @@ module pooling #(
 
     //한 줄 저장
     reg   [                        7:0] temp       [0:DATA_DEPTH-1];
-    //28*28 입력 cnt
-    logic [  $clog2(DATA_DEPTH**2)-1:0] input_cnt;
     //행 카운트
     logic [     $clog2(DATA_DEPTH)-1:0] col_cnt;
     logic                               row_parity;
@@ -61,8 +59,9 @@ module pooling #(
                 end
             end
             STREAM: begin
-                //Pooling 다 끝나면 넘어가
-                if (o_waddr == POOLING_SIZE**2-1) begin
+                //Pooling 다 끝나면 넘어가 (다채널 대응을 위해 modulo 연산 사용)
+                
+                if (((o_waddr + 1) % (POOLING_SIZE**2) == 0) && o_valid) begin
                     n_state = DONE;
                 end
             end
@@ -78,7 +77,6 @@ module pooling #(
     //Data Logic
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
-            input_cnt <= 0;
             col_cnt <= 0;
             row_parity <= 0;
             reg_max <= 0;
@@ -100,7 +98,6 @@ module pooling #(
                         waddr_cnt <= waddr_cnt + 1;
                     end
                 end
-                input_cnt <= input_cnt + 1;
                 if (col_cnt == DATA_DEPTH - 1) begin
                     row_parity <= ~row_parity;
                     col_cnt <= 0;
