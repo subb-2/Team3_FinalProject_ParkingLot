@@ -16,7 +16,12 @@ module PreProcess(
     // CNN
     input  logic        cnn_done,
     input  logic [7:0]  pixel_addr,
-    output logic [31:0] pixel_data
+    output logic [31:0] pixel_data,
+
+    // UART
+    input  logic        inf_done,
+    input  logic [15:0] inf_data,
+    output logic        tx
 );
     
     // SR04 -> SG90
@@ -56,4 +61,12 @@ module PreProcess(
         .o_vga_done(w_vga_done)
     );
 
+    /********* UART *********/
+    UART_top U_UART_TOP(
+        .clk(clk),
+        .reset(reset),
+        .i_inf_done(inf_done),
+        .i_inf_data(inf_data),
+        .o_tx(tx)
+    );
 endmodule
