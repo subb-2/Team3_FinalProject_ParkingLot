@@ -13,6 +13,10 @@ A00_uart_rx : Zybo(FPGA) → Jetson 차량번호 수신 모듈  [Wi-Fi(TCP) 버�
 기존 UART 코드는 아래쪽 '[UART 버전 원본 코드]' 블록에 주석으로 보존해 두었다.
 """
 
+# 입차 중복 막기
+# 입차 안했는데 출차 하는 경우 (정보없음 처리)
+
+
 import socket
 import threading
 import time

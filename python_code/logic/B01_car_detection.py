@@ -13,13 +13,13 @@ from logic.B00_camera_input import get_camera
 # 검출 관련 설정의 단일 출처.
 CONFIG = {
     # 모델 추론 설정
-    "MODEL_PATH": "yolov8s.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
+    "MODEL_PATH": "/home/eojin/parking_manage_python/dataset/car_data_0805.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
 
     # Confidence 임계값을 일부러 낮게 둠.
     # ByteTrack은 신뢰도가 낮은 박스를 2차로 재매칭해서 끊긴 추적을 살리는데,
     # 여기서 미리 걸러버리면 그 박스가 추적기까지 오지 못해 기능이 죽음.
     # 실제 필터링은 config/bytetrack.yaml의 track_high_thresh(0.4)가 담당.
-    "CONF_THRESH": 0.05,            # Confidence 임계값
+    "CONF_THRESH": 0.25,            # Confidence 임계값
     "IOU_THRESH": 0.45,             # NMS IoU 임계값
 
     # YOLO 추론 해상도(정사각 한 변, px). 32의 배수여야 함.
@@ -44,15 +44,22 @@ CONFIG = {
 
 # COCO 데이터셋 기준 차량 관련 클래스 ID
 # 2: car, 3: motorcycle, 5: bus, 7: truck
-VEHICLE_CLASS_IDS = {2, 3, 5, 7}
-VEHICLE_CLASS_NAMES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
+# VEHICLE_CLASS_IDS = {2, 3, 5, 7}
+# VEHICLE_CLASS_NAMES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
+
+#fine tuning
+VEHICLE_CLASS_IDS = {0}
+VEHICLE_CLASS_NAMES = {0: "Car"}
 
 # Bounding Box 색상 (BGR)
+# BOX_COLORS = {
+#     2: (0, 255, 0),    # Car       - 초록
+#     3: (0, 165, 255),  # Motorcycle - 주황
+#     5: (255, 0, 0),    # Bus       - 파랑
+#     7: (0, 0, 255),    # Truck     - 빨강
+# }
 BOX_COLORS = {
-    2: (0, 255, 0),    # Car       - 초록
-    3: (0, 165, 255),  # Motorcycle - 주황
-    5: (255, 0, 0),    # Bus       - 파랑
-    7: (0, 0, 255),    # Truck     - 빨강
+    0: (0, 255, 0),  # Car - 초록색
 }
 DEFAULT_COLOR = (0, 255, 255)
 
