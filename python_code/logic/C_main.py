@@ -27,7 +27,9 @@ from logic.C01_path_planner import (
 # 각 모듈의 세부 설정은 해당 모듈의 CONFIG에서 관리.
 #   - 카메라     : B00_camera_input.py
 #   - 검출       : B01_car_detection.py  (모델 경로, conf, imgsz 등)
-#   - 추적       : B02_car_mot.py        (ByteTrack, FIFO 매칭 등)
+#   - 추적       : B02_car_mot.py        (추적기 선택, FIFO 매칭 등)
+#                  실제 추적기는 config/*.yaml의 tracker_type이 결정한다.
+#                  현재 기본값: OC-SORT + ByteTrack 저신뢰 2차 연관 (config/ocsort.yaml)
 #   - 내비게이션 : C00_navigation.py     (ArUco 마커, 호모그래피, 안내 기준)
 # 여기서는 통합 실행에 필요한 설정만 관리.
 CONFIG = {
@@ -61,7 +63,7 @@ class ParkingNavigationPipeline:
     각 단계는 독립 모듈로 분리되어 있고, 이 클래스는 연결만 담당한다.
       - B00_camera_input : 프레임 획득
       - B01_car_detection: YOLO 차량 검출 (모델은 여기 한 곳에서만 로드)
-      - B02_car_mot      : ByteTrack 추적 + FIFO 차량번호 매칭
+      - B02_car_mot      : MOT 추적(OC-SORT) + FIFO 차량번호 매칭
       - C00_navigation   : ArUco 마커 기반 실좌표 변환 + 경로 안내
     """
 
@@ -93,8 +95,21 @@ class ParkingNavigationPipeline:
         # 1) B01 : 차량 검출
         detections = self.detector.detect(frame)
 
-        # 2) B02 : ByteTrack 추적 + 차량번호 매칭
-        tracks = self.mot.update(detections)
+        # 2) B02 : MOT 추적 + 차량번호 매칭
+        #    시각화(4단계) 전의 원본 프레임을 넘긴다. (재바인딩의 색 히스토그램용)
+        #
+        #    호모그래피가 준비되어 있으면 image_to_world를 함께 넘겨 재바인딩의
+        #    거리 판정을 cm 단위로 돌린다. 픽셀 거리는 원근 때문에 화면 위치마다
+        #    실제 거리가 달라 임계값을 하나로 정할 수 없다.
+        #
+        #    이 시점의 호모그래피는 직전 프레임에서 갱신된 것이다. 카메라가 고정
+        #    설치되어 있고 LOCK_HOMOGRAPHY=True이므로 실질적으로 동일하다.
+        mapper = self.navigator.mapper
+        tracks = self.mot.update(
+            detections,
+            frame=frame,
+            to_world=mapper.image_to_world if mapper.is_ready() else None
+        )
 
         # 3) C00 : 배정된 목표 구역 동기화 후 위치 추정 및 경로 안내
         self.navigator.sync_targets_from_parking_manager()
@@ -274,7 +289,7 @@ def build_pipeline(cap):
         imgsz=B01_CONFIG['IMGSZ']
     )
 
-    # B02 : ByteTrack 추적기
+    # B02 : 추적기 (어떤 추적기인지는 TRACKER_CFG의 tracker_type이 결정)
     mot = CarMOT(
         tracker_cfg=B02_CONFIG['TRACKER_CFG'],
         min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
@@ -380,7 +395,7 @@ if __name__ == '__main__':
             <head><title>Jetson Parking Navigation (C_main)</title></head>
             <body style="background-color: #222; color: white; text-align: center;">
                 <h2>Jetson Orin Nano - Parking Navigation Pipeline</h2>
-                <p>B00(Camera) -&gt; B01(Detection) -&gt; B02(ByteTrack MOT) -&gt; C00(Navigation)</p>
+                <p>B00(Camera) -&gt; B01(Detection) -&gt; B02({pipeline.mot.tracker_type.upper()} MOT) -&gt; C00(Navigation)</p>
                 <img src="/video_feed" width="{CONFIG['CAM_WIDTH']}" height="{CONFIG['CAM_HEIGHT']}">
                 <p>차량번호 수동 등록: <code>/enqueue/1234</code> | 현재 상태: <code>/status</code></p>
                 <p>호모그래피 재계산: <code>/recalibrate</code></p>

@@ -263,7 +263,7 @@ if __name__ == '__main__':
                          font-family:sans-serif; margin:0; padding:18px;">
                 <h2 style="margin:6px 0;">Jetson Orin Nano - Parking Navigation</h2>
                 <p style="color:#888; margin:0 0 18px 0;">
-                    B00(Camera) -&gt; B01(Detection) -&gt; B02(ByteTrack MOT)
+                    B00(Camera) -&gt; B01(Detection) -&gt; B02({pipeline.mot.tracker_type.upper()} MOT)
                     -&gt; C00/C01(Navigation) -&gt; D00(UI)
                 </p>
 

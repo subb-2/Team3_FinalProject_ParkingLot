@@ -18,7 +18,9 @@ from logic.B02_car_mot import (
 # 각 모듈의 세부 설정은 해당 모듈의 CONFIG에서 관리.
 #   - 카메라 : B00_camera_input.py
 #   - 검출   : B01_car_detection.py  (모델 경로, conf, imgsz 등)
-#   - 추적   : B02_car_mot.py        (ByteTrack, FIFO 매칭 등)
+#   - 추적   : B02_car_mot.py        (추적기 선택, FIFO 매칭 등)
+#              실제 추적기는 config/*.yaml의 tracker_type이 결정한다.
+#              현재 기본값: OC-SORT + ByteTrack 저신뢰 2차 연관 (config/ocsort.yaml)
 # 여기서는 통합 실행에 필요한 설정만 관리.
 CONFIG = {
     # 카메라 설정
@@ -44,7 +46,7 @@ class ParkingVisionPipeline:
     각 단계는 독립 모듈로 분리되어 있고, 이 클래스는 연결만 담당한다.
       - B00_camera_input : 프레임 획득
       - B01_car_detection: YOLO 차량 검출 (모델은 여기 한 곳에서만 로드)
-      - B02_car_mot      : ByteTrack 추적 + FIFO 차량번호 매칭
+      - B02_car_mot      : MOT 추적(OC-SORT) + FIFO 차량번호 매칭
     """
 
     def __init__(self, cap, detector, mot):
@@ -69,8 +71,12 @@ class ParkingVisionPipeline:
         # 1) B01 : 차량 검출
         detections = self.detector.detect(frame)
 
-        # 2) B02 : ByteTrack 추적 + 차량번호 매칭
-        tracks = self.mot.update(detections)
+        # 2) B02 : MOT 추적 + 차량번호 매칭
+        #    시각화(3단계) 전의 원본 프레임을 넘겨야 한다. 박스를 그린 뒤에 넘기면
+        #    재바인딩의 색 히스토그램에 초록 테두리 색이 섞인다.
+        #    B_main에는 호모그래피가 없으므로 거리 판정은 픽셀 기준으로 동작한다.
+        #    (cm 기준으로 쓰려면 C_main처럼 to_world를 넘길 것)
+        tracks = self.mot.update(detections, frame=frame)
 
         # 3) 시각화
         self.mot.draw_tracks(frame, tracks)
@@ -175,7 +181,7 @@ if __name__ == '__main__':
         imgsz=B01_CONFIG['IMGSZ']
     )
 
-    # B02 : ByteTrack 추적기 초기화
+    # B02 : 추적기 초기화 (어떤 추적기인지는 TRACKER_CFG의 tracker_type이 결정)
     mot = CarMOT(
         tracker_cfg=B02_CONFIG['TRACKER_CFG'],
         min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
@@ -197,7 +203,7 @@ if __name__ == '__main__':
             <head><title>Jetson Parking Vision (B_main)</title></head>
             <body style="background-color: #222; color: white; text-align: center;">
                 <h2>Jetson Orin Nano - Parking Vision Pipeline</h2>
-                <p>B00(Camera) -&gt; B01(YOLOv8 Detection) -&gt; B02(ByteTrack MOT)</p>
+                <p>B00(Camera) -&gt; B01(YOLOv8 Detection) -&gt; B02({pipeline.mot.tracker_type.upper()} MOT)</p>
                 <img src="/video_feed" width="{CONFIG['CAM_WIDTH']}" height="{CONFIG['CAM_HEIGHT']}">
                 <p>차량번호 수동 등록: <code>/enqueue/1234</code> | 현재 상태: <code>/status</code></p>
             </body>
@@ -220,6 +226,8 @@ if __name__ == '__main__':
         """현재 추적 상태와 FIFO 대기열을 조회."""
         return {
             "fps": round(pipeline.fps, 1),
+            # 추적기 A/B 비교용. total_ids가 실제 차량 대수보다 크면 그만큼 ID가 바뀐 것.
+            "tracker": pipeline.mot.track_id_stats(),
             "fifo_waiting": car_number_fifo.snapshot(),
             "tracks": [
                 {

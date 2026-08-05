@@ -16,10 +16,17 @@ CONFIG = {
     "MODEL_PATH": "/home/eojin/parking_manage_python/dataset/car_data_0805.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
 
     # Confidence 임계값을 일부러 낮게 둠.
-    # ByteTrack은 신뢰도가 낮은 박스를 2차로 재매칭해서 끊긴 추적을 살리는데,
-    # 여기서 미리 걸러버리면 그 박스가 추적기까지 오지 못해 기능이 죽음.
-    # 실제 필터링은 config/bytetrack.yaml의 track_high_thresh(0.4)가 담당.
-    "CONF_THRESH": 0.25,            # Confidence 임계값
+    # 추적기의 2차 연관(ByteTrack 방식)은 신뢰도가 낮은 박스를 재매칭해서 끊긴
+    # 추적을 살리는데, 여기서 미리 걸러버리면 그 박스가 추적기까지 오지 못해
+    # 기능이 죽는다.
+    #
+    # !! 중요 !! 이 값은 config/ocsort.yaml의 track_low_thresh(0.05)보다
+    # 낮거나 같아야 한다. 0.25로 두면 저신뢰 버킷 [0.05, 0.4) 중 실제로는
+    # [0.25, 0.4)만 존재하게 되어, 손에 가려져 conf가 0.1~0.2로 떨어진 박스가
+    # 추적기에 도달조차 못 한다. (가림 구간 ID 스위치의 주된 원인)
+    #
+    # 실제 필터링은 추적기 쪽의 track_high_thresh / new_track_thresh(0.4)가 담당.
+    "CONF_THRESH": 0.05,            # Confidence 임계값
     "IOU_THRESH": 0.45,             # NMS IoU 임계값
 
     # YOLO 추론 해상도(정사각 한 변, px). 32의 배수여야 함.

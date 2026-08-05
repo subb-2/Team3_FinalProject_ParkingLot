@@ -18,7 +18,7 @@ Jetson Orin Nano 기반 주차 관리/안내 시스템의 **전역 약속**을 �
 | | | `A01_parking_manager` | 빈자리 배정, 입/출차 처리 |
 | **B** | 비전 | `B00_camera_input` | 카메라 열기 (Windows 웹캠 / Jetson GStreamer 자동 분기) |
 | | | `B01_car_detection` | YOLO 차량 검출 |
-| | | `B02_car_mot` | ByteTrack 추적 + 차량번호 FIFO 매칭 |
+| | | `B02_car_mot` | MOT 추적(OC-SORT) + 차량번호 FIFO 매칭 + 재바인딩 |
 | | | `B_main` | B00→B01→B02 통합 실행 |
 | **C** | 위치/경로 | `C00_navigation` | ArUco 마커 → 실좌표 변환, 진행방향 추정, 안내 판정 |
 | | | `C01_path_planner` | 경로 계산 (A*), 카메라를 쓰지 않음 |
@@ -147,12 +147,16 @@ Jetson Orin Nano 기반 주차 관리/안내 시스템의 **전역 약속**을 �
 |---|---|---|---|
 | 차량번호 (`car_id`) | **4자리 문자열** | `"1234"`, `"0828"` | **정수 아님.** 앞자리 0이 사라진다 |
 | 주차 구역 (`spot_id`) | `"<구역><숫자>"` | `"A-1"`, `"B-3"` | 하이픈 포함, 대문자 |
-| 추적 ID (`track_id`) | 정수 | `5` | ByteTrack이 발급. **재사용 안 됨** |
+| 추적 ID (`track_id`) | 정수 | `5` | 추적기가 발급. **재사용 안 됨** |
 | 마커 ID (`marker_id`) | 정수 | `8` | |
 | 좌표 | `(x, y)` 튜플 | `(90.0, 0.0)` | cm, float |
 | 점유 상태 | `"empty"` / `"full"` | | 다른 문자열 금지 |
 
 `track_id`와 `car_id`는 **다른 것**이다. 트랙이 끊겼다 다시 잡히면 같은 차량이라도 `track_id`는 새로 발급된다.
+
+그래서 **하위 모듈은 `track_id`가 아니라 `car_id`를 키로 써야 한다.** (C00의 `world_history` / `routes` / `targets`가 모두 그렇게 되어 있다)
+
+B02의 **재바인딩 레이어**가 이 원칙을 뒷받침한다. 가려짐 등으로 `track_id`가 바뀌어도, 사라진 트랙의 마지막 위치·색상과 대조해 `car_id`를 새 트랙에 승계한다. 즉 `track_id`는 바뀌어도 `car_id`는 물리적인 차를 계속 따라간다. 설정은 `B02_car_mot.CONFIG['REBIND']`.
 
 ---
 
@@ -161,7 +165,8 @@ Jetson Orin Nano 기반 주차 관리/안내 시스템의 **전역 약속**을 �
 | 종류 | 위치 |
 |---|---|
 | 모듈 전용 파라미터 | 해당 모듈 파일 상단 `CONFIG` 딕셔너리 |
-| ByteTrack 파라미터 | `config/bytetrack.yaml` (ultralytics 내장 파일을 쓰지 않는다) |
+| 추적기 파라미터 | `config/ocsort.yaml` (사용 중) / `config/bytetrack.yaml` (비교용). ultralytics 내장 파일을 쓰지 않는다. 어떤 추적기를 쓸지는 yaml의 `tracker_type`이 결정 |
+| 재바인딩 파라미터 | `B02_car_mot.CONFIG['REBIND']` |
 | 주차장 지도 / 구역 목록 | `data/map_data.py` |
 | 차량 정보 / 요금 | `data/car_data.py` |
 | 마커 ID 배치 | `data/map_data.py`의 `PILL_MARKER_ID` |
