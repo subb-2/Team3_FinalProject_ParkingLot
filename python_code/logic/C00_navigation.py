@@ -480,6 +480,22 @@ class ParkingNavigator:
         print(f"[안내] 차량 '{car_id}' 목표 구역 설정: {spot_id}")
         return True
 
+    def get_target_world(self, car_id):
+        """
+        차량의 목표 주차 구역 실좌표를 반환. 목표가 없으면 None.
+
+        B02가 '주차 완료' 판정에 쓴다. (활성 차량이 목표 구역 반경 안에
+        들어왔는지 확인) C_main이 이 메서드를 CarMOT.update의 target_of로 넘긴다.
+
+        Args:
+            car_id: 차량 번호 4자리 문자열
+
+        Returns:
+            (x_cm, y_cm) 목표 구역 실좌표. 목표가 없으면 None.
+        """
+        spot_id = self.targets.get(car_id)
+        return self.spot_world_pos.get(spot_id) if spot_id else None
+
     def sync_targets_from_parking_manager(self):
         """
         A01_parking_manager가 관리하는 입차 정보(cars_info)를 읽어

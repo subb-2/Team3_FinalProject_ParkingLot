@@ -18,7 +18,7 @@ Jetson Orin Nano 기반 주차 관리/안내 시스템의 **전역 약속**을 �
 | | | `A01_parking_manager` | 빈자리 배정, 입/출차 처리 |
 | **B** | 비전 | `B00_camera_input` | 카메라 열기 (Windows 웹캠 / Jetson GStreamer 자동 분기) |
 | | | `B01_car_detection` | YOLO 차량 검출 |
-| | | `B02_car_mot` | MOT 추적(OC-SORT) + 차량번호 FIFO 매칭 + 재바인딩 |
+| | | `B02_car_mot` | MOT 추적(OC-SORT) + 차량번호 매칭 (단일 활성 차량 + 재바인딩) |
 | | | `B_main` | B00→B01→B02 통합 실행 |
 | **C** | 위치/경로 | `C00_navigation` | ArUco 마커 → 실좌표 변환, 진행방향 추정, 안내 판정 |
 | | | `C01_path_planner` | 경로 계산 (A*), 카메라를 쓰지 않음 |
@@ -156,7 +156,16 @@ Jetson Orin Nano 기반 주차 관리/안내 시스템의 **전역 약속**을 �
 
 그래서 **하위 모듈은 `track_id`가 아니라 `car_id`를 키로 써야 한다.** (C00의 `world_history` / `routes` / `targets`가 모두 그렇게 되어 있다)
 
-B02의 **재바인딩 레이어**가 이 원칙을 뒷받침한다. 가려짐 등으로 `track_id`가 바뀌어도, 사라진 트랙의 마지막 위치·색상과 대조해 `car_id`를 새 트랙에 승계한다. 즉 `track_id`는 바뀌어도 `car_id`는 물리적인 차를 계속 따라간다. 설정은 `B02_car_mot.CONFIG['REBIND']`.
+B02가 이 원칙을 두 겹으로 뒷받침한다. `track_id`는 바뀌어도 `car_id`는 물리적인 차를 계속 따라간다.
+
+| 레이어 | 담당 | 설정 |
+|---|---|---|
+| **단일 활성 차량** | 움직이는 차 = 지금 안내 중인 차. ID가 바뀌면 다음 프레임에 즉시 재결합 | `CONFIG['SINGLE_ACTIVE']` |
+| **재바인딩(유령)** | 주차를 마친 차. 트랙이 끊겼다 되살아나면 마지막 위치로 승계 | `CONFIG['REBIND']` |
+
+**운영 전제: 동시에 움직이는 차는 1대.** 차가 한 대씩 들어와 배정된 구역에 주차하고, 그다음 차가 들어온다. 이 제약이 어떤 추적 알고리즘보다 강한 단서이므로 B02는 이것을 1순위 규칙으로 쓴다.
+
+안내 종료(= 다음 차 차례) 판정은 **목표 구역 중심에서 `ARRIVAL_RADIUS_CM` 이내에 `ARRIVAL_HOLD_SEC` 이상 머무르면** 주차 완료로 본다. 목표 좌표는 C_main이 `C00.get_target_world`를 `CarMOT.update(target_of=...)`로 넘겨서 전달한다.
 
 ---
 
@@ -166,6 +175,7 @@ B02의 **재바인딩 레이어**가 이 원칙을 뒷받침한다. 가려짐 �
 |---|---|
 | 모듈 전용 파라미터 | 해당 모듈 파일 상단 `CONFIG` 딕셔너리 |
 | 추적기 파라미터 | `config/ocsort.yaml` (사용 중) / `config/bytetrack.yaml` (비교용). ultralytics 내장 파일을 쓰지 않는다. 어떤 추적기를 쓸지는 yaml의 `tracker_type`이 결정 |
+| 단일 활성 차량 / 주차 판정 반경 | `B02_car_mot.CONFIG['SINGLE_ACTIVE']` |
 | 재바인딩 파라미터 | `B02_car_mot.CONFIG['REBIND']` |
 | 주차장 지도 / 구역 목록 | `data/map_data.py` |
 | 차량 정보 / 요금 | `data/car_data.py` |

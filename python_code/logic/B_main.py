@@ -72,11 +72,12 @@ class ParkingVisionPipeline:
         detections = self.detector.detect(frame)
 
         # 2) B02 : MOT 추적 + 차량번호 매칭
-        #    시각화(3단계) 전의 원본 프레임을 넘겨야 한다. 박스를 그린 뒤에 넘기면
-        #    재바인딩의 색 히스토그램에 초록 테두리 색이 섞인다.
-        #    B_main에는 호모그래피가 없으므로 거리 판정은 픽셀 기준으로 동작한다.
-        #    (cm 기준으로 쓰려면 C_main처럼 to_world를 넘길 것)
-        tracks = self.mot.update(detections, frame=frame)
+        #    B_main에는 호모그래피도 목표 구역 정보도 없다. 따라서
+        #      - 이동/거리 판정은 cm가 아니라 픽셀 기준으로 동작하고
+        #      - 주차 완료(도착) 판정을 할 수 없어 활성 차량은
+        #        SINGLE_ACTIVE['STUCK_RELEASE_SEC'](정지 시간)으로만 해제된다.
+        #    전체 시나리오 확인은 C_main으로 할 것. 여기는 검출/추적 확인용이다.
+        tracks = self.mot.update(detections)
 
         # 3) 시각화
         self.mot.draw_tracks(frame, tracks)

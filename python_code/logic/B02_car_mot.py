@@ -2,7 +2,9 @@ import cv2
 import time
 import sys
 import os
+import io
 import math
+import contextlib
 import threading
 import numpy as np
 from collections import deque
@@ -47,6 +49,64 @@ CONFIG = {
     "MIN_HITS_FOR_ASSIGN": 30,      # 이 프레임 수 이상 '연속' 추적되어야 차량번호를 부여 (30fps 기준 1초)
     "TRAJECTORY_MAXLEN": 64,        # 궤적(Trajectory) 저장 최대 길이
 
+    # =====================================================================
+    # 단일 활성 차량(Single Active Vehicle) 모드
+    #
+    # 운영 시나리오상 '동시에 움직이는 차는 1대'로 고정한다.
+    # 차가 한 대씩 들어와 배정된 구역까지 이동해 주차하고, 그다음 차가 들어온다.
+    #
+    # 이 제약은 어떤 추적 알고리즘보다 강한 단서다.
+    #   "지금 움직이고 있는 차 = 지금 안내 중인 차"
+    # 이 한 줄이면 ID가 바뀌어도 다음 프레임에 곧바로 복구된다.
+    # 색/거리/외형을 따질 필요가 없다.
+    #
+    # 동작:
+    #   1) 활성 차량이 없고 움직이는 트랙이 나타나면 FIFO에서 번호를 꺼내 붙인다.
+    #   2) 한 번 붙으면 트랙이 살아 있는 동안 유지된다. (sticky)
+    #      중간에 차가 멈춰 서도 결합은 풀리지 않는다.
+    #   3) 트랙이 끊기면, 다시 움직이는 트랙이 나타나는 즉시 같은 번호를 붙인다.
+    #   4) 목표 구역 ARRIVAL_RADIUS_CM 이내에 ARRIVAL_HOLD_SEC 이상 머무르면
+    #      주차 완료로 보고 활성 차량을 해제한다. -> 다음 차 차례
+    #
+    # 주차가 끝난 차는 번호를 그대로 유지한 채 정지 상태로 남는다. 그 차의 트랙이
+    # 끊겼다 되살아나는 경우는 아래 재바인딩 레이어(위치 매칭)가 담당한다.
+    # =====================================================================
+    "SINGLE_ACTIVE": {
+        "ENABLE": True,
+
+        # --- '움직이는 중' 판정 ---
+        # 최근 MOVE_WINDOW_SEC 동안의 이동량이 임계값을 넘으면 움직이는 것으로 본다.
+        # 실좌표(cm)를 쓸 수 있으면 cm 기준, 아니면 픽셀 기준으로 자동 전환.
+        "MOVE_WINDOW_SEC": 0.5,
+        "MOVE_MIN_CM": 2.0,
+        "MOVE_MIN_PX": 12.0,
+
+        # 활성 차량으로 인정할 최소 연속 추적 프레임.
+        # '일정 시간 일관되게 움직였다'는 조건 자체가 오검출을 걸러주므로
+        # MIN_HITS_FOR_ASSIGN(30)만큼 길게 볼 필요가 없다.
+        "MIN_HITS": 5,
+
+        # --- 주차 완료(안내 종료) 판정 ---
+        # 목표 구역 중심에서 이 거리 이내로 들어오면 주차한 것으로 본다.
+        # 목업 주차장은 자리 간격이 35cm, 통로 폭이 10cm이므로 그보다 작아야 한다.
+        # 너무 작으면(예: 3cm) 차가 살짝 못 미쳐 멈췄을 때 영영 해제되지 않고,
+        # 너무 크면 지나가는 중에 주차한 것으로 오판한다.
+        # 주차장을 키우면 C02의 CELL_W/H_CM과 함께 조정할 것.
+        "ARRIVAL_RADIUS_CM": 8.0,
+
+        # 위 반경 안에 이 시간 이상 머물러야 확정한다.
+        # 목표 구역을 스쳐 지나가는 순간을 주차로 오판하지 않기 위한 조건.
+        "ARRIVAL_HOLD_SEC": 1.0,
+
+        # --- 안전장치 ---
+        # 도착 판정이 되지 않는 상태로 이 시간 이상 정지해 있으면 강제 해제한다.
+        # 호모그래피가 아직 안 잡혔거나, 차가 목표 반경에 살짝 못 미친 곳에
+        # 멈춰버린 경우에 대비한 것이다. 이게 없으면 활성 차량이 영영 해제되지
+        # 않아 다음 차가 번호를 못 받는다.
+        # 0으로 두면 비활성화되고 오로지 도착 판정으로만 해제된다.
+        "STUCK_RELEASE_SEC": 15.0,
+    },
+
     # ---------------------------------------------------------------------
     # 재바인딩(Re-binding) 레이어
     #
@@ -57,21 +117,25 @@ CONFIG = {
     # 하위 모듈(A01 주차관리, C00 내비, D00 UI)이 실제로 쓰는 것은 track_id가 아니라
     # car_id다. 그러니 track_id가 바뀌어도 car_id만 같은 차를 따라가면 된다.
     #
-    # 동작: 번호를 가진 트랙이 사라지면 마지막 상태를 '유령(ghost)'으로 남겨두고,
+    # 동작: 번호를 가진 트랙이 사라지면 마지막 위치를 '유령(ghost)'으로 남겨두고,
     #       새 track_id가 뜨면 FIFO에서 번호를 꺼내기 '전에' 유령과 먼저 대조한다.
     #       조건을 만족하면 FIFO를 소비하지 않고 옛 번호를 그대로 승계한다.
     #
-    # 판정 조건 (전부 통과해야 승계):
-    #   1) 시간   : 사라진 지 MAX_GAP_SEC 이내
-    #   2) 거리   : 그 시간 안에 물리적으로 도달 가능한 위치인가
-    #   3) 외형   : 색 히스토그램이 비슷한가 (프레임이 주어졌을 때만)
+    # 판정 조건 (둘 다 통과해야 승계):
+    #   1) 시간 : 사라진 지 MAX_GAP_SEC 이내
+    #   2) 거리 : 그 시간 안에 물리적으로 도달 가능한 위치인가
+    #
+    # 단일 활성 차량 모드에서 이 레이어가 담당하는 것은 '이미 주차를 마친 차'다.
+    # 움직이는 차는 위의 SINGLE_ACTIVE 규칙이 훨씬 확실하게 잡아준다.
+    # 주차된 차는 정지해 있으므로 위치만으로 충분히 구분된다.
+    # (색 히스토그램도 썼었지만, 위 규칙이 생기면서 불필요해져 제거했다)
     # ---------------------------------------------------------------------
     "REBIND": {
         "ENABLE": True,
 
         # 재바인딩 시도에 필요한 최소 연속 추적 프레임.
-        # MIN_HITS_FOR_ASSIGN(30)보다 훨씬 짧게 둔다. 재바인딩은 거리/외형으로
-        # 이미 검증된 승계라 FIFO를 새로 소비하는 것보다 안전하고, 되돌아온 차가
+        # MIN_HITS_FOR_ASSIGN(30)보다 훨씬 짧게 둔다. 재바인딩은 거리로 이미
+        # 검증된 승계라 FIFO를 새로 소비하는 것보다 안전하고, 되돌아온 차가
         # 1초씩 'WAIT'로 떠 있으면 내비게이션이 그만큼 끊기기 때문이다.
         "MIN_HITS": 3,
 
@@ -94,12 +158,6 @@ CONFIG = {
         # 주차장을 키우면 C02의 CELL_W/H_CM과 함께 이 값도 조정할 것.
         "MAX_REACH_CM": 60.0,
         "MAX_REACH_PX": 400.0,
-
-        # 색 히스토그램(외형) 판정
-        "HIST_MAX_DIST": 0.45,      # Bhattacharyya 거리 상한 (작을수록 엄격)
-        "HIST_MIN_CONF": 0.6,       # 이 conf 이상일 때만 히스토그램을 갱신
-                                    # (반쯤 가려진 프레임으로 갱신하면 손 색이 섞인다)
-        "HIST_EMA": 0.9,            # 기존 히스토그램에 주는 가중치
     },
 }
 
@@ -108,46 +166,11 @@ CONFIG = {
 # 차량번호가 부여된 트랙 / 대기 중인 트랙 색상 (BGR)
 COLOR_MATCHED = (0, 255, 0)     # 번호 매칭 완료 - 초록
 COLOR_PENDING = (0, 165, 255)   # 번호 대기 중   - 주황
-COLOR_REBOUND = (255, 0, 255)   # 재바인딩 직후  - 자홍 (승계가 실제로 도는지 눈으로 확인용)
+COLOR_REBOUND = (255, 0, 255)   # 번호 승계 직후 - 자홍 (승계가 실제로 도는지 눈으로 확인용)
+COLOR_ACTIVE  = (0, 255, 255)   # 현재 안내 중인 활성 차량 - 노랑
 
-# 재바인딩 직후 자홍색으로 강조할 시간(초).
+# 번호 승계 직후 자홍색으로 강조할 시간(초).
 REBOUND_HIGHLIGHT_SEC = 2.0
-
-
-def color_histogram(frame, bbox):
-    """
-    박스 영역의 HSV 색 히스토그램을 계산. (경량 외형 특징)
-
-    딥러닝 ReID 모델 대신 색 히스토그램을 쓰는 이유:
-      - 젯슨에서 별도 신경망을 더 돌릴 여유가 없다. 이 함수는 박스당 0.1ms 수준.
-      - 탑뷰의 작은 RC카는 형태 정보가 거의 없어 ReID 임베딩의 변별력이 떨어진다.
-        반대로 '차 색깔'은 이 목업 환경에서 가장 확실한 구분 단서다.
-
-    Args:
-        frame: OpenCV BGR 이미지. 시각화가 그려지기 '전'의 원본이어야 한다.
-        bbox:  [x1, y1, x2, y2]
-
-    Returns:
-        (256,) float32 히스토그램. 계산할 수 없으면 None.
-    """
-    x1, y1, x2, y2 = bbox
-    w, h = x2 - x1, y2 - y1
-    if w <= 0 or h <= 0:
-        return None
-
-    # 박스 가장자리는 배경(바닥)이 섞이므로 중앙 60%만 사용한다.
-    mx, my = int(w * 0.2), int(h * 0.2)
-    fh, fw = frame.shape[:2]
-    xa, xb = max(0, x1 + mx), min(fw, x2 - mx)
-    ya, yb = max(0, y1 + my), min(fh, y2 - my)
-    if xb <= xa or yb <= ya:
-        return None
-
-    hsv = cv2.cvtColor(frame[ya:yb, xa:xb], cv2.COLOR_BGR2HSV)
-    # 색상(H) x 채도(S) 2D 히스토그램. 명도(V)는 조명 변화에 약해 제외한다.
-    hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
-    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
-    return hist.flatten().astype(np.float32)
 
 
 # 차량번호 FIFO 큐
@@ -293,32 +316,37 @@ class CarMOT:
       - OC-SORT   : 가림으로 '사라졌다 돌아온' 트랙을 마지막 관측 위치로 복구(OCR)
                     + 복귀 시 칼만 상태 재계산(ORU)
 
-    동작 흐름:
+    동작 흐름 (단일 활성 차량 모드, CONFIG['SINGLE_ACTIVE']):
       1. UART로 수신된 차량 번호가 CarNumberFIFO에 순서대로 쌓인다.
       2. B01이 검출한 결과를 추적기에 넣어 Track ID를 부여한다.
-      3. 새로운 Track ID가 MIN_HITS_FOR_ASSIGN 프레임 이상 '연속으로'
-         추적되면, FIFO에서 가장 앞 번호를 꺼내(pop) 해당 트랙에 매칭한다.
-         중간에 한 프레임이라도 끊기면 카운트는 0으로 초기화된다.
-      4. 이후 그 Track ID는 계속 같은 차량 번호로 추적된다.
+      3. '움직이는' 트랙이 나타나면 FIFO에서 가장 앞 번호를 꺼내 붙인다.
+         이 차가 활성 차량(active_car_id), 즉 지금 안내 중인 차다.
+      4. 결합은 sticky다. 트랙이 살아 있는 동안 유지되므로 도중에 차가 멈춰
+         서도 번호가 떨어지지 않는다.
+      5. 추적이 끊겨 Track ID가 새로 발급되면, 다시 움직이는 트랙이 나타나는
+         즉시 같은 번호를 붙인다. (동시에 움직이는 차가 1대뿐이므로 확실하다)
+      6. 목표 구역 ARRIVAL_RADIUS_CM 이내에 ARRIVAL_HOLD_SEC 이상 머무르면
+         주차 완료로 보고 활성 차량을 해제한다. -> 다음 차 차례
 
-    3번에서 FIFO를 소비하기 전에 '재바인딩'을 먼저 시도한다. 추적이 끊겨 새 Track
-    ID로 다시 잡힌 것뿐이라면, 사라진 트랙의 유령(마지막 위치/외형)과 대조해
-    옛 차량번호를 그대로 승계한다. 덕분에 추적기가 ID를 바꿔도 car_id는 물리적인
-    차를 계속 따라간다. 설정은 CONFIG['REBIND'] 참고.
+    "지금 움직이는 차 = 지금 안내 중인 차"라는 운영 제약이 어떤 외형/거리
+    매칭보다 강한 단서다. ID가 바뀌어도 다음 프레임에 곧바로 복구된다.
+
+    주차를 마친 차는 정지한 채 번호를 유지한다. 그 차의 트랙이 끊겼다 되살아나는
+    경우는 재바인딩 레이어(CONFIG['REBIND'])가 마지막 위치로 이어받는다.
+    정지해 있으므로 위치만으로 충분히 구분된다.
 
     C00의 world_history / routes / targets가 전부 car_id로 키를 잡고 있으므로,
     car_id만 유지되면 ID 스위치가 나도 경로 안내 상태가 그대로 살아남는다.
 
-    한계: 두 트랙이 '살아있는 채로' 서로 ID를 맞바꾸는 경우(교차 중 스왑)는
-          유령이 생기지 않으므로 이 레이어가 잡지 못한다. 이 환경에서는 차가
-          서로 겹쳐 지나갈 일이 거의 없어 실용상 문제되지 않는다.
+    SINGLE_ACTIVE를 끄면 예전 방식(MIN_HITS_FOR_ASSIGN 연속 관측 후 FIFO 소비)
+    으로 돌아간다. 여러 대가 동시에 움직이는 시나리오로 바뀌면 그쪽을 쓸 것.
 
     추적기 성능 비교는 track_id_stats()로 측정할 것.
     """
 
     def __init__(self, tracker_cfg=TRACKER_CFG_PATH,
                  min_hits=30, lost_ttl=None, trajectory_maxlen=64, fifo=None,
-                 rebind=None):
+                 rebind=None, single_active=None):
         """
         CarMOT 초기화.
 
@@ -333,6 +361,7 @@ class CarMOT:
             trajectory_maxlen: 트랙별 궤적 저장 최대 길이
             fifo:              사용할 CarNumberFIFO 인스턴스 (None이면 모듈 전역 큐 사용)
             rebind:            재바인딩 설정 dict (None이면 CONFIG['REBIND'])
+            single_active:     단일 활성 차량 모드 설정 dict (None이면 CONFIG['SINGLE_ACTIVE'])
         """
         cfg = IterableSimpleNamespace(**YAML.load(check_yaml(tracker_cfg)))
 
@@ -388,40 +417,60 @@ class CarMOT:
         self.rebind_enable = bool(self.rebind.get('ENABLE', True))
 
         # Track ID -> 마지막으로 관측된 상태
-        #   {"center": (cx,cy), "bbox": [...], "world": (x_cm,y_cm)|None,
-        #    "hist": ndarray|None, "time": float}
+        #   {"center": (cx,cy), "bbox": [...], "world": (x_cm,y_cm)|None, "time": float}
         self.last_states = {}
         # 사라진 Track ID -> 유령 기록 (차량번호 승계 후보)
         self.ghosts = {}
-        # Track ID -> 재바인딩된 시각 (시각화 강조용)
+        # Track ID -> 번호를 승계받은 시각 (시각화 강조용)
         self.rebound_at = {}
         self.rebind_count = 0
+
+        # --- 단일 활성 차량 모드 상태 ---
+        self.single = dict(CONFIG['SINGLE_ACTIVE'] if single_active is None else single_active)
+        self.single_enable = bool(self.single.get('ENABLE', True))
+
+        # 지금 안내 중인 차량번호. 주차를 마치면 None으로 돌아간다.
+        self.active_car_id = None
+        # 목표 반경 안에 처음 들어온 시각 (ARRIVAL_HOLD_SEC 판정용)
+        self._arrived_since = None
+        # 활성 차량이 마지막으로 '움직인' 시각 (STUCK_RELEASE_SEC 판정용)
+        self._active_moved_at = None
+        # Track ID -> 실좌표 궤적 deque([(x_cm, y_cm, t), ...])
+        # 이동량을 cm로 재기 위한 것. to_world가 주어질 때만 쌓인다.
+        self.world_trajectories = {}
 
         print(f"[INFO] 추적기 초기화 완료. "
               f"(Tracker: {self.tracker_type}, use_byte: {self.use_byte}, "
               f"track_buffer: {cfg.track_buffer}, "
-              f"rebind: {'ON' if self.rebind_enable else 'OFF'})")
+              f"rebind: {'ON' if self.rebind_enable else 'OFF'}, "
+              f"single_active: {'ON' if self.single_enable else 'OFF'})")
+        if self.single_enable:
+            print(f"[INFO] 단일 활성 차량 모드. "
+                  f"주차 판정 반경 {self.single['ARRIVAL_RADIUS_CM']}cm / "
+                  f"{self.single['ARRIVAL_HOLD_SEC']}초 유지")
 
-    def update(self, detections, frame=None, to_world=None):
+    def update(self, detections, to_world=None, target_of=None):
         """
-        검출 결과를 추적하고, 신규 트랙에 차량 번호를 매칭.
+        검출 결과를 추적하고, 트랙에 차량 번호를 매칭.
 
-        번호 부여는 두 경로가 있고 재바인딩이 항상 우선한다.
-          1) 재바인딩 : 사라진 트랙의 유령과 대조해 옛 번호를 승계 (FIFO 소비 없음)
-          2) 신규 부여: 승계할 유령이 없으면 FIFO에서 다음 번호를 꺼낸다
+        번호 부여 경로는 우선순위 순으로 셋이다.
+          1) 활성 차량  : 움직이는 트랙 = 지금 안내 중인 차 (SINGLE_ACTIVE)
+          2) 재바인딩   : 사라진 트랙의 유령과 위치를 대조해 옛 번호를 승계
+          3) 신규 부여  : 위 둘 다 아니면 FIFO에서 다음 번호를 꺼낸다
 
         Args:
             detections: B01_car_detection.CarDetector.detect()의 반환 결과 리스트
                         [{"class_id":.., "class_name":.., "bbox":[..], "confidence":..}, ...]
-            frame:      원본 BGR 프레임. 주면 색 히스토그램을 뽑아 재바인딩 판정에
-                        외형 조건을 추가한다. 반드시 시각화가 그려지기 '전'의
-                        프레임이어야 한다. (박스를 그린 프레임을 넣으면 초록 테두리
-                        색이 히스토그램에 섞인다) None이면 위치/시간만으로 판정.
             to_world:   (x, y) 이미지 좌표 -> (x_cm, y_cm) 실좌표 변환 함수.
                         C00 MarkerMapper.image_to_world를 넘기면 된다.
-                        주면 거리 판정이 픽셀 대신 cm 기준이 되어 훨씬 정확해진다.
+                        주면 이동량/거리 판정이 픽셀 대신 cm 기준이 되어 정확해진다.
                         (픽셀 거리는 원근 때문에 화면 위치마다 실제 거리가 다르다)
                         None이거나 호모그래피가 없으면 픽셀 기준으로 자동 대체.
+            target_of:  car_id -> (x_cm, y_cm) 목표 구역 실좌표를 돌려주는 함수.
+                        주차 완료(안내 종료) 판정에 쓴다. C_main이 C00의
+                        targets/spot_world_pos를 엮어서 넘긴다.
+                        None이면 도착 판정을 할 수 없으므로 STUCK_RELEASE_SEC
+                        (정지 시간) 기준으로만 활성 차량이 해제된다.
 
         Returns:
             추적 결과 리스트. 각 항목은 딕셔너리:
@@ -467,7 +516,7 @@ class CarMOT:
             traj.append((cx, cy, now))
 
             bbox = [x1, y1, x2, y2]
-            self._update_state(track_id, (cx, cy), bbox, conf, frame, to_world, now)
+            self._update_state(track_id, (cx, cy), bbox, to_world, now)
 
             tracks.append({
                 "track_id": track_id,
@@ -479,7 +528,12 @@ class CarMOT:
                 "confidence": conf
             })
 
-        # 2) 번호가 없는 트랙에 번호를 부여한다. 재바인딩(승계)이 FIFO보다 우선.
+        # 2) 활성 차량(움직이는 차) 결합 및 주차 완료 판정.
+        #    이 규칙이 가장 강하므로 재바인딩/FIFO보다 먼저 처리한다.
+        if self.single_enable:
+            self._update_active_binding(tracks, alive_ids, now, target_of)
+
+        # 3) 나머지 트랙에 번호를 부여한다. 재바인딩(승계)이 FIFO보다 우선.
         #
         #    이 작업을 1)의 루프 안이 아니라 여기서 하는 이유:
         #    유령의 원래 트랙이 '이번 프레임에 살아있는지'를 알아야 하는데,
@@ -495,22 +549,27 @@ class CarMOT:
                     and self._try_rebind(track_id, alive_ids, now)):
                 continue
 
-            # 승계할 유령이 없으면 신규 차량으로 보고 FIFO에서 번호를 꺼낸다
+            # 단일 활성 차량 모드에서는 FIFO를 여기서 소비하지 않는다.
+            # 번호는 '움직이는 차'에게만 나가야 하고 그 판단은 2)가 담당한다.
+            # 여기서도 꺼내면 주차장에 서 있던 차나 오검출이 번호를 채간다.
+            if self.single_enable:
+                continue
+
             if hits >= self.min_hits:
                 self._assign_car_id(track_id)
 
-        # 3) 확정된 차량번호를 결과에 반영
+        # 4) 확정된 차량번호를 결과에 반영
         for trk in tracks:
             trk["car_id"] = self.track_to_car.get(trk["track_id"])
 
-        # 4) 이번 프레임에 잡히지 않은 트랙 정리 (+ 유령 생성/만료)
+        # 5) 이번 프레임에 잡히지 않은 트랙 정리 (+ 유령 생성/만료)
         self._cleanup_lost(alive_ids, now)
 
         return tracks
 
-    def _update_state(self, track_id, center, bbox, conf, frame, to_world, now):
+    def _update_state(self, track_id, center, bbox, to_world, now):
         """
-        트랙의 마지막 관측 상태를 갱신. 재바인딩 판정의 비교 기준이 된다.
+        트랙의 마지막 관측 상태를 갱신. 재바인딩/이동 판정의 비교 기준이 된다.
         """
         state = self.last_states.setdefault(track_id, {})
         state["center"] = center
@@ -521,21 +580,180 @@ class CarMOT:
             world = to_world(center)
             if world is not None:      # 호모그래피가 아직 준비 안 됐으면 None
                 state["world"] = world
+                wtraj = self.world_trajectories.setdefault(
+                    track_id, deque(maxlen=self.trajectory_maxlen)
+                )
+                wtraj.append((world[0], world[1], now))
 
-        # 외형은 '깨끗하게 보일 때'만 갱신한다.
-        # 손에 반쯤 가려진 프레임(conf가 떨어진 프레임)으로 갱신하면 손 색이
-        # 히스토그램에 섞여 들어가, 정작 복귀할 때 자기 자신과 안 닮게 된다.
-        if frame is not None and conf >= self.rebind['HIST_MIN_CONF']:
-            hist = color_histogram(frame, bbox)
-            if hist is not None:
-                prev = state.get("hist")
-                if prev is None:
-                    state["hist"] = hist
-                else:
-                    a = self.rebind['HIST_EMA']
-                    # compareHist는 CV_32F를 요구한다. float 곱셈은 float64로
-                    # 승격되므로 반드시 float32로 되돌려야 한다.
-                    state["hist"] = (a * prev + (1.0 - a) * hist).astype(np.float32)
+    # --- 단일 활성 차량 모드 -------------------------------------------------
+
+    def _update_active_binding(self, tracks, alive_ids, now, target_of):
+        """
+        '움직이는 트랙 = 지금 안내 중인 차'라는 규칙으로 활성 차량을 관리한다.
+
+        결합은 sticky다. 한 번 붙으면 트랙이 살아 있는 동안 유지되므로,
+        차가 도중에 멈춰 서도 번호가 떨어지지 않는다. 이동 판정은 결합이
+        끊겼을 때 '다시 붙일 대상'을 고르는 데만 쓴다.
+        """
+        bound = self._track_of_car(self.active_car_id) if self.active_car_id else None
+
+        if bound is not None and bound in alive_ids:
+            # 이미 붙어 있다. 주차를 마쳤는지만 확인한다.
+            self._check_parked(bound, now, target_of)
+            return
+
+        # 결합이 없다(아직 시작 전이거나 트랙이 끊겼다). 움직이는 트랙을 찾는다.
+        moving = self._find_moving_track(tracks, now)
+        if moving is None:
+            return
+
+        if self.active_car_id is None:
+            car_id = self.fifo.pop()
+            if car_id is None:
+                return          # 아직 UART로 번호가 안 들어왔다. 다음 프레임에 재시도.
+            self.active_car_id = car_id
+            self._active_moved_at = now
+            print(f"[활성] 차량번호 '{car_id}' 안내 시작 (Track ID {moving})")
+        else:
+            # 같은 차인데 추적이 끊겨 ID만 새로 발급된 경우. 번호를 그대로 옮긴다.
+            self.rebind_count += 1
+            print(f"[활성] 차량번호 '{self.active_car_id}' 재결합 "
+                  f"(Track ID {moving}, FIFO 소비 없음)")
+
+        self._bind_active(moving, now)
+
+    def _bind_active(self, track_id, now):
+        """활성 차량번호를 트랙에 붙이고, 이전 트랙에 남아 있던 흔적을 지운다."""
+        for tid, cid in list(self.track_to_car.items()):
+            if cid == self.active_car_id and tid != track_id:
+                self.track_to_car.pop(tid, None)
+                self.ghosts.pop(tid, None)
+
+        self.track_to_car[track_id] = self.active_car_id
+        self.rebound_at[track_id] = now
+        self._arrived_since = None
+
+    def _track_of_car(self, car_id):
+        """차량번호가 붙어 있는 Track ID. 없으면 None."""
+        for tid, cid in self.track_to_car.items():
+            if cid == car_id:
+                return tid
+        return None
+
+    def _find_moving_track(self, tracks, now):
+        """
+        가장 많이 움직인 트랙을 고른다. 임계값 미만이면 None.
+
+        이미 다른 차량번호가 붙은 트랙(= 주차를 마친 차)은 후보에서 제외한다.
+        """
+        best, best_move = None, 0.0
+        for trk in tracks:
+            track_id = trk["track_id"]
+            if self.hit_counts.get(track_id, 0) < self.single['MIN_HITS']:
+                continue
+            bound_car = self.track_to_car.get(track_id)
+            if bound_car is not None and bound_car != self.active_car_id:
+                continue
+
+            moved, threshold = self._recent_movement(track_id, now)
+            if moved is None or moved < threshold:
+                continue
+            if moved > best_move:
+                best, best_move = track_id, moved
+        return best
+
+    def _recent_movement(self, track_id, now):
+        """
+        최근 MOVE_WINDOW_SEC 동안의 이동 거리와 그 판정 임계값을 돌려준다.
+
+        실좌표 궤적이 쌓여 있으면 cm, 아니면 픽셀 기준으로 자동 전환한다.
+
+        Returns:
+            (이동거리, 임계값). 계산할 수 없으면 (None, 0).
+        """
+        window = self.single['MOVE_WINDOW_SEC']
+
+        wtraj = self.world_trajectories.get(track_id)
+        if wtraj and len(wtraj) >= 2:
+            points, threshold = wtraj, self.single['MOVE_MIN_CM']
+        else:
+            points, threshold = self.trajectories.get(track_id), self.single['MOVE_MIN_PX']
+            if not points or len(points) < 2:
+                return None, 0.0
+
+        # 윈도우 안에서 가장 오래된 점을 찾는다
+        oldest = None
+        for x, y, t in points:
+            if now - t <= window:
+                oldest = (x, y)
+                break
+        if oldest is None:
+            return None, 0.0
+
+        last = points[-1]
+        return math.hypot(last[0] - oldest[0], last[1] - oldest[1]), threshold
+
+    def _check_parked(self, track_id, now, target_of):
+        """
+        활성 차량이 목표 구역에 도착해 주차를 마쳤는지 판정한다.
+
+        목표 구역 중심에서 ARRIVAL_RADIUS_CM 이내에 ARRIVAL_HOLD_SEC 이상
+        머무르면 주차 완료로 보고 활성 차량을 해제한다. -> 다음 차 차례
+        """
+        # 정지 감시 (안전장치용). 도착 판정과 무관하게 항상 갱신한다.
+        moved, threshold = self._recent_movement(track_id, now)
+        if moved is not None and moved >= threshold:
+            self._active_moved_at = now
+
+        target = target_of(self.active_car_id) if target_of else None
+        world = self.last_states.get(track_id, {}).get("world")
+
+        if target is None or world is None:
+            # 호모그래피가 아직 없거나 목표 구역이 배정되지 않았다.
+            # 도착 판정을 할 수 없으므로 안전장치에 맡긴다.
+            self._arrived_since = None
+            self._check_stuck(now)
+            return
+
+        distance = math.hypot(world[0] - target[0], world[1] - target[1])
+        if distance > self.single['ARRIVAL_RADIUS_CM']:
+            self._arrived_since = None      # 반경을 벗어났으면 처음부터 다시
+            self._check_stuck(now)
+            return
+
+        if self._arrived_since is None:
+            self._arrived_since = now
+        elif now - self._arrived_since >= self.single['ARRIVAL_HOLD_SEC']:
+            self._release_active(f"목표 구역 {distance:.1f}cm 이내 도착")
+
+    def _check_stuck(self, now):
+        """
+        도착 판정이 되지 않는 채로 오래 정지해 있으면 강제로 해제한다.
+
+        차가 목표 반경에 살짝 못 미친 곳에 멈춰버리거나 호모그래피가 잡히지
+        않으면, 이 장치가 없을 때 활성 차량이 영영 해제되지 않아 다음 차가
+        번호를 받지 못한다. SINGLE_ACTIVE['STUCK_RELEASE_SEC']를 0으로 두면
+        비활성화되고 오로지 도착 판정으로만 해제된다.
+        """
+        limit = self.single.get('STUCK_RELEASE_SEC', 0)
+        if not limit or self._active_moved_at is None:
+            return
+        stopped_for = now - self._active_moved_at
+        if stopped_for >= limit:
+            self._release_active(f"{stopped_for:.0f}초간 정지 (도착 판정 실패)")
+
+    def _release_active(self, reason):
+        """
+        활성 차량을 해제한다. 다음 차가 FIFO에서 번호를 받을 수 있게 된다.
+
+        주차를 마친 차의 track_to_car 결합은 그대로 남겨둔다. 그 차가 화면에
+        계속 보여야 하고, 트랙이 끊겼다 되살아나는 경우는 재바인딩 레이어가
+        위치로 이어받기 때문이다.
+        """
+        print(f"[활성] 차량번호 '{self.active_car_id}' 안내 종료 - {reason}")
+        self.active_car_id = None
+        self._arrived_since = None
+        self._active_moved_at = None
 
     def _try_rebind(self, track_id, alive_ids, now):
         """
@@ -569,14 +787,10 @@ class CarMOT:
             if gap > self.rebind['MAX_GAP_SEC']:
                 continue
 
-            reachable, dist_cost = self._reachable(state, ghost, gap)
+            reachable, cost = self._reachable(state, ghost, gap)
             if not reachable:
                 continue
-            similar, hist_cost = self._appearance_matches(state, ghost)
-            if not similar:
-                continue
 
-            cost = dist_cost + hist_cost
             if best_cost is None or cost < best_cost:
                 best_id, best_cost = ghost_id, cost
 
@@ -612,23 +826,6 @@ class CarMOT:
             return False, 1.0
         return True, dist / limit
 
-    def _appearance_matches(self, state, ghost):
-        """
-        색 히스토그램이 충분히 비슷한가.
-
-        한쪽이라도 히스토그램이 없으면(프레임을 안 넘겼거나 계산 실패)
-        외형 조건은 건너뛰고 위치/시간만으로 판정한다.
-
-        Returns:
-            (유사 여부, 히스토그램 거리 0~1)
-        """
-        h_now, h_old = state.get("hist"), ghost.get("hist")
-        if h_now is None or h_old is None:
-            return True, 0.0
-
-        dist = float(cv2.compareHist(h_now, h_old, cv2.HISTCMP_BHATTACHARYYA))
-        return dist <= self.rebind['HIST_MAX_DIST'], dist
-
     def _inherit_car_id(self, new_id, ghost_id, now):
         """유령의 차량번호와 궤적을 새 트랙으로 옮기고 옛 트랙의 잔여 정보를 지운다."""
         ghost = self.ghosts.pop(ghost_id)
@@ -642,11 +839,13 @@ class CarMOT:
         # 궤적선이 끊겨 보이지 않게 하는 목적도 있지만, C00이 최근 이동 궤적으로
         # 진행 방향(heading)을 계산하므로 여기서 이어주면 복귀 직후에도
         # 방향 안내가 UNKNOWN으로 떨어지지 않는다.
-        old_traj = self.trajectories.pop(ghost_id, None)
-        if old_traj:
+        for store in (self.trajectories, self.world_trajectories):
+            old_traj = store.pop(ghost_id, None)
+            if not old_traj:
+                continue
             merged = deque(old_traj, maxlen=self.trajectory_maxlen)
-            merged.extend(self.trajectories.get(new_id, ()))
-            self.trajectories[new_id] = merged
+            merged.extend(store.get(new_id, ()))
+            store[new_id] = merged
 
         self.track_to_car.pop(ghost_id, None)
         self.hit_counts.pop(ghost_id, None)
@@ -672,7 +871,6 @@ class CarMOT:
             "car_id": car_id,
             "center": state["center"],
             "world": state.get("world"),
-            "hist": state.get("hist"),
             "lost_at": now,
         }
 
@@ -741,6 +939,7 @@ class CarMOT:
             self.hit_counts.pop(track_id, None)
             self.lost_counts.pop(track_id, None)
             self.trajectories.pop(track_id, None)
+            self.world_trajectories.pop(track_id, None)
             self.last_states.pop(track_id, None)
             self.rebound_at.pop(track_id, None)
 
@@ -801,6 +1000,7 @@ class CarMOT:
             "total_ids": len(self.seen_track_ids),
             "rebinds": self.rebind_count,
             "ghosts_alive": len(self.ghosts),
+            "active_car_id": self.active_car_id,   # 지금 안내 중인 차 (없으면 None)
         }
         if expected_cars is not None:
             switches = max(0, len(self.seen_track_ids) - expected_cars)
@@ -830,8 +1030,15 @@ class CarMOT:
             color = COLOR_MATCHED if car_id else COLOR_PENDING
             label = f"ID:{track_id} {car_id}" if car_id else f"ID:{track_id} WAIT"
 
+            # 지금 안내 중인 차(활성 차량)를 노랑으로 구분한다.
+            # 주차를 마친 차들(초록)과 한눈에 구분되어야 시나리오 진행 상황을
+            # 영상만 보고 따라갈 수 있다.
+            if car_id is not None and car_id == self.active_car_id:
+                color = COLOR_ACTIVE
+                label = f"ID:{track_id} {car_id} ACTIVE"
+
             # 방금 번호를 승계받은 트랙은 잠시 자홍색으로 강조한다.
-            # 재바인딩이 실제로 도는지, 엉뚱한 차에 붙지는 않는지를
+            # 승계가 실제로 도는지, 엉뚱한 차에 붙지는 않는지를
             # 영상만 보고 확인할 수 있어야 튜닝이 가능하다.
             rebound = self.rebound_at.get(track_id)
             if rebound is not None and time.time() - rebound < REBOUND_HIGHLIGHT_SEC:
@@ -886,145 +1093,150 @@ def enqueue_car_number(car_id):
 
 # 테스트용 메인 (단독 실행 시 합성 검출 데이터로 추적/매칭 로직 검증)
 # 이 모듈은 추적 전용이므로 카메라와 YOLO 모델 없이도 단독 검증이 가능.
-# 카메라 + 검출 + 추적 통합 실행은 B_main.py를 사용할 것.
+# 카메라 + 검출 + 추적 통합 실행은 B_main.py / C_main.py를 사용할 것.
 if __name__ == '__main__':
-    print("==========================================")
-    print(" B02 : 차량 다중 객체 추적 (MOT)")
+    print("=" * 62)
+    print(" B02 : 차량 다중 객체 추적 (MOT) - 단일 활성 차량 모드")
     print(" 단독 테스트 : 합성 검출 데이터로 로직 검증")
     print(f" 추적기 설정 : {CONFIG['TRACKER_CFG']}")
-    print("==========================================")
+    print("=" * 62)
 
-    # 테스트용 차량번호를 FIFO에 미리 등록 (원하는 번호로 수정 가능)
-    TEST_CAR_NUMBERS = ["1234", "5678", "9012"]
-    for num in TEST_CAR_NUMBERS:
-        enqueue_car_number(num)
+    # 합성 좌표계: 10px = 1cm. C00 호모그래피 대신 쓰는 가짜 변환.
+    PX_PER_CM = 10.0
 
-    mot = CarMOT(
-        tracker_cfg=CONFIG['TRACKER_CFG'],
-        min_hits=CONFIG['MIN_HITS_FOR_ASSIGN'],
-        trajectory_maxlen=CONFIG['TRAJECTORY_MAXLEN']
-    )
+    def to_world(point):
+        return point[0] / PX_PER_CM, point[1] / PX_PER_CM
 
-    # 차량 3대가 순차적으로 등장하여 오른쪽으로 이동하는 시나리오
-    # (등장 프레임, 시작 x좌표, y좌표)
-    # min_hits(30프레임 연속)를 채우려면 등장 간격도 그만큼 벌려야 한다.
-    scenario = [(0, 50, 200), (40, 50, 320), (80, 50, 440)]
-    TOTAL_FRAMES = 130
-    MOVE_PER_FRAME = 4  # 프레임당 이동량(px)
+    def det(cx, cy):
+        """중심이 (cx, cy)인 합성 검출 하나. (B01의 detect() 반환 형식)"""
+        return {"class_id": 0, "class_name": "Car",
+                "bbox": [cx - 20, cy - 15, cx + 20, cy + 15], "confidence": 0.9}
 
-    # 연속 카운트 리셋 검증용: 2번째 차량(index 1)을 잠시 검출에서 누락시킨다.
-    # 이 구간 때문에 2번 차량은 카운트가 0으로 리셋되고 번호 부여가 그만큼 늦어져야 한다.
-    DROPOUT = {1: range(55, 58)}
+    # 목표 구역 실좌표 (cm). C00의 get_target_world 대신 쓰는 가짜 목표.
+    TARGETS = {"1234": (52.0, 30.0), "5678": (20.0, 30.0)}
 
-    print(f"\n[TEST] 합성 시나리오 시작: 차량 {len(scenario)}대 순차 등장")
-    print(f"[TEST] min_hits={mot.min_hits} (연속), lost_ttl={mot.lost_ttl} (track_buffer에서 자동 적용)")
-    print(f"[TEST] 2번 차량은 frame {DROPOUT[1].start}~{DROPOUT[1].stop - 1} 구간에서 검출 누락\n")
+    # 이 루프는 실시간이 아니라 즉시 돌기 때문에 '초' 단위 조건이 의미를 갖지
+    # 못한다. 시간 조건만 무력화하고 거리/이동 조건은 실제 설정을 그대로 쓴다.
+    TEST_SINGLE = dict(CONFIG['SINGLE_ACTIVE'],
+                       ARRIVAL_HOLD_SEC=0.0,     # 반경에 들어오면 다음 프레임에 확정
+                       STUCK_RELEASE_SEC=0.0)    # 정지 기반 안전장치는 끄고 도착만 본다
 
-    for frame_idx in range(TOTAL_FRAMES):
-        # 이번 프레임의 합성 검출 결과 생성 (B01의 detect() 반환 형식과 동일)
-        detections = []
-        for car_idx, (appear_at, start_x, y) in enumerate(scenario):
-            if frame_idx < appear_at:
-                continue
-            if frame_idx in DROPOUT.get(car_idx, ()):
-                continue
-            x = start_x + (frame_idx - appear_at) * MOVE_PER_FRAME
-            detections.append({
-                "class_id": 2,
-                "class_name": "Car",
-                "bbox": [x, y, x + 100, y + 80],
-                "confidence": 0.9
-            })
+    def run(script, frames, label, quiet=True):
+        """
+        script(frame_idx) -> [(cx, cy), ...] 형태의 시나리오를 돌린다.
 
-        tracks = mot.update(detections)
-
-        # 매칭 상태가 바뀌는 시점 위주로 출력
-        if frame_idx in (29, 30, 54, 58, 70, 86, 87, 109, 110, TOTAL_FRAMES - 1):
-            print(f"--- frame {frame_idx:3d} | 추적 {len(tracks)}대 | FIFO 잔여 {mot.fifo.size()}대")
-            for t in tracks:
-                car_str = t["car_id"] if t["car_id"] else "미매칭"
-                hits = mot.hit_counts.get(t["track_id"], 0)
-                print(f"      ID:{t['track_id']:<3d} 번호={car_str:8s} 연속={hits:<3d} bbox={t['bbox']}")
-
-    print(f"\n[TEST] 최종 Track ID -> 차량번호 매핑: {mot.track_to_car}")
-    print(f"[TEST] ID 통계: {mot.track_id_stats(expected_cars=len(scenario))}")
-    print("[TEST] 확인 사항")
-    print("       1) 검출된 순서대로 FIFO 번호가 부여되었는가")
-    print(f"       2) 각 차량이 등장 후 정확히 {mot.min_hits}프레임째에 번호를 받았는가")
-    print("       3) 검출이 누락된 2번 차량은 그만큼 번호 부여가 밀렸는가")
-    print(f"       4) id_switches가 0인가 (차 {len(scenario)}대 -> Track ID {len(scenario)}개)")
-
-    # ---------------------------------------------------------------------
-    # 시나리오 2 : 재바인딩 레이어 검증
-    #
-    # 차가 오래 사라져 추적기가 트랙을 완전히 버린 뒤(새 Track ID 발급),
-    # 같은 자리에 다시 나타났을 때 차량번호가 승계되는가.
-    #
-    # 색까지 검증하기 위해 합성 프레임을 만들어 넘긴다.
-    #   - 같은 색으로 돌아오면 -> 승계 (FIFO 소비 없음)
-    #   - 다른 색으로 돌아오면 -> 외형 조건에서 걸러져 신규 취급 (FIFO 소비)
-    # ---------------------------------------------------------------------
-    RED, BLUE = (0, 0, 255), (255, 0, 0)
-
-    def synth_frame(boxes):
-        """(bbox, BGR색) 목록으로 합성 프레임을 만든다."""
-        frame = np.full((480, 640, 3), 40, dtype=np.uint8)   # 어두운 배경
-        for (bx1, by1, bx2, by2), col in boxes:
-            cv2.rectangle(frame, (bx1, by1), (bx2, by2), col, -1)
-        return frame
-
-    def run_rebind_case(return_color, label):
-        """차가 사라졌다가 return_color 색으로 되돌아오는 시나리오를 돌린다."""
+        Returns:
+            (CarMOT, CarNumberFIFO, 로그 문자열)
+        """
         fifo = CarNumberFIFO()
-        fifo.push("1234")     # 처음 등장한 차가 받을 번호
-        fifo.push("5678")     # 승계에 실패하면 이 번호가 소비된다
+        for num in ("1234", "5678", "9012"):
+            fifo.push(num)
 
-        m = CarMOT(
-            tracker_cfg=CONFIG['TRACKER_CFG'],
-            min_hits=CONFIG['MIN_HITS_FOR_ASSIGN'],
-            trajectory_maxlen=CONFIG['TRAJECTORY_MAXLEN'],
-            fifo=fifo
-        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf) if quiet else contextlib.nullcontext():
+            mot = CarMOT(
+                tracker_cfg=CONFIG['TRACKER_CFG'],
+                min_hits=CONFIG['MIN_HITS_FOR_ASSIGN'],
+                trajectory_maxlen=CONFIG['TRAJECTORY_MAXLEN'],
+                fifo=fifo,
+                single_active=TEST_SINGLE
+            )
+            for f in range(frames):
+                dets = [det(cx, cy) for cx, cy in script(f)]
+                mot.update(dets, to_world=to_world, target_of=TARGETS.get)
 
-        GONE = range(60, 130)          # lost_ttl(60)을 넘겨 트랙이 완전히 버려지는 구간
-        for f in range(180):
-            if f in GONE:
-                boxes, dets = [], []
-            else:
-                # 사라지기 전엔 빨강, 돌아올 때는 return_color.
-                # 위치도 20px만 옮겨 '같은 자리에 다시 나타난' 상황을 만든다.
-                col = RED if f < GONE.start else return_color
-                x = 100 if f < GONE.start else 120
-                box = (x, 100, x + 90, 160)
-                boxes = [(box, col)]
-                dets = [{"class_id": 2, "class_name": "Car",
-                         "bbox": list(box), "confidence": 0.9}]
-            m.update(dets, frame=synth_frame(boxes))
+        print(f"\n[{label}]")
+        for line in buf.getvalue().splitlines():
+            if any(tag in line for tag in ("[활성]", "[재바인딩]", "[매칭]", "[소실]")):
+                print("   ", line)
+        print(f"    최종 매핑     : {mot.track_to_car}")
+        print(f"    FIFO 잔여     : {fifo.snapshot()}")
+        print(f"    활성 차량     : {mot.active_car_id}")
+        return mot, fifo
 
-        stats = m.track_id_stats(expected_cars=1)
-        print(f"\n  [{label}]")
-        print(f"    최종 매핑   : {m.track_to_car}")
-        print(f"    FIFO 잔여   : {fifo.snapshot()}")
-        print(f"    통계        : {stats}")
-        return m, fifo
+    # -------------------------------------------------------------------
+    # 시나리오 1 : 기본 흐름 - 한 대씩 들어와 주차하고 다음 차로 넘어간다
+    #
+    #   차 A : frame 0~59  (100 -> 520px) 이동 후 정지. 목표 (52.0, 30.0)cm
+    #          = (520, 300)px 에 도착하므로 주차 완료 판정을 받아야 한다.
+    #   차 B : frame 130~  등장해 이동. A가 해제된 뒤이므로 '5678'을 받아야 한다.
+    # -------------------------------------------------------------------
+    def scenario_basic(f):
+        cars = []
+        # 차 A: 60프레임 동안 7px씩 전진, 이후 목표 지점에 정지
+        cars.append((min(100 + f * 7, 520), 300))
+        # 차 B: frame 130부터 다른 통로에서 등장해 이동
+        if f >= 130:
+            cars.append((min(100 + (f - 130) * 7, 200), 500))
+        return cars
 
-    print("\n" + "=" * 60)
-    print(" 시나리오 2 : 재바인딩 (차가 사라진 뒤 새 Track ID로 복귀)")
-    print("=" * 60)
-    print(f" 설정: MIN_HITS={CONFIG['REBIND']['MIN_HITS']}, "
-          f"MAX_GAP_SEC={CONFIG['REBIND']['MAX_GAP_SEC']}, "
-          f"HIST_MAX_DIST={CONFIG['REBIND']['HIST_MAX_DIST']}")
-    print(" 주의: 이 루프는 실시간이 아니라 즉시 돌기 때문에 MAX_GAP_SEC(시간)"
-          " 조건은 사실상 항상 통과한다. 여기서 검증되는 것은 거리/외형 조건이다.")
+    mot1, fifo1 = run(scenario_basic, 220, "시나리오 1 : 기본 흐름 (A 주차 -> B 안내)")
+    ok1 = (sorted(mot1.track_to_car.values()) == ["1234", "5678"]
+           and fifo1.snapshot() == ["9012"])
+    print(f"    -> 순서대로 1234, 5678이 부여되고 9012는 남았는가 : "
+          f"{'OK' if ok1 else 'FAIL'}")
 
-    same, same_fifo = run_rebind_case(RED,  "같은 색으로 복귀 -> 승계 기대")
-    diff, diff_fifo = run_rebind_case(BLUE, "다른 색으로 복귀 -> 신규 취급 기대")
+    # -------------------------------------------------------------------
+    # 시나리오 2 : 이동 중 추적이 끊겨도 같은 번호로 즉시 재결합
+    #
+    #   frame 50~119 완전 소실(lost_ttl 60 초과 -> 트랙 폐기, 새 ID 발급).
+    #   목표에 도착하기 '전'에 끊기므로 활성 차량은 유지된 상태다.
+    #   다시 움직이는 트랙이 나타나면 FIFO 소비 없이 '1234'가 다시 붙어야 한다.
+    # -------------------------------------------------------------------
+    def scenario_broken(f):
+        if 50 <= f < 120:
+            return []
+        cx = 100 + f * 3 if f < 50 else 100 + (f - 70) * 3
+        return [(min(cx, 500), 300)]
 
-    print("\n[TEST] 확인 사항")
-    ok_same = (same.rebind_count == 1 and "5678" in same_fifo.snapshot()
-               and list(same.track_to_car.values()) == ["1234"])
-    ok_diff = (diff.rebind_count == 0 and "5678" not in diff_fifo.snapshot())
-    print(f"       5) 같은 색 복귀 시 '1234'를 승계하고 FIFO의 '5678'은 그대로인가"
-          f"  -> {'OK' if ok_same else 'FAIL'}")
-    print(f"       6) 다른 색 복귀 시 승계를 거부하고 '5678'을 새로 소비했는가"
-          f"  -> {'OK' if ok_diff else 'FAIL'}")
+    mot2, fifo2 = run(scenario_broken, 200, "시나리오 2 : 추적 끊김 -> 즉시 재결합")
+    ok2 = (list(mot2.track_to_car.values()) == ["1234"]
+           and fifo2.snapshot() == ["5678", "9012"])
+    print(f"    -> FIFO 소비 없이 '1234'를 되찾았는가 : {'OK' if ok2 else 'FAIL'}")
+
+    # -------------------------------------------------------------------
+    # 시나리오 3 : 주차를 마친 차는 번호를 뺏기지 않는다
+    #
+    #   A가 주차를 마친 뒤 B가 A의 바로 옆을 지나간다.
+    #   B는 '5678'을 새로 받아야 하고, A는 '1234'를 그대로 유지해야 한다.
+    # -------------------------------------------------------------------
+    def scenario_passby(f):
+        cars = [(min(100 + f * 7, 520), 300)]          # 차 A (주차 완료 후 정지)
+        if f >= 130:
+            cars.append((min(120 + (f - 130) * 7, 480), 340))   # 차 B가 옆을 통과
+        return cars
+
+    mot3, fifo3 = run(scenario_passby, 220, "시나리오 3 : 주차 차량 옆 통과")
+    ok3 = (sorted(mot3.track_to_car.values()) == ["1234", "5678"]
+           and fifo3.snapshot() == ["9012"])
+    print(f"    -> A는 1234 유지, B는 5678 신규 취득인가 : {'OK' if ok3 else 'FAIL'}")
+
+    # -------------------------------------------------------------------
+    # 시나리오 4 : 유령(위치 매칭)이 못 잡는 구간을 활성 차량 규칙이 잡는다
+    #
+    #   오래 가려진 사이 차가 멀리(80cm) 이동해 버린 경우.
+    #   REBIND['MAX_REACH_CM'](60cm)를 넘으므로 위치 매칭은 실패해야 정상이다.
+    #   그래도 '지금 움직이는 차는 안내 중인 그 차'이므로 번호를 되찾아야 한다.
+    #
+    #   이 시나리오가 SINGLE_ACTIVE의 존재 이유다. 규칙을 끄면 엉뚱하게 FIFO의
+    #   다음 번호('5678')를 소비해 차량번호가 어긋난다.
+    # -------------------------------------------------------------------
+    def scenario_far_return(f):
+        if 50 <= f < 120:
+            return []                                   # 완전 소실
+        if f < 50:
+            return [(100 + f * 3, 300)]                 # 10 -> 25cm 부근
+        return [(min(1050 + (f - 120) * 3, 1200), 300)] # 105cm 지점에서 재등장
+
+    mot4, fifo4 = run(scenario_far_return, 200,
+                      "시나리오 4 : 먼 곳에서 재등장 (유령 도달 반경 밖)")
+    ok4 = (list(mot4.track_to_car.values()) == ["1234"]
+           and "5678" in fifo4.snapshot())
+    print(f"    -> 위치 매칭이 실패해도 '1234'를 되찾았는가 : {'OK' if ok4 else 'FAIL'}")
+    print("       (SINGLE_ACTIVE를 끄면 여기서 '5678'을 잘못 소비한다)")
+
+    print("\n" + "=" * 62)
+    print(f" 결과 : {'전부 OK' if all((ok1, ok2, ok3, ok4)) else '실패 항목 있음'}")
+    print("=" * 62)
+
+

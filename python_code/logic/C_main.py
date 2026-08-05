@@ -96,19 +96,21 @@ class ParkingNavigationPipeline:
         detections = self.detector.detect(frame)
 
         # 2) B02 : MOT 추적 + 차량번호 매칭
-        #    시각화(4단계) 전의 원본 프레임을 넘긴다. (재바인딩의 색 히스토그램용)
+        #    호모그래피가 준비되어 있으면 image_to_world를 넘겨 이동량/거리 판정을
+        #    cm 단위로 돌린다. 픽셀 거리는 원근 때문에 화면 위치마다 실제 거리가
+        #    달라 임계값을 하나로 정할 수 없다.
         #
-        #    호모그래피가 준비되어 있으면 image_to_world를 함께 넘겨 재바인딩의
-        #    거리 판정을 cm 단위로 돌린다. 픽셀 거리는 원근 때문에 화면 위치마다
-        #    실제 거리가 달라 임계값을 하나로 정할 수 없다.
+        #    target_of는 '주차 완료' 판정용이다. B02가 활성 차량의 위치와 목표
+        #    구역 좌표를 비교해 SINGLE_ACTIVE['ARRIVAL_RADIUS_CM'] 이내로
+        #    들어오면 안내를 종료하고 다음 차로 넘어간다.
         #
-        #    이 시점의 호모그래피는 직전 프레임에서 갱신된 것이다. 카메라가 고정
-        #    설치되어 있고 LOCK_HOMOGRAPHY=True이므로 실질적으로 동일하다.
+        #    이 시점의 호모그래피/목표는 직전 프레임에서 갱신된 것이다. 카메라가
+        #    고정 설치되어 있고 LOCK_HOMOGRAPHY=True이므로 실질적으로 동일하다.
         mapper = self.navigator.mapper
         tracks = self.mot.update(
             detections,
-            frame=frame,
-            to_world=mapper.image_to_world if mapper.is_ready() else None
+            to_world=mapper.image_to_world if mapper.is_ready() else None,
+            target_of=self.navigator.get_target_world
         )
 
         # 3) C00 : 배정된 목표 구역 동기화 후 위치 추정 및 경로 안내
