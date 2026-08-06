@@ -93,6 +93,106 @@ SWEEP_PRESETS = {
 }
 
 
+# --sweep에서 시험해 볼 ArUco 사전 목록.
+# 인쇄물이 어느 사전으로 만들어졌는지 모를 때 이 중에서 찾는다.
+# 사전이 다르면 마커가 '하나도' 검출되지 않으므로, 파라미터를 아무리 만져도
+# 소용이 없다. 파라미터보다 이걸 먼저 확인해야 한다.
+DICT_CANDIDATES = [
+    "DICT_ARUCO_ORIGINAL",
+    "DICT_4X4_50", "DICT_4X4_100", "DICT_4X4_250", "DICT_4X4_1000",
+    "DICT_5X5_50", "DICT_5X5_100", "DICT_5X5_250", "DICT_5X5_1000",
+    "DICT_6X6_50", "DICT_6X6_100", "DICT_6X6_250", "DICT_6X6_1000",
+    "DICT_7X7_50", "DICT_7X7_100", "DICT_7X7_250", "DICT_7X7_1000",
+    "DICT_APRILTAG_16h5", "DICT_APRILTAG_25h9",
+    "DICT_APRILTAG_36h10", "DICT_APRILTAG_36h11",
+]
+
+
+def run_dict_sweep(frame, current_dict):
+    """
+    사전을 바꿔가며 검출 개수를 비교한다.
+
+    '사각형 후보는 찾았지만 ID를 못 읽는' 상태인지도 함께 본다.
+    OpenCV는 4각형 후보를 먼저 찾고 그 안의 비트를 해독하는데, 후보(rejected)는
+    많은데 검출이 0이면 '사전이 다르다'는 신호다. 후보 자체가 없으면 크기나
+    대비, 초점 문제다.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    params = build_aruco_params()
+
+    print(f"\n{'사전':24s}{'검출':>5s}{'후보(rejected)':>14s}   검출된 ID")
+    print("-" * 72)
+
+    results = []
+    for name in DICT_CANDIDATES:
+        if not hasattr(aruco, name):
+            continue
+        detector = aruco.ArucoDetector(
+            aruco.getPredefinedDictionary(getattr(aruco, name)), params)
+        corners, ids, rejected = detector.detectMarkers(gray)
+        found = sorted(int(i) for i in ids.flatten()) if ids is not None else []
+        n_rej = len(rejected) if rejected is not None else 0
+        mark = "  <- 현재 설정" if name == current_dict else ""
+        shown = found if len(found) <= 12 else found[:12] + ['...']
+        print(f"{name:24s}{len(found):>5d}{n_rej:>14d}   {shown}{mark}")
+        results.append((len(found), name, found, n_rej))
+
+    results.sort(reverse=True)
+    best_n, best_name, best_ids, best_rej = results[0]
+
+    print()
+    if best_n == 0:
+        print("[진단] 어느 사전으로도 마커를 읽지 못했습니다.")
+        if best_rej > 0:
+            print(f"        다만 사각형 후보는 {best_rej}개 찾았습니다. 즉 마커의 '모양'은")
+            print(f"        보이는데 '비트'를 못 읽는 상태입니다.")
+            print(f"        -> 인쇄물이 위 목록에 없는 사전이거나, 너무 작거나 흐립니다.")
+        else:
+            print("        사각형 후보조차 없습니다. 대비/초점/크기 문제입니다.")
+            print("        -> 조명, 카메라 초점, 마커 크기를 확인하세요.")
+    elif best_name != current_dict:
+        print(f"[진단] 현재 설정({current_dict})보다 '{best_name}'가 "
+              f"훨씬 많이 잡습니다. ({best_n}개)")
+        print(f"        C00_navigation.CONFIG['ARUCO_DICT']를 '{best_name}'로 바꾸세요.")
+    else:
+        print(f"[진단] 현재 사전({current_dict})이 맞습니다. {best_n}개 검출.")
+        if best_n < 10:
+            print(f"        그런데 기둥 10개 중 {best_n}개만 잡힙니다. "
+                  f"사전 문제는 아니므로 개별 마커를 봐야 합니다.")
+            print(f"        아래 디버그 이미지에서 어느 기둥이 빠졌는지 확인하세요.")
+    return best_name
+
+
+def save_debug_image(frame, dict_name, path="marker_debug.jpg"):
+    """
+    검출 결과를 그린 이미지를 저장한다.
+
+    초록 = 검출 성공 (ID 표시)
+    빨강 = 사각형 후보는 찾았지만 ID 해독 실패 (rejected)
+
+    빨간 사각형이 마커 위에 떠 있으면 '모양은 보이는데 비트를 못 읽는' 것이다.
+    빨간 것도 없으면 마커를 아예 못 찾은 것이다.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    detector = aruco.ArucoDetector(
+        aruco.getPredefinedDictionary(getattr(aruco, dict_name)),
+        build_aruco_params())
+    corners, ids, rejected = detector.detectMarkers(gray)
+
+    out = frame.copy()
+    if rejected is not None and len(rejected):
+        aruco.drawDetectedMarkers(out, rejected, None, (0, 0, 255))
+    if ids is not None and len(ids):
+        aruco.drawDetectedMarkers(out, corners, ids, (0, 255, 0))
+
+    cv2.imwrite(path, out)
+    n_det = 0 if ids is None else len(ids)
+    n_rej = 0 if rejected is None else len(rejected)
+    print(f"\n[디버그 이미지] {os.path.abspath(path)}")
+    print(f"   초록 {n_det}개 = 검출 성공 / 빨강 {n_rej}개 = 후보는 찾았지만 ID 해독 실패")
+    return path
+
+
 def measure_marker_size(frame, dict_name):
     """
     검출된 마커가 화면에서 몇 픽셀인지 잰다. (해상도가 충분한지 판단용)
@@ -320,6 +420,8 @@ if __name__ == '__main__':
         report_marker_size(count, side)
         if sweep:
             run_sweep(image, C00_CONFIG['ARUCO_DICT'])
+            best = run_dict_sweep(image, C00_CONFIG['ARUCO_DICT'])
+            save_debug_image(image, best)
             sys.exit(0)
         markers = collect_markers(image)
     elif sweep:
@@ -344,6 +446,10 @@ if __name__ == '__main__':
         count, side = measure_marker_size(frame, C00_CONFIG['ARUCO_DICT'])
         report_marker_size(count, side)
         run_sweep(frame, C00_CONFIG['ARUCO_DICT'])
+        best = run_dict_sweep(frame, C00_CONFIG['ARUCO_DICT'])
+        cv2.imwrite("marker_frame.jpg", frame)
+        print(f"[원본 프레임] {os.path.abspath('marker_frame.jpg')}")
+        save_debug_image(frame, best)
         sys.exit(0)
     else:
         print(f"\n[INFO] 카메라를 엽니다... "
