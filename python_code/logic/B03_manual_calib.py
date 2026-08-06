@@ -69,7 +69,30 @@ def main():
     
     # 이미지 파일이 인자로 주어지면 그걸 쓰고, 아니면 카메라를 켠다.
     args = sys.argv[1:]
-    if args:
+    
+    if '--capture' in args:
+        print("[INFO] 캡처 모드로 실행합니다. GUI 창을 띄우지 않고 카메라 사진만 저장합니다.")
+        cap = get_camera(sensor_id=0, width=1280, height=720, framerate=30)
+        if not cap.isOpened():
+            print("[오류] 카메라를 열 수 없습니다.")
+            sys.exit(1)
+            
+        print("[INFO] 카메라 안정화를 위해 프레임을 읽습니다...")
+        for _ in range(10):
+            ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            print("[오류] 카메라 프레임을 읽을 수 없습니다.")
+            sys.exit(1)
+            
+        cv2.imwrite("capture.jpg", frame)
+        print("[성공] 카메라 프레임을 'capture.jpg' 파일로 저장했습니다.")
+        print("이 파일을 복사해서 GUI를 띄울 수 있는 컴퓨터에서 실행하세요:")
+        print("예) python B03_manual_calib.py capture.jpg")
+        sys.exit(0)
+        
+    if args and not args[0].startswith('--'):
         path = args[0]
         frame = cv2.imread(path)
         if frame is None:
@@ -77,8 +100,7 @@ def main():
             sys.exit(1)
         print(f"[INFO] 이미지 로드 완료: {path}")
     else:
-        # get_camera는 기본적으로 환경변수나 목업 설정(cv2.VideoCapture)을 씁니다.
-        # B00_camera_input 설정과 동일하게 사용 (주차장 목업)
+        # 카메라 켜기
         cap = get_camera(sensor_id=0, width=1280, height=720, framerate=30)
         if not cap.isOpened():
             print("[오류] 카메라를 열 수 없습니다.")
