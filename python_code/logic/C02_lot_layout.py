@@ -4,8 +4,8 @@ import os
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.map_data import (
-    grid_map, spot_map, coord_to_spot, PILL_MARKER_ID, MARKER_ID_CELL,
-    GATE1_POS, GATE2_POS, PILL, SPOT, get_rows, get_cols,
+    grid_map, spot_map, coord_to_spot, spot_type, PILL_MARKER_ID, MARKER_ID_CELL,
+    GATE1_POS, GATE2_POS, PILL, SPOT_CELLS, SPOT_TYPE_NAME, get_rows, get_cols,
 )
 
 # 설정 (Configuration)
@@ -16,22 +16,28 @@ from data.map_data import (
 #
 # 여기서 만드는 것:
 #   MARKER_WORLD_POS : 마커 ID -> 실좌표 (cm).  기둥의 위치
-#   SPOT_WORLD_POS   : 구역 ID -> 실좌표 (cm).  위아래 기둥의 중점
+#   SPOT_WORLD_POS   : 구역 ID -> 실좌표 (cm).  같은 열 기둥 사이를 보간한 위치
 #   GATE1/2_WORLD_POS: 입출구 실좌표 (cm)
 CONFIG = {
     # 격자 한 칸의 실제 크기 (cm).
-    # 주의: 격자 칸과 기둥 간격은 다르다. 기둥 사이에는 칸이 하나씩 끼어 있다.
-    #       세로 기둥 간격        = CELL_H_CM x 2
-    #       좌우 기둥 열(col 1 <-> col 5) 간격 = CELL_W_CM x 4
     #
-    # 실측 (목업 기준)
-    #       좌우 기둥 열 간격 40cm  ->  CELL_W_CM = 40 / 4 = 10.0
-    #       세로 기둥 간격    35cm  ->  CELL_H_CM = 35 / 2 = 17.5
+    # !! 확인 필요 !! 아래 값은 이전 목업(7열 x 11행) 기준으로 실측한 것이다.
+    # 배치가 12열 x 9행으로 바뀌었으므로 새 목업을 만든 뒤 반드시 다시 재야 한다.
+    # 이 값이 틀리면 호모그래피 재투영 오차가 커지고 안내 거리도 전부 어긋난다.
+    #
+    # 현재 배치에서 재는 방법 (기둥 중심 사이를 자로 잰다):
+    #       좌우 끝 기둥 열 간격 (col 0 <-> col 11) = CELL_W_CM x 11
+    #       세로 기둥 간격       (row 0 <-> row 3)  = CELL_H_CM x 3
+    #
+    #   예) 좌우 끝 기둥 간격이 110cm로 나왔다면  CELL_W_CM = 110 / 11 = 10.0
+    #       세로 기둥 간격이     52.5cm로 나왔다면 CELL_H_CM = 52.5 / 3 = 17.5
     "CELL_W_CM": 10.0,
     "CELL_H_CM": 17.5,
 
-    # 실좌표 원점으로 삼을 격자 칸. 기본값은 왼쪽 위 기둥(마커 ID 1).
-    "ORIGIN_CELL": (1, 1),
+    # 실좌표 원점으로 삼을 격자 칸.
+    # 왼쪽 위 기둥(현재 배치에서 (0,0), 마커 ID 1)을 원점으로 둔다.
+    # MAIN_README의 좌표계 규칙과 일치시킬 것.
+    "ORIGIN_CELL": (0, 0),
 }
 
 
@@ -75,38 +81,79 @@ def uniform_marker_world_pos(cell_w=None, cell_h=None, origin_cell=None):
     }
 
 
-def get_spot_pillars(spot_id):
+def column_pillars(col):
     """
-    주차 구역의 위/아래를 감싸는 기둥의 마커 ID를 반환.
+    해당 열에 있는 기둥을 위에서 아래 순서로 반환.
 
-    격자 규칙상 모든 주차 구역은 같은 열의 기둥 사이에 놓이므로,
-    한 칸 위와 한 칸 아래를 보면 항상 기둥이 나온다.
+    Returns:
+        [(row, 마커ID), ...] 행 오름차순
+    """
+    return sorted(
+        (row, marker_id)
+        for (row, c), marker_id in PILL_MARKER_ID.items()
+        if c == col
+    )
+
+
+def get_spot_anchors(spot_id):
+    """
+    주차 구역의 실좌표를 계산할 기준 기둥 두 개와 보간 비율을 반환.
+
+    예전 배치는 '자리 한 칸의 위아래가 항상 기둥'이어서 두 기둥의 중점을 쓰면
+    됐다. 지금 배치는 그 규칙이 깨졌다.
+      - 기둥 사이에 자리가 2칸씩 들어간다 (예: col 0의 row 1, 2)
+      - 마지막 기둥보다 아래에 있는 자리도 있다 (예: col 0의 row 7)
+
+    그래서 '중점'이 아니라 '같은 열 기둥들 사이의 보간'으로 일반화한다.
+    자리를 감싸는 기둥 쌍이 있으면 그 사이를 행 번호 비율로 보간하고,
+    기둥 바깥에 있으면 가장 가까운 기둥 쌍의 간격으로 외삽한다.
+
+    이렇게 해도 '마커 실좌표가 정확하면 자리 좌표도 정확해진다'는 원래 성질은
+    그대로 유지된다. 기둥이 격자대로 반듯하지 않아도 된다.
 
     Args:
         spot_id: 주차 구역 ID (예: "A-1")
 
     Returns:
-        (위쪽 마커ID, 아래쪽 마커ID) 튜플. 규칙에 어긋나면 None.
+        (위쪽 마커ID, 아래쪽 마커ID, 보간비율 t) 튜플.
+        t는 0이면 위쪽 기둥 위치, 1이면 아래쪽 기둥 위치. 범위를 벗어나면 외삽.
+        기준으로 삼을 기둥이 부족하면 None.
     """
     cells = spot_map.get(spot_id)
     if not cells:
         return None
 
-    row, col = cells[0]
-    upper = PILL_MARKER_ID.get((row - 1, col))
-    lower = PILL_MARKER_ID.get((row + 1, col))
-    if upper is None or lower is None:
+    # 한 자리가 여러 칸을 차지하는 경우(대형 구역 = 2칸)가 있으므로
+    # 대표 행은 칸들의 '가운데'로 잡는다. 2칸이면 row 1.5처럼 소수가 나오는데,
+    # 아래 보간이 실수 행을 그대로 다룬다.
+    col = cells[0][1]
+    row = sum(r for r, _ in cells) / len(cells)
+
+    pillars = column_pillars(col)
+    if len(pillars) < 2:
         return None
-    return (upper, lower)
+
+    # 1) 자리를 감싸는 기둥 쌍을 찾는다 (보간)
+    for i in range(len(pillars) - 1):
+        row_a, marker_a = pillars[i]
+        row_b, marker_b = pillars[i + 1]
+        if row_a <= row <= row_b:
+            return marker_a, marker_b, (row - row_a) / (row_b - row_a)
+
+    # 2) 기둥 바깥이면 가장 가까운 쌍으로 외삽한다
+    if row < pillars[0][0]:
+        (row_a, marker_a), (row_b, marker_b) = pillars[0], pillars[1]
+    else:
+        (row_a, marker_a), (row_b, marker_b) = pillars[-2], pillars[-1]
+    return marker_a, marker_b, (row - row_a) / (row_b - row_a)
 
 
 def build_spot_world_pos(marker_world_pos):
     """
     마커 실좌표로부터 각 주차 구역의 실좌표를 계산.
 
-    자리의 중심은 그 자리를 감싸는 두 기둥의 중점으로 둔다.
-    마커가 격자대로 반듯하게 놓여 있지 않아도, 각 마커의 실좌표만
-    정확하면 자리 좌표도 따라서 정확해진다.
+    같은 열의 기둥 두 개를 기준으로 자리의 행 위치만큼 보간(또는 외삽)한다.
+    자세한 규칙은 get_spot_anchors 참고.
 
     Args:
         marker_world_pos: {마커ID: (x_cm, y_cm)}
@@ -116,20 +163,22 @@ def build_spot_world_pos(marker_world_pos):
     """
     spots = {}
     for spot_id in spot_map:
-        pillars = get_spot_pillars(spot_id)
-        if pillars is None:
-            print(f"[경고] '{spot_id}'를 감싸는 기둥을 찾지 못했습니다. "
-                  f"grid_map의 기둥/자리 배치 규칙을 확인하세요.")
+        anchors = get_spot_anchors(spot_id)
+        if anchors is None:
+            print(f"[경고] '{spot_id}'의 기준 기둥을 찾지 못했습니다. "
+                  f"자리가 있는 열에는 기둥이 최소 2개 있어야 합니다. "
+                  f"grid_map과 PILL_MARKER_ID를 확인하세요.")
             continue
 
-        upper, lower = pillars
-        p1 = marker_world_pos.get(upper)
-        p2 = marker_world_pos.get(lower)
+        marker_a, marker_b, t = anchors
+        p1 = marker_world_pos.get(marker_a)
+        p2 = marker_world_pos.get(marker_b)
         if p1 is None or p2 is None:
-            print(f"[경고] '{spot_id}'의 기둥 마커({upper}, {lower}) 실좌표가 없습니다.")
+            print(f"[경고] '{spot_id}'의 기준 마커({marker_a}, {marker_b}) 실좌표가 없습니다.")
             continue
 
-        spots[spot_id] = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+        spots[spot_id] = (p1[0] + t * (p2[0] - p1[0]),
+                          p1[1] + t * (p2[1] - p1[1]))
 
     return spots
 
@@ -159,15 +208,28 @@ def validate_layout():
         problems.append("마커 ID가 중복되었습니다.")
 
     # 4) grid_map의 모든 SPOT 칸이 spot_map에 등록되어 있는가
+    #    (spot_map은 grid_map에서 자동 생성되므로 정상이라면 항상 통과한다.
+    #     실패한다면 map_data의 자동 생성 로직이 깨진 것이다)
     for row in range(get_rows()):
         for col in range(get_cols()):
-            if grid_map[row][col] == SPOT and (row, col) not in coord_to_spot:
+            if grid_map[row][col] in SPOT_CELLS and (row, col) not in coord_to_spot:
                 problems.append(f"주차 구역 칸 ({row}, {col})이 spot_map에 없습니다.")
 
-    # 5) 모든 자리가 위아래 기둥 사이에 있는가
+    # 5) 모든 자리가 기준 기둥을 찾을 수 있는가
+    #    (자리가 있는 열에는 기둥이 최소 2개 있어야 보간이 가능하다)
     for spot_id in spot_map:
-        if get_spot_pillars(spot_id) is None:
-            problems.append(f"'{spot_id}'가 기둥 사이에 있지 않습니다.")
+        if get_spot_anchors(spot_id) is None:
+            col = spot_map[spot_id][0][1]
+            problems.append(
+                f"'{spot_id}'(열 {col})의 기준 기둥이 부족합니다. "
+                f"그 열의 기둥 수: {len(column_pillars(col))}개 (최소 2개 필요)"
+            )
+
+    # 6) 입출구가 grid_map에 있는가
+    if GATE1_POS is None:
+        problems.append("grid_map에 입구(GATE1) 칸이 없습니다.")
+    if GATE2_POS is None:
+        problems.append("grid_map에 출구(GATE2) 칸이 없습니다.")
 
     return problems
 
@@ -212,9 +274,11 @@ if __name__ == '__main__':
     print(f"\n--- 주차 구역 {len(SPOT_WORLD_POS)}개 ---")
     for spot_id in sorted(SPOT_WORLD_POS):
         x, y = SPOT_WORLD_POS[spot_id]
-        upper, lower = get_spot_pillars(spot_id)
-        print(f"  {spot_id}  ->  ({x:7.1f}, {y:7.1f}) cm   "
-              f"(기둥 id{upper} / id{lower} 의 중점)")
+        marker_a, marker_b, t = get_spot_anchors(spot_id)
+        kind = SPOT_TYPE_NAME.get(spot_type[spot_id], "?")
+        note = "보간" if 0.0 <= t <= 1.0 else "외삽"
+        print(f"  {spot_id}  {kind:4s} ->  ({x:7.1f}, {y:7.1f}) cm   "
+              f"(기둥 id{marker_a} / id{marker_b} 사이 {t:.2f} 지점, {note})")
 
     print(f"\n--- 입출구 ---")
     print(f"  GATE1(입구) 격자{GATE1_POS}  ->  "
@@ -223,24 +287,34 @@ if __name__ == '__main__':
           f"({GATE2_WORLD_POS[0]:.1f}, {GATE2_WORLD_POS[1]:.1f}) cm")
 
     # 격자 시각화
-    print("\n[격자]  #=벽  O=기둥(숫자=마커ID)  P=주차구역  .=도로  1=입구  2=출구")
-    from data.map_data import WALL, ROAD, GATE1, GATE2
+    print("\n[격자]  O=기둥(숫자=마커ID)  .=도로  1=입구  2=출구  나머지=구역ID")
+    from data.map_data import ROAD, GATE1, GATE2
     for row in range(get_rows()):
-        line = "  "
+        line = f"  r{row} "
         for col in range(get_cols()):
             cell = grid_map[row][col]
-            if cell == WALL:
-                line += "  # "
-            elif cell == ROAD:
-                line += "  . "
+            if cell == ROAD:
+                line += "  .  "
             elif cell == GATE1:
-                line += "  1 "
+                line += "  1  "
             elif cell == GATE2:
-                line += "  2 "
+                line += "  2  "
             elif cell == PILL:
-                line += f" O{PILL_MARKER_ID[(row, col)]:<2d}"
-            elif cell == SPOT:
-                line += f"{coord_to_spot[(row, col)]:>4s}"
+                line += f" O{PILL_MARKER_ID[(row, col)]:<3d}"
+            elif cell in SPOT_CELLS:
+                line += f"{coord_to_spot[(row, col)]:>5s}"
         print(line)
 
-    print("\n[TEST] 자리 좌표가 위아래 기둥의 정확히 가운데인지 확인하세요.")
+    # 구역 종류별 요약
+    print("\n--- 구역 종류별 ---")
+    by_kind = {}
+    for spot_id, cell in spot_type.items():
+        by_kind.setdefault(cell, []).append(spot_id)
+    for cell in sorted(by_kind):
+        ids = sorted(by_kind[cell])
+        print(f"  {SPOT_TYPE_NAME.get(cell, '?'):6s} {len(ids):2d}개 : {', '.join(ids)}")
+
+    print("\n[TEST] 확인 사항")
+    print("       1) 배치 검사가 통과했는가")
+    print("       2) 같은 열의 자리들이 기둥 사이에 균등하게 배치되었는가")
+    print("       3) CELL_W_CM / CELL_H_CM이 실제 목업 치수와 맞는가 (CONFIG 주석 참고)")

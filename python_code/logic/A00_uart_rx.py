@@ -114,9 +114,16 @@ def _process_packet(role, raw_data):
         receive_time = datetime.datetime.now().replace(second=0, microsecond=0)
         print(f"\n[입차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
 
-        # 입차 처리 호출
-        handle_car_entry(car_id, receive_time)
-        enqueue_car_number(car_id)
+        # 입차 처리 호출 (차량 종류에 맞는 가장 가까운 빈자리를 배정)
+        result = handle_car_entry(car_id, receive_time)
+
+        # 배정에 실패했으면(해당 종류 자리가 다 참 등) 추적 대기열에 넣지 않는다.
+        # 목표 구역이 없으면 C00이 안내할 곳도 없기 때문이다.
+        # result["reason"]으로 "자리 없음" 안내 화면을 띄우면 된다.
+        if result["success"]:
+            enqueue_car_number(car_id)
+        else:
+            print(f"[입차수신] 안내를 시작하지 않습니다. ({result['reason']})")
     else:
         print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
 

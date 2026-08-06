@@ -13,8 +13,9 @@ from logic.C00_navigation import (
 )
 from logic.C02_lot_layout import cell_to_world, CONFIG as C02_CONFIG
 from data.map_data import (
-    grid_map, coord_to_spot, PILL_MARKER_ID,
-    WALL, ROAD, SPOT, GATE1, GATE2, PILL, get_rows, get_cols,
+    grid_map, coord_to_spot, PILL_MARKER_ID, spot_type,
+    ROAD, SPOT_CELLS, SPOT_TYPE_NAME, SPOT1, SPOT2, SPOT3, SPOT4,
+    GATE1, GATE2, PILL, get_rows, get_cols, get_spot_cell_count,
 )
 
 # 설정 (Configuration)
@@ -73,8 +74,14 @@ COLOR_SPOT_EMPTY  = (130, 130, 130)  # 빈자리 테두리
 COLOR_SPOT_FULL   = (70, 70, 200)    # 주차중 (붉은 계열)
 COLOR_SPOT_TARGET = (255, 0, 255)    # 목표 구역 (자홍)
 COLOR_GATE        = (0, 200, 255)    # 입출구 (주황)
-COLOR_WALL        = (52, 52, 56)     # 벽
-COLOR_WALL_EDGE   = (72, 72, 78)     # 벽 테두리
+# 주차 구역 종류별 빈자리 테두리 색 (BGR).
+# 실제 주차장의 노면 표시 관례를 따라 구분한다.
+COLOR_SPOT_BY_TYPE = {
+    SPOT1: (130, 130, 130),   # 일반   - 회색
+    SPOT2: (255, 150, 0),     # 장애인 - 파랑
+    SPOT3: (60, 200, 255),    # 대형   - 노랑
+    SPOT4: (120, 220, 120),   # 전기차 - 초록
+}
 COLOR_ROAD        = (44, 44, 46)     # 도로 (통로)
 COLOR_PILL        = (74, 80, 92)     # 기둥 (ArUco 마커 위치) - 콘크리트 느낌
 COLOR_PILL_EDGE   = (105, 118, 138)  # 기둥 테두리
@@ -325,10 +332,11 @@ class NavigationView:
         """주차 구역을 회전된 사각형으로 그린다."""
         ratio = CONFIG['SPOT_FILL_RATIO']
         hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
-        hh = C02_CONFIG['CELL_H_CM'] * ratio / 2
         target = nav.get("target_spot")
 
         for spot_id, (sx, sy) in self.spot_world_pos.items():
+            # 대형 구역은 한 자리가 세로 2칸이므로 그만큼 길게 그린다
+            hh = C02_CONFIG['CELL_H_CM'] * get_spot_cell_count(spot_id) * ratio / 2
             corners = [(sx - hw, sy - hh), (sx + hw, sy - hh),
                        (sx + hw, sy + hh), (sx - hw, sy + hh)]
             pts = np.array([self._world_to_flat(c, car_pos, heading) for c in corners],
@@ -341,7 +349,9 @@ class NavigationView:
                 cv2.fillPoly(layer, [pts], COLOR_SPOT_FULL)
                 cv2.polylines(layer, [pts], True, (110, 110, 160), 1, cv2.LINE_AA)
             else:
-                cv2.polylines(layer, [pts], True, COLOR_SPOT_EMPTY, 2, cv2.LINE_AA)
+                # 빈자리는 구역 종류(일반/장애인/대형/전기차)에 따라 색을 나눈다
+                color = COLOR_SPOT_BY_TYPE.get(spot_type.get(spot_id), COLOR_SPOT_EMPTY)
+                cv2.polylines(layer, [pts], True, color, 2, cv2.LINE_AA)
 
         # 입출구
         if self.gate_world_pos is not None:
@@ -516,8 +526,8 @@ class NavigationView:
         target = nav.get("target_spot")
         ratio = CONFIG['SPOT_FILL_RATIO']
         hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
-        hh = C02_CONFIG['CELL_H_CM'] * ratio / 2
         for spot_id, pos in self.spot_world_pos.items():
+            hh = C02_CONFIG['CELL_H_CM'] * get_spot_cell_count(spot_id) * ratio / 2
             p1 = to_mini((pos[0] - hw, pos[1] - hh))
             p2 = to_mini((pos[0] + hw, pos[1] + hh))
             if spot_id == target:
@@ -525,7 +535,8 @@ class NavigationView:
             elif spot_status.get(spot_id) == "full":
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_FULL, -1)
             else:
-                cv2.rectangle(canvas, p1, p2, (100, 100, 100), 1)
+                color = COLOR_SPOT_BY_TYPE.get(spot_type.get(spot_id), (100, 100, 100))
+                cv2.rectangle(canvas, p1, p2, color, 1)
 
         route = nav.get("route")
         if route and len(route) >= 2:
@@ -748,8 +759,8 @@ class NavigationMapUI:
         """
         주차장 구조(벽 / 도로 / 기둥)를 격자에서 읽어 그린다.
 
-        주차 구역(SPOT)은 점유 상태에 따라 색이 달라지므로 _draw_spots가 따로 그리고,
-        여기서는 배경 구조만 그린다. 중앙 섬도 이 함수가 그린 기둥/벽으로 드러난다.
+        주차 구역은 점유 상태/종류에 따라 색이 달라지므로 _draw_spots가 따로 그리고,
+        여기서는 배경 구조만 그린다. 중앙 섬도 이 함수가 그린 기둥으로 드러난다.
         """
         if not CONFIG['SHOW_LAYOUT']:
             return
@@ -757,15 +768,12 @@ class NavigationMapUI:
         for row in range(get_rows()):
             for col in range(get_cols()):
                 cell_type = grid_map[row][col]
-                if cell_type == SPOT:
+                if cell_type in SPOT_CELLS:
                     continue    # _draw_spots가 담당
 
                 p1, p2 = self._cell_rect((row, col))
 
-                if cell_type == WALL:
-                    cv2.rectangle(canvas, p1, p2, COLOR_WALL, -1)
-                    cv2.rectangle(canvas, p1, p2, COLOR_WALL_EDGE, 1)
-                elif cell_type in (ROAD, GATE1, GATE2):
+                if cell_type in (ROAD, GATE1, GATE2):
                     cv2.rectangle(canvas, p1, p2, COLOR_ROAD, -1)
                 elif cell_type == PILL:
                     cv2.rectangle(canvas, p1, p2, COLOR_PILL, -1)

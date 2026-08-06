@@ -1,36 +1,192 @@
 import sys
 import os
+import math
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from datetime import datetime
-from data.car_data import cars_info, spot_status, get_empty_spots
+from data.car_data import (
+    cars_info, spot_status, get_empty_spots,
+    get_car_type, get_required_spot_type, describe_car,
+)
+from data.map_data import (
+    spot_type as SPOT_TYPE_OF, SPOT_TYPE_NAME, SPOT_PRIORITY, get_spot_ids_by_type,
+)
+from logic.C02_lot_layout import SPOT_WORLD_POS, GATE1_WORLD_POS
 from logic.fee_calculator import calculate_fee
 
-# 통합 입차 처리
-def find_sequential_empty_spot():
-    """알파벳 및 숫자 오름차순으로 가장 앞선 빈자리를 반환."""
-    # "A-1", "A-2"... "B-1", "B-2"... "C-1", "C-2"... "D-1", "D-2"... 순으로 정렬 후 첫 번째 반환
+# 배정 실패 사유 상수 (나중에 UI가 이 값으로 분기한다)
+REASON_OK           = "ok"            # 배정 성공
+REASON_FULL         = "full"          # 그 종류의 자리가 전부 찼음
+REASON_NO_SPOT_TYPE = "no_spot_type"  # 그 종류의 자리가 주차장에 아예 없음
+REASON_UNKNOWN_TYPE = "unknown_type"  # 차량 종류 -> 구역 종류 매핑이 없음
+REASON_ALREADY      = "already"       # 이미 주차 중인 차량번호
 
-    # 빈자리 우선 탐색
-    empty_spots = get_empty_spots()
-    if not empty_spots:
-        return None
-    
-    # 빈자리 안에서 "A-1", "A-2"... 순으로 정렬 후 첫 번째 반환
-    return sorted(list(empty_spots))[0]
+# 가장 최근 입차 시도 결과. (UI/모니터링이 읽어가는 자리)
+# handle_car_entry가 매번 갱신한다. "자리 없음" 안내 화면은 이 값을 보면 된다.
+last_entry_result = None
+
+
+def _distance_from_gate(spot_id):
+    """입구(GATE1)에서 해당 구역까지의 직선 거리(cm). 좌표가 없으면 무한대."""
+    pos = SPOT_WORLD_POS.get(spot_id)
+    if pos is None:
+        return float('inf')
+    return math.hypot(pos[0] - GATE1_WORLD_POS[0], pos[1] - GATE1_WORLD_POS[1])
+
+
+# 통합 입차 처리
+def get_assign_order(cell_type, distance_fn=None):
+    """
+    구역 종류의 배정 순서를 반환.
+
+    map_data.SPOT_PRIORITY에 적어둔 고정 순서가 우선이고, 거기에 없는 자리는
+    뒤에 붙인다(입구 직선거리 순). 배치를 바꿔 새 자리가 생겨도 배정이 멈추지
+    않게 하기 위한 안전장치다.
+
+    Args:
+        cell_type:   구역 종류 상수 (SPOT1~SPOT4)
+        distance_fn: 목록에 없는 자리를 정렬할 거리 함수
+
+    Returns:
+        구역 ID 리스트 (배정할 순서대로)
+    """
+    distance_fn = _distance_from_gate if distance_fn is None else distance_fn
+
+    actual = set(get_spot_ids_by_type(cell_type))
+    ordered = [s for s in SPOT_PRIORITY.get(cell_type, []) if s in actual]
+    leftover = sorted(actual - set(ordered), key=lambda s: (distance_fn(s), s))
+    return ordered + leftover
+
+
+def find_spot_for_car(car_id, distance_fn=None):
+    """
+    차량 번호에 맞는 종류의 빈자리 중 우선순위가 가장 앞선 자리를 찾는다.
+
+    번호판별 차량 종류는 data/car_data.py의 car_types에 미리 등록해 둔다.
+    등록되지 않은 번호는 DEFAULT_CAR_TYPE(일반)으로 처리된다.
+
+    배정 순서는 data/map_data.py의 SPOT_PRIORITY에 종류별로 고정해 두었다.
+    입구에서의 직선거리로 자동 정렬하지 않는 이유는 그 주석에 적어두었다.
+
+    종류가 맞지 않는 자리에는 배정하지 않는다. 대형차를 일반 자리에 넣거나
+    일반차를 장애인 자리에 넣으면 안 되기 때문이다. 그래서 해당 종류가 다 차면
+    다른 종류로 대체하지 않고 실패를 돌려준다.
+
+    Args:
+        car_id:      차량 번호 4자리 문자열
+        distance_fn: SPOT_PRIORITY에 없는 자리를 정렬할 때 쓸 거리 함수.
+                     None이면 입구에서의 직선거리.
+
+    Returns:
+        (spot_id, reason) 튜플. 실패하면 spot_id가 None이고 reason이 사유.
+    """
+    required = get_required_spot_type(car_id)
+    if required is None:
+        return None, REASON_UNKNOWN_TYPE
+
+    # 이 종류로 지정된 구역이 주차장에 하나라도 있는가
+    order = get_assign_order(required, distance_fn)
+    if not order:
+        return None, REASON_NO_SPOT_TYPE
+
+    empty = get_empty_spots()
+    for spot_id in order:
+        if spot_id in empty:
+            return spot_id, REASON_OK
+
+    return None, REASON_FULL
+
 
 def handle_car_entry(car_id, receive_time):
     """
-    차량 번호 수신 시 자동으로 빈자리를 찾아 입차를 처리.
+    차량 번호 수신 시 차량 종류에 맞는 가장 가까운 빈자리를 찾아 입차를 처리.
+
+    Args:
+        car_id:       차량 번호 4자리 문자열
+        receive_time: 번호를 수신한 시각
+
+    Returns:
+        결과 딕셔너리. 호출 측은 "success"로 성공 여부를 판단하고,
+        실패 시 "reason"으로 안내 문구를 고르면 된다.
+        {
+            "success": False,
+            "car_id": "9999",
+            "car_type": "대형",
+            "spot_id": None,
+            "reason": "full",
+            "message": "대형 구역이 모두 찼습니다. (6/6)",
+        }
     """
-    print(f"\n[입차 요청] 차량 번호: {car_id} 수신됨")
-    spot_id = find_sequential_empty_spot()
-    if not spot_id:
-        print("[경고] 주차장이 만차입니다. 입차할 수 없습니다.")
-        return False
-    
-    return park_car(spot_id, car_id, entry_time=receive_time)
+    global last_entry_result
+
+    car_type = get_car_type(car_id)
+    print(f"\n[입차 요청] 차량 번호: {car_id} 수신됨  ({describe_car(car_id)})")
+
+    def _result(success, spot_id, reason, message):
+        global last_entry_result
+        last_entry_result = {
+            "success": success,
+            "car_id": car_id,
+            "car_type": car_type,
+            "spot_id": spot_id,
+            "reason": reason,
+            "message": message,
+            "time": receive_time,
+        }
+        if not success:
+            print(f"[입차 거부] {message}")
+        return last_entry_result
+
+    if car_id in cars_info:
+        return _result(False, cars_info[car_id]["spot_id"], REASON_ALREADY,
+                       f"차량 '{car_id}'는 이미 {cars_info[car_id]['spot_id']}에 주차 중입니다.")
+
+    spot_id, reason = find_spot_for_car(car_id)
+
+    if reason == REASON_UNKNOWN_TYPE:
+        return _result(False, None, reason,
+                       f"차량 종류 '{car_type}'에 해당하는 구역 종류가 없습니다. "
+                       f"car_data.CAR_TYPE_TO_SPOT를 확인하세요.")
+
+    if reason == REASON_NO_SPOT_TYPE:
+        return _result(False, None, reason,
+                       f"{car_type} 차량이 댈 수 있는 구역이 주차장에 없습니다.")
+
+    if reason == REASON_FULL:
+        required = get_required_spot_type(car_id)
+        total = len(get_spot_ids_by_type(required))
+        kind = SPOT_TYPE_NAME.get(required, car_type)
+        return _result(False, None, reason,
+                       f"{kind} 구역이 모두 찼습니다. ({total}/{total})")
+
+    park_car(spot_id, car_id, entry_time=receive_time)
+    distance = _distance_from_gate(spot_id)
+    return _result(True, spot_id, REASON_OK,
+                   f"{car_type} 차량 '{car_id}' -> {spot_id} 배정 (입구에서 {distance:.0f}cm)")
+
+
+def get_availability_by_type():
+    """
+    구역 종류별 빈자리/전체 수를 반환. ("자리 없음" 안내 화면용)
+
+    Returns:
+        {구역종류상수: {"name": "대형", "empty": 2, "total": 6, "spots": [...]}}
+    """
+    empty = get_empty_spots()
+    summary = {}
+    for cell_type, name in SPOT_TYPE_NAME.items():
+        ids = get_spot_ids_by_type(cell_type)
+        if not ids:
+            continue
+        empty_ids = sorted(s for s in ids if s in empty)
+        summary[cell_type] = {
+            "name": name,
+            "empty": len(empty_ids),
+            "total": len(ids),
+            "spots": empty_ids,
+        }
+    return summary
 
 # 개별 입차 처리
 def park_car(spot_id, car_id, entry_time=None):
@@ -48,12 +204,16 @@ def park_car(spot_id, car_id, entry_time=None):
     # data -> car_data -> car_info 안에 차량 번호를 메인 키로 정보 저장
     cars_info[car_id] = {
         "spot_id": spot_id,
-        "entry_time": entry_time
+        "entry_time": entry_time,
+        # 차량 종류도 함께 남긴다. 출차/요금/UI에서 다시 조회할 필요가 없어진다.
+        "car_type": get_car_type(car_id),
     }
     # 해당 구역 상태 업데이트
     spot_status[spot_id] = "full"
-    
-    print(f"[입차 완료] 구역: {spot_id} | 차량번호: {car_id} | 입차시간: {entry_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    kind = SPOT_TYPE_NAME.get(SPOT_TYPE_OF.get(spot_id), "?")
+    print(f"[입차 완료] 구역: {spot_id}({kind}) | 차량번호: {car_id}({get_car_type(car_id)}) "
+          f"| 입차시간: {entry_time.strftime('%Y-%m-%d %H:%M:%S')}")
     return True
 
 # 출차 처리 및 요금 계산

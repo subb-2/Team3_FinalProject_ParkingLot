@@ -7,7 +7,7 @@ import numpy as np
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.map_data import (
-    grid_map, coord_to_spot, DRIVABLE_CELLS, SPOT, get_rows, get_cols,
+    grid_map, coord_to_spot, DRIVABLE_CELLS, SPOT_CELLS, get_rows, get_cols,
 )
 from logic.C02_lot_layout import (
     SPOT_WORLD_POS, GATE1_WORLD_POS, cell_to_world, CONFIG as C02_CONFIG,
@@ -45,10 +45,11 @@ class ParkingLotMap:
     data/map_data.py의 격자를 실좌표(cm) 점유 격자로 바꾸고, 주행 가능 여부를 판정하는 지도.
 
     격자의 셀 타입을 그대로 따른다.
-      - 벽(WALL), 기둥(PILL) : 항상 주행 불가
-      - 도로(ROAD), 입출구   : 주행 가능
-      - 주차 구역(SPOT)      : 기본 주행 불가. 목적지로 지정된 구역만 열어준다.
+      - 기둥(PILL)             : 항상 주행 불가
+      - 도로(ROAD), 입출구     : 주행 가능
+      - 주차 구역(SPOT_CELLS)  : 기본 주행 불가. 목적지로 지정된 구역만 열어준다.
         (차량이 통로를 따라 이동하도록 강제하기 위함)
+        구역 종류(일반/장애인/대형/전기차)는 주행 판정에 영향을 주지 않는다.
 
     장애물은 clearance만큼 부풀려서(inflation) 표시하므로, 경로 계산 시
     차량을 점으로 취급해도 실제로는 여유가 확보된다.
@@ -124,7 +125,7 @@ class ParkingLotMap:
                 if cell_type in DRIVABLE_CELLS:
                     continue
                 # 목적지 구역은 진입해야 하므로 열어둔다
-                if cell_type == SPOT and coord_to_spot.get((row, col)) == open_spot:
+                if cell_type in SPOT_CELLS and coord_to_spot.get((row, col)) == open_spot:
                     continue
                 self._block_cell(grid, (row, col))
 

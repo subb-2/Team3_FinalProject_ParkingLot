@@ -241,17 +241,33 @@ def register_car_number(car_id):
     """
     차량번호를 시스템에 등록.
 
-    AUTO_ASSIGN_SPOT이 True면 A01_parking_manager로 빈자리를 먼저 배정한 뒤
+    AUTO_ASSIGN_SPOT이 True면 A01_parking_manager로 자리를 먼저 배정한 뒤
     FIFO에 넣는다. 배정 정보(cars_info)가 있어야 C00이 목표 구역을 알 수 있다.
+
+    자리는 번호판에 등록된 차량 종류에 맞는 구역 중 입구에서 가장 가까운
+    빈자리로 배정된다. (등록부: data/car_data.py의 car_types)
+    해당 종류가 전부 차 있으면 배정에 실패하고, 그때는 안내를 시작하지 않는다.
 
     Args:
         car_id: 차량 번호 4자리 문자열
-    """
-    if CONFIG['AUTO_ASSIGN_SPOT']:
-        from logic.A01_parking_manager import handle_car_entry
-        handle_car_entry(car_id, datetime.now())
 
-    enqueue_car_number(car_id)
+    Returns:
+        A01.handle_car_entry의 결과 딕셔너리. AUTO_ASSIGN_SPOT이 False면 None.
+    """
+    if not CONFIG['AUTO_ASSIGN_SPOT']:
+        enqueue_car_number(car_id)
+        return None
+
+    from logic.A01_parking_manager import handle_car_entry
+    result = handle_car_entry(car_id, datetime.now())
+
+    # 배정 실패(해당 종류 자리가 다 참 등)면 추적 대기열에 넣지 않는다.
+    # 목표 구역이 없으면 C00이 안내할 곳도 없다.
+    if result["success"]:
+        enqueue_car_number(car_id)
+    else:
+        print(f"[등록] 안내를 시작하지 않습니다. ({result['reason']})")
+    return result
 
 
 def setup_car_number_source():
@@ -344,9 +360,22 @@ def open_camera():
 
 def build_status(pipeline):
     """현재 추적/내비게이션 상태를 JSON 직렬화 가능한 딕셔너리로 반환."""
+    import logic.A01_parking_manager as pm
+
     mapper = pipeline.navigator.mapper
+
+    # 가장 최근 입차 시도 결과. 실패했다면 "자리 없음" 안내 화면이 이 값을 쓴다.
+    last_entry = pm.last_entry_result
+    if last_entry is not None:
+        last_entry = {k: v for k, v in last_entry.items() if k != "time"}
+
     return {
         "fps": round(pipeline.fps, 1),
+        "last_entry": last_entry,
+        "availability": {
+            info["name"]: f"{info['empty']}/{info['total']}"
+            for info in pm.get_availability_by_type().values()
+        },
         "homography_ready": mapper.is_ready(),
         "homography_locked": mapper.locked,
         "homography_markers": mapper.calibrated_with,
@@ -412,9 +441,32 @@ if __name__ == '__main__':
 
     @app.route('/enqueue/<car_id>')
     def enqueue(car_id):
-        """UART 없이 차량번호를 등록하기 위한 라우트. (빈자리 배정 포함)"""
-        register_car_number(car_id)
-        return f"등록: {car_id} (대기 {car_number_fifo.size()}대) / 현재 큐: {car_number_fifo.snapshot()}"
+        """UART 없이 차량번호를 등록하기 위한 라우트. (자리 배정 포함)"""
+        result = register_car_number(car_id)
+        if result is None:
+            return f"등록: {car_id} (대기 {car_number_fifo.size()}대) / 큐: {car_number_fifo.snapshot()}"
+        return {
+            "car_id": car_id,
+            "car_type": result["car_type"],
+            "assigned": result["success"],
+            "spot_id": result["spot_id"],
+            "reason": result["reason"],
+            "message": result["message"],
+            "fifo": car_number_fifo.snapshot(),
+        }
+
+    @app.route('/availability')
+    def availability():
+        """
+        구역 종류별 빈자리 현황. ("자리 없음" 안내 화면이 쓸 데이터)
+
+        예: {"대형": {"empty": 0, "total": 6, "spots": []}, ...}
+        """
+        from logic.A01_parking_manager import get_availability_by_type
+        return {
+            info["name"]: {k: v for k, v in info.items() if k != "name"}
+            for info in get_availability_by_type().values()
+        }
 
     @app.route('/status')
     def status():
