@@ -511,8 +511,8 @@ class MarkerMapper:
         import numpy as np
 
         # 1. LOCKED 상태라면, 모든 기둥의 '이론적(가상) 위치'를 계산해서 먼저 그린다.
-        if self.locked and self.H is not None:
-            # H는 [월드 -> 이미지] 변환 행렬
+        if self.locked and self.H_inv is not None:
+            # H_inv는 [월드 -> 이미지] 변환 행렬
             world_pts = []
             m_ids = []
             for m_id, (wx, wy) in self.marker_world_pos.items():
@@ -521,7 +521,7 @@ class MarkerMapper:
             
             if world_pts:
                 world_pts = np.array([world_pts], dtype=np.float32)
-                img_pts = cv2.perspectiveTransform(world_pts, self.H)[0]
+                img_pts = cv2.perspectiveTransform(world_pts, self.H_inv)[0]
                 
                 for i, (cx, cy) in enumerate(img_pts):
                     m_id = m_ids[i]
