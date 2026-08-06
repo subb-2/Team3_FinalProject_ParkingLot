@@ -452,7 +452,6 @@ def build_pipeline(cap):
 
     # C00 : ArUco 마커 매퍼 + 내비게이터
     mapper = MarkerMapper(
-        aruco_dict_name=C00_CONFIG['ARUCO_DICT'],
         min_markers=C00_CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'],
         lock_homography=C00_CONFIG['LOCK_HOMOGRAPHY'],
         lock_markers=C00_CONFIG['MARKERS_FOR_LOCK'],
