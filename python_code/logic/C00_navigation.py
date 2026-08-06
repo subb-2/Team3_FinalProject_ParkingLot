@@ -301,6 +301,69 @@ class MarkerMapper:
             print(f"[경고] 호모그래피 저장 실패: {e}")
             return False
 
+    def set_homography_from_points(self, image_points):
+        """
+        마커 검출 없이, 지정된 기둥 이미지 좌표로 호모그래피를 직접 계산한다.
+
+        마커가 작거나 흐려서 자동 검출이 잘 안 되어도, 사람이 화면에서 기둥
+        위치를 찍어주면 좌표계를 확정할 수 있다. 카메라가 고정 설치되어 있으면
+        한 번만 하면 되고, 결과는 캐시에 저장되어 다음 실행부터 재사용된다.
+
+        마커의 '무늬'는 못 읽어도 '어느 기둥인지'만 알면 대응점으로 충분하다.
+        기둥의 실좌표는 격자에서 이미 알고 있기 때문이다.
+
+        Args:
+            image_points: {마커ID: (x_px, y_px)} 사람이 지정한 기둥 이미지 좌표.
+                          4개 이상이어야 하고, 많을수록 정확하다.
+
+        Returns:
+            (성공 여부, 메시지)
+        """
+        img_pts, world_pts, used = [], [], []
+        for marker_id, pt in image_points.items():
+            world_pt = self.marker_world_pos.get(int(marker_id))
+            if world_pt is None:
+                continue
+            img_pts.append((float(pt[0]), float(pt[1])))
+            world_pts.append(world_pt)
+            used.append(int(marker_id))
+
+        if len(img_pts) < 4:
+            return False, f"기둥이 {len(img_pts)}개뿐입니다. 최소 4개가 필요합니다."
+
+        spread = self._spread_ratio(img_pts)
+        if spread < self.min_spread:
+            return False, (f"찍은 점들이 한 줄에 몰려 있습니다 (퍼짐 {spread:.4f}). "
+                           f"위아래로 골고루 찍어야 합니다.")
+
+        H, _ = cv2.findHomography(
+            np.array(img_pts, np.float32), np.array(world_pts, np.float32),
+            cv2.RANSAC if len(img_pts) > 4 else 0, self.ransac_thresh_cm)
+        if H is None:
+            return False, "호모그래피 계산에 실패했습니다. 점 위치를 확인하세요."
+
+        error = self._reprojection_error(H, img_pts, world_pts)
+        if error > self.max_error:
+            return False, (f"재투영 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
+                           f"기둥 순서를 잘못 찍었거나, C02의 CELL_W_CM/CELL_H_CM이 "
+                           f"실제 목업 치수와 다릅니다.")
+
+        self.H = H
+        self.H_inv = np.linalg.inv(H)
+        self.calibrated_with = len(img_pts)
+        self.reproj_error = error
+        self.locked = True
+
+        msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm"
+        if len(img_pts) == 4:
+            # 4점은 항상 오차 0으로 맞춰진다. 즉 이 숫자로는 옳은지 알 수 없다.
+            msg += ("  (주의: 4점은 오차가 항상 0으로 나와 검증이 불가능합니다. "
+                    "5개 이상 찍으면 잘못 찍은 것을 오차로 걸러낼 수 있습니다)")
+        print(f"[INFO] {msg}")
+        if CONFIG['USE_HOMOGRAPHY_CACHE']:
+            self.save_homography()
+        return True, msg
+
     def load_homography(self, path=None):
         """저장해 둔 호모그래피를 불러온다. 배치가 바뀌었으면 무시한다."""
         path = CONFIG['HOMOGRAPHY_CACHE'] if path is None else path
