@@ -15,7 +15,7 @@ module VGA_top(
     input  logic i_capture,
 
     // to CNN
-    output logic vga_done
+    output logic o_vga_done
 );
 
     logic frame_we;
@@ -23,6 +23,7 @@ module VGA_top(
     logic [7:0]  frame_waddr;
 
     FrameController U_FrameController(
+        .i_pixel_clk(i_pixel_clk),
         .reset(reset),
         .i_RGB(i_RGB),
         .i_x_pixel(i_x_pixel),
@@ -38,6 +39,6 @@ module VGA_top(
         .i_waddr(frame_waddr),
         .i_data(frame_line),
         .i_raddr(i_pixel_addr),
-        .o_data(i_pixel_data)
+        .o_data(o_pixel_data)
     );
 endmodule

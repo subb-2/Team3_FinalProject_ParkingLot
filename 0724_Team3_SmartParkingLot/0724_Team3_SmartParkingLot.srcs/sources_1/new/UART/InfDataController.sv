@@ -52,7 +52,7 @@ module InfDataController (
             case(state)
                 IDLE: begin
                     if(i_inf_done) begin
-                        data_reg <= i_inf_data;
+                        data_reg <= {16'd0, i_inf_data};
                     end
                 end
                 POS0: begin

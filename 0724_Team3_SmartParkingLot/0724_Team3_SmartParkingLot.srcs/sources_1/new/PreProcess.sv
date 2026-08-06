@@ -13,10 +13,11 @@ module PreProcess(
     output logic trigger,   // to SR04
     output logic pwm,       // to SG90
 
-    // CNN
+    // VGA
     input  logic        cnn_done,
     input  logic [7:0]  pixel_addr,
     output logic [31:0] pixel_data,
+    output logic        vga_done,
 
     // UART
     input  logic        inf_done,
@@ -33,6 +34,7 @@ module PreProcess(
     /********* Sensor *********/
     sr04 U_SR04(
         .clk(clk),
+        .pclk(pclk),
         .reset(reset),
         .o_echo(echo),
         .i_cnn_done(cnn_done),
@@ -41,7 +43,7 @@ module PreProcess(
         .o_close(w_close)
     );
     SG90_Controller U_SG90(
-        .clk(clk),
+        .pclk(pclk),
         .reset(reset),
         .i_open(~w_close),
         .i_close(w_close),
@@ -58,7 +60,7 @@ module PreProcess(
         .i_pixel_addr(pixel_addr),
         .o_pixel_data(pixel_data),
         .i_capture(w_capture),
-        .o_vga_done(w_vga_done)
+        .o_vga_done(vga_done)
     );
 
     /********* UART *********/
