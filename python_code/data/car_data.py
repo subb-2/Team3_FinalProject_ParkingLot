@@ -222,6 +222,9 @@ def _apply_initial_parked():
             "spot_id": spot_id,
             "entry_time": now - timedelta(minutes=elapsed_min),
             "car_type": get_car_type(car_id),
+            # 이미 자리에 세워져 있는 차다. 안내 대상이 아니며, B02가 그 자리에
+            # 서 있는 트랙을 찾아 이 차량번호로 묶는다. (아래 parked 필드 설명 참고)
+            "parked": True,
         }
         spot_status[spot_id] = "full"
 
@@ -249,10 +252,17 @@ def get_fee_config():
 # 차량 번호 -> 차량 관리 정보 (딕셔너리 구조)
 # 예시
 # {
-#     "1234": {"spot_id": "A-1", "entry_time": datetime 객체},
-#     "5678": {"spot_id": "B-2", "entry_time": datetime 객체},
-#     ...
+#     "1234": {"spot_id": "A-1", "entry_time": ..., "car_type": "전기차", "parked": True},
+#     "5678": {"spot_id": "B-2", "entry_time": ..., "car_type": "일반",  "parked": False},
 # }
+#
+# parked 필드의 의미:
+#   True  = 그 자리에 실제로 세워져 있다. 안내가 끝난 차 또는 INITIAL_PARKED로
+#           미리 세워둔 차. B02가 그 자리에 있는 트랙을 찾아 차량번호를 묶는다.
+#   False = 자리는 배정됐지만 아직 가는 중이다. (입구에서 번호만 받은 상태)
+#
+# 이 구분이 없으면 '이미 주차된 차'와 '안내 중인 차'를 구별할 수 없어서,
+# 미리 세워둔 차가 안내 대상으로 잡히거나 그 반대가 된다.
 cars_info = {}
 
 # 조회 함수

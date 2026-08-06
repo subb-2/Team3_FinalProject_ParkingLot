@@ -107,11 +107,18 @@ class ParkingNavigationPipeline:
         #
         #    이 시점의 호모그래피/목표는 직전 프레임에서 갱신된 것이다. 카메라가
         #    고정 설치되어 있고 LOCK_HOMOGRAPHY=True이므로 실질적으로 동일하다.
+        #    parked_of는 '이미 그 자리에 세워져 있는 차'의 목록이다.
+        #    INITIAL_PARKED로 미리 세워둔 차와 안내를 마친 차가 여기 들어간다.
+        #    B02가 그 자리 근처의 트랙을 찾아 차량번호를 묶어주므로,
+        #    미리 세워둔 차가 'WAIT'로 뜨거나 안내 대상으로 잡히지 않는다.
+        from logic.A01_parking_manager import get_parked_world_positions
+
         mapper = self.navigator.mapper
         tracks = self.mot.update(
             detections,
             to_world=mapper.image_to_world if mapper.is_ready() else None,
-            target_of=self.navigator.get_target_world
+            target_of=self.navigator.get_target_world,
+            parked_of=get_parked_world_positions
         )
 
         # 3) C00 : 배정된 목표 구역 동기화 후 위치 추정 및 경로 안내
@@ -314,10 +321,16 @@ def build_pipeline(cap):
     )
 
     # B02 : 추적기 (어떤 추적기인지는 TRACKER_CFG의 tracker_type이 결정)
+    # on_parked : 목표 구역 도착으로 안내가 끝나면 A01에 알린다.
+    #             cars_info의 parked가 True로 바뀌고, 이후 그 차는
+    #             '이미 주차된 차'로 취급되어 트랙이 끊겨도 자리로 다시 묶인다.
+    from logic.A01_parking_manager import mark_parked
+
     mot = CarMOT(
         tracker_cfg=B02_CONFIG['TRACKER_CFG'],
         min_hits=B02_CONFIG['MIN_HITS_FOR_ASSIGN'],
-        trajectory_maxlen=B02_CONFIG['TRAJECTORY_MAXLEN']
+        trajectory_maxlen=B02_CONFIG['TRAJECTORY_MAXLEN'],
+        on_parked=mark_parked
     )
 
     # C00 : ArUco 마커 매퍼 + 내비게이터

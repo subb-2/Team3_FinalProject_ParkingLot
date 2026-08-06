@@ -130,9 +130,31 @@ class MarkerMapper:
         ransac_thresh_cm = CONFIG['RANSAC_THRESH_CM'] if ransac_thresh_cm is None else ransac_thresh_cm
 
         dict_id = getattr(aruco, aruco_dict_name)
+
+        # 검출 파라미터 조정.
+        # 기본값 그대로 쓰면 마커가 프레임마다 잡혔다 안 잡혔다 한다.
+        # 이 목업은 마커가 기둥 '위'에 있어 비스듬히 보이고, 바닥이 반사되는
+        # 회색이라 기본 임계값으로는 경계가 잘 안 잡힌다.
+        params = aruco.DetectorParameters()
+
+        # 코너를 서브픽셀로 다듬는다. 검출 안정성과 호모그래피 정확도가
+        # 가장 크게 개선되는 항목이다. (연산 비용은 미미)
+        params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+        params.cornerRefinementWinSize = 5
+
+        # 적응형 이진화 창 크기 범위를 넓힌다.
+        # 조명이 고르지 않거나 마커가 작게 보일 때 검출률이 올라간다.
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 33
+        params.adaptiveThreshWinSizeStep = 4
+
+        # 비스듬히 보이는 마커를 버리지 않도록 후보 판정을 약간 완화한다.
+        params.polygonalApproxAccuracyRate = 0.05
+        params.minMarkerPerimeterRate = 0.02
+
         self.detector = aruco.ArucoDetector(
             aruco.getPredefinedDictionary(dict_id),
-            aruco.DetectorParameters()
+            params
         )
         self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
         self.min_markers = min_markers
@@ -230,13 +252,27 @@ class MarkerMapper:
             return True
 
         # 실좌표가 등록된 마커만 사용
-        img_pts, world_pts = [], []
+        img_pts, world_pts, unknown = [], [], []
         for marker_id, img_pt in markers.items():
             world_pt = self.marker_world_pos.get(marker_id)
             if world_pt is None:
+                unknown.append(marker_id)
                 continue
             img_pts.append(img_pt)
             world_pts.append(world_pt)
+
+        # 검출은 됐는데 좌표표에 없는 마커를 알려준다.
+        # 이게 있으면 화면에는 마커가 여러 개 보이는데 'N/6 markers'는 안 올라가는,
+        # 원인을 찾기 어려운 상태가 된다. (화면에는 빨간 점 + "11?"로 표시된다)
+        if unknown:
+            self._warn_once(
+                "unknown_markers",
+                f"[경고] 검출됐지만 좌표가 등록되지 않은 마커: {sorted(unknown)}\n"
+                f"        data/map_data.py의 PILL_MARKER_ID에 없는 ID입니다. "
+                f"호모그래피에 쓰이지 않습니다.\n"
+                f"        현재 등록된 ID: {sorted(self.marker_world_pos)}\n"
+                f"        실제 기둥에 붙인 마커와 표가 일치하는지 확인하세요."
+            )
 
         n = len(img_pts)
         if n < self.min_markers:

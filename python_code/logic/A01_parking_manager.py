@@ -166,6 +166,47 @@ def handle_car_entry(car_id, receive_time):
                    f"{car_type} 차량 '{car_id}' -> {spot_id} 배정 (입구에서 {distance:.0f}cm)")
 
 
+def mark_parked(car_id):
+    """
+    차량이 배정된 자리에 실제로 주차를 마쳤다고 표시한다.
+
+    B02가 목표 구역 도착을 판정하면 이 함수를 부른다.
+    (C_main이 CarMOT의 on_parked 콜백으로 연결한다)
+
+    이 표시가 되어야 B02가 '이미 주차된 차'로 보고 그 트랙에 차량번호를
+    계속 묶어둔다. 안내 중인 차와 구분하기 위한 것이다.
+    """
+    info = cars_info.get(car_id)
+    if info is None:
+        return False
+    info["parked"] = True
+    print(f"[주차 완료] 차량 '{car_id}' -> {info['spot_id']}")
+    return True
+
+
+def get_parked_world_positions():
+    """
+    실제로 주차를 마친 차량들의 '배정된 자리' 실좌표를 반환.
+
+    B02가 이 표를 보고 그 자리에 서 있는 트랙을 찾아 차량번호를 묶는다.
+    미리 세워둔 차(INITIAL_PARKED)가 화면에서 'WAIT'로 뜨거나, 엉뚱하게
+    안내 대상으로 잡히는 것을 막는다.
+
+    안내 중인 차(parked=False)는 제외한다. 아직 그 자리에 없기 때문이다.
+
+    Returns:
+        {차량번호: (x_cm, y_cm)}
+    """
+    result = {}
+    for car_id, info in cars_info.items():
+        if not info.get("parked"):
+            continue
+        pos = SPOT_WORLD_POS.get(info.get("spot_id"))
+        if pos is not None:
+            result[car_id] = pos
+    return result
+
+
 def get_availability_by_type():
     """
     구역 종류별 빈자리/전체 수를 반환. ("자리 없음" 안내 화면용)
@@ -207,6 +248,9 @@ def park_car(spot_id, car_id, entry_time=None):
         "entry_time": entry_time,
         # 차량 종류도 함께 남긴다. 출차/요금/UI에서 다시 조회할 필요가 없어진다.
         "car_type": get_car_type(car_id),
+        # 자리는 배정됐지만 아직 가는 중이다. 목표 구역에 도착하면
+        # mark_parked()가 True로 바꾼다. (B02가 도착을 판정해 알려준다)
+        "parked": False,
     }
     # 해당 구역 상태 업데이트
     spot_status[spot_id] = "full"

@@ -105,6 +105,18 @@ CONFIG = {
         # 않아 다음 차가 번호를 못 받는다.
         # 0으로 두면 비활성화되고 오로지 도착 판정으로만 해제된다.
         "STUCK_RELEASE_SEC": 15.0,
+
+        # 이미 주차된 차를 그 자리의 트랙에 묶을 때 쓰는 반경(cm).
+        #
+        # INITIAL_PARKED로 미리 세워둔 차나 안내를 마친 차는 cars_info에만
+        # 기록되어 있을 뿐, 화면의 어느 트랙이 그 차인지 알 수 없다.
+        # 그대로 두면 'WAIT'로 뜨고, 검출이 흔들려 조금이라도 움직이면
+        # 활성 차량으로 잡혀 엉뚱하게 안내가 시작된다.
+        # 그래서 배정된 자리 근처에 서 있는 트랙을 찾아 차량번호를 묶어준다.
+        #
+        # ARRIVAL_RADIUS_CM보다 넉넉하게 둔다. 실제로 세워둔 위치가 자리
+        # 중심에서 조금 벗어나 있어도 잡아야 하기 때문이다.
+        "PARKED_BIND_RADIUS_CM": 15.0,
     },
 
     # ---------------------------------------------------------------------
@@ -346,7 +358,7 @@ class CarMOT:
 
     def __init__(self, tracker_cfg=TRACKER_CFG_PATH,
                  min_hits=30, lost_ttl=None, trajectory_maxlen=64, fifo=None,
-                 rebind=None, single_active=None):
+                 rebind=None, single_active=None, on_parked=None):
         """
         CarMOT 초기화.
 
@@ -362,6 +374,9 @@ class CarMOT:
             fifo:              사용할 CarNumberFIFO 인스턴스 (None이면 모듈 전역 큐 사용)
             rebind:            재바인딩 설정 dict (None이면 CONFIG['REBIND'])
             single_active:     단일 활성 차량 모드 설정 dict (None이면 CONFIG['SINGLE_ACTIVE'])
+            on_parked:         차량이 목표 구역에 도착해 안내가 끝났을 때 호출할
+                               콜백. car_id 하나를 인자로 받는다.
+                               A01.mark_parked를 넘기면 cars_info가 갱신된다.
         """
         cfg = IterableSimpleNamespace(**YAML.load(check_yaml(tracker_cfg)))
 
@@ -429,6 +444,9 @@ class CarMOT:
         self.single = dict(CONFIG['SINGLE_ACTIVE'] if single_active is None else single_active)
         self.single_enable = bool(self.single.get('ENABLE', True))
 
+        # 안내가 끝났을 때 알려줄 콜백 (A01.mark_parked)
+        self.on_parked = on_parked
+
         # 지금 안내 중인 차량번호. 주차를 마치면 None으로 돌아간다.
         self.active_car_id = None
         # 목표 반경 안에 처음 들어온 시각 (ARRIVAL_HOLD_SEC 판정용)
@@ -449,14 +467,15 @@ class CarMOT:
                   f"주차 판정 반경 {self.single['ARRIVAL_RADIUS_CM']}cm / "
                   f"{self.single['ARRIVAL_HOLD_SEC']}초 유지")
 
-    def update(self, detections, to_world=None, target_of=None):
+    def update(self, detections, to_world=None, target_of=None, parked_of=None):
         """
         검출 결과를 추적하고, 트랙에 차량 번호를 매칭.
 
-        번호 부여 경로는 우선순위 순으로 셋이다.
-          1) 활성 차량  : 움직이는 트랙 = 지금 안내 중인 차 (SINGLE_ACTIVE)
-          2) 재바인딩   : 사라진 트랙의 유령과 위치를 대조해 옛 번호를 승계
-          3) 신규 부여  : 위 둘 다 아니면 FIFO에서 다음 번호를 꺼낸다
+        번호 부여 경로는 우선순위 순으로 넷이다.
+          1) 주차 완료  : 이미 그 자리에 세워져 있는 차 (parked_of)
+          2) 활성 차량  : 움직이는 트랙 = 지금 안내 중인 차 (SINGLE_ACTIVE)
+          3) 재바인딩   : 사라진 트랙의 유령과 위치를 대조해 옛 번호를 승계
+          4) 신규 부여  : 위 셋 다 아니면 FIFO에서 다음 번호를 꺼낸다
 
         Args:
             detections: B01_car_detection.CarDetector.detect()의 반환 결과 리스트
@@ -471,6 +490,11 @@ class CarMOT:
                         targets/spot_world_pos를 엮어서 넘긴다.
                         None이면 도착 판정을 할 수 없으므로 STUCK_RELEASE_SEC
                         (정지 시간) 기준으로만 활성 차량이 해제된다.
+            parked_of:  {차량번호: (x_cm, y_cm)}를 돌려주는 함수.
+                        '이미 그 자리에 세워져 있는 차'의 목록이다.
+                        A01.get_parked_world_positions를 넘기면 된다.
+                        그 자리 근처에 서 있는 트랙을 찾아 차량번호를 묶는다.
+                        None이면 이 단계를 건너뛴다.
 
         Returns:
             추적 결과 리스트. 각 항목은 딕셔너리:
@@ -528,12 +552,18 @@ class CarMOT:
                 "confidence": conf
             })
 
-        # 2) 활성 차량(움직이는 차) 결합 및 주차 완료 판정.
+        # 2) 이미 주차된 차를 그 자리의 트랙에 묶는다.
+        #    활성 차량 결합보다 먼저 해야, 주차된 차가 검출 흔들림 때문에
+        #    '움직이는 차'로 오인되어 안내 대상이 되는 것을 막을 수 있다.
+        if parked_of is not None:
+            self._bind_parked_cars(tracks, parked_of(), now)
+
+        # 3) 활성 차량(움직이는 차) 결합 및 주차 완료 판정.
         #    이 규칙이 가장 강하므로 재바인딩/FIFO보다 먼저 처리한다.
         if self.single_enable:
             self._update_active_binding(tracks, alive_ids, now, target_of)
 
-        # 3) 나머지 트랙에 번호를 부여한다. 재바인딩(승계)이 FIFO보다 우선.
+        # 4) 나머지 트랙에 번호를 부여한다. 재바인딩(승계)이 FIFO보다 우선.
         #
         #    이 작업을 1)의 루프 안이 아니라 여기서 하는 이유:
         #    유령의 원래 트랙이 '이번 프레임에 살아있는지'를 알아야 하는데,
@@ -558,14 +588,65 @@ class CarMOT:
             if hits >= self.min_hits:
                 self._assign_car_id(track_id)
 
-        # 4) 확정된 차량번호를 결과에 반영
+        # 5) 확정된 차량번호를 결과에 반영
         for trk in tracks:
             trk["car_id"] = self.track_to_car.get(trk["track_id"])
 
-        # 5) 이번 프레임에 잡히지 않은 트랙 정리 (+ 유령 생성/만료)
+        # 6) 이번 프레임에 잡히지 않은 트랙 정리 (+ 유령 생성/만료)
         self._cleanup_lost(alive_ids, now)
 
         return tracks
+
+    def _bind_parked_cars(self, tracks, parked_positions, now):
+        """
+        이미 주차된 차를 그 자리에 서 있는 트랙에 묶는다.
+
+        cars_info에는 '차량번호 -> 배정된 자리'가 있지만, 화면의 어느 트랙이
+        그 차인지는 알 수 없다. 그래서 자리의 실좌표 근처에 서 있는 트랙을
+        찾아 차량번호를 붙여준다.
+
+        이걸 하지 않으면 미리 세워둔 차가 계속 'WAIT'로 뜨고, 검출이 흔들려
+        조금만 움직여도 활성 차량으로 잡혀 엉뚱한 안내가 시작된다.
+
+        Args:
+            tracks:           이번 프레임 트랙 목록
+            parked_positions: {차량번호: (x_cm, y_cm)} 주차 완료된 차의 자리 좌표
+            now:              현재 시각
+        """
+        if not parked_positions:
+            return
+
+        radius = self.single['PARKED_BIND_RADIUS_CM']
+        taken = set(self.track_to_car.values())
+
+        for trk in tracks:
+            track_id = trk["track_id"]
+            if track_id in self.track_to_car:
+                continue
+
+            world = self.last_states.get(track_id, {}).get("world")
+            if world is None:
+                continue        # 호모그래피가 아직 없으면 판단 불가
+
+            # 반경 안에서 가장 가까운 '아직 안 묶인' 주차 차량
+            best_car, best_dist = None, None
+            for car_id, pos in parked_positions.items():
+                if car_id in taken:
+                    continue
+                dist = math.hypot(world[0] - pos[0], world[1] - pos[1])
+                if dist > radius:
+                    continue
+                if best_dist is None or dist < best_dist:
+                    best_car, best_dist = car_id, dist
+
+            if best_car is None:
+                continue
+
+            self.track_to_car[track_id] = best_car
+            self.rebound_at[track_id] = now
+            taken.add(best_car)
+            print(f"[주차 결합] Track ID {track_id} <- 차량번호 '{best_car}' "
+                  f"(자리에서 {best_dist:.1f}cm)")
 
     def _update_state(self, track_id, center, bbox, to_world, now):
         """
@@ -749,11 +830,19 @@ class CarMOT:
         주차를 마친 차의 track_to_car 결합은 그대로 남겨둔다. 그 차가 화면에
         계속 보여야 하고, 트랙이 끊겼다 되살아나는 경우는 재바인딩 레이어가
         위치로 이어받기 때문이다.
+
+        on_parked 콜백으로 '주차 완료'를 알린다. A01이 cars_info의 parked를
+        True로 바꾸면, 이후 그 차는 _bind_parked_cars의 대상이 되어 트랙이
+        끊겨도 자리 위치로 다시 묶인다.
         """
-        print(f"[활성] 차량번호 '{self.active_car_id}' 안내 종료 - {reason}")
+        car_id = self.active_car_id
+        print(f"[활성] 차량번호 '{car_id}' 안내 종료 - {reason}")
         self.active_car_id = None
         self._arrived_since = None
         self._active_moved_at = None
+
+        if car_id is not None and self.on_parked is not None:
+            self.on_parked(car_id)
 
     def _try_rebind(self, track_id, alive_ids, now):
         """
