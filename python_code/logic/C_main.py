@@ -90,6 +90,8 @@ class ParkingNavigationPipeline:
         self.latest_tracks = []
         self.latest_nav = []
         self.fps = 0.0
+        # 단계별 처리 시간(ms). FPS 원인 추적용. (/status의 stage_ms)
+        self.stage_ms = {}
 
     def process_frame(self, frame):
         """
@@ -105,8 +107,13 @@ class ParkingNavigationPipeline:
               draw_tracks가 프레임에 박스를 그리고 나면 ArUco 마커 검출이
               방해받을 수 있기 때문이다.
         """
+        # 각 단계에 걸리는 시간을 잰다. FPS가 떨어졌을 때 어디가 원인인지
+        # 추측하지 않고 바로 알 수 있어야 한다. (/status의 stage_ms)
+        t = time.perf_counter()
+
         # 1) B01 : 차량 검출
         detections = self.detector.detect(frame)
+        t_det = time.perf_counter()
 
         # 2) B02 : MOT 추적 + 차량번호 매칭
         #    호모그래피가 준비되어 있으면 image_to_world를 넘겨 이동량/거리 판정을
@@ -132,10 +139,12 @@ class ParkingNavigationPipeline:
             target_of=self.navigator.get_target_world,
             parked_of=get_parked_world_positions
         )
+        t_track = time.perf_counter()
 
         # 3) C00 : 배정된 목표 구역 동기화 후 위치 추정 및 경로 안내
         self.navigator.sync_targets_from_parking_manager()
         nav_results = self.navigator.update(frame, tracks)
+        t_nav = time.perf_counter()
 
         # 4) 시각화
         if CONFIG['DRAW_MARKERS']:
@@ -143,6 +152,14 @@ class ParkingNavigationPipeline:
         self.mot.draw_tracks(frame, tracks)
         if CONFIG['DRAW_NAVIGATION']:
             self.navigator.draw_navigation(frame, nav_results)
+
+        t_draw = time.perf_counter()
+        self.stage_ms = {
+            "detect": round((t_det - t) * 1000, 1),      # YOLO 추론
+            "track": round((t_track - t_det) * 1000, 1),  # 추적 + 번호 매칭
+            "nav": round((t_nav - t_track) * 1000, 1),    # 마커 검출 + 호모그래피 + 경로
+            "draw": round((t_draw - t_nav) * 1000, 1),    # 시각화
+        }
 
         self.latest_tracks = tracks
         self.latest_nav = nav_results
@@ -174,6 +191,12 @@ class ParkingNavigationPipeline:
             color = (0, 200, 255)
         cv2.putText(frame, text, (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+        # 단계별 소요 시간. FPS가 떨어졌을 때 어디를 손봐야 하는지 바로 보인다.
+        if self.stage_ms:
+            parts = "  ".join(f"{k} {v:.0f}ms" for k, v in self.stage_ms.items())
+            cv2.putText(frame, parts, (10, 152),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
         return frame
 
@@ -402,6 +425,7 @@ def build_status(pipeline):
 
     return {
         "fps": round(pipeline.fps, 1),
+        "stage_ms": pipeline.stage_ms,
         "last_entry": last_entry,
         "availability": {
             info["name"]: f"{info['empty']}/{info['total']}"

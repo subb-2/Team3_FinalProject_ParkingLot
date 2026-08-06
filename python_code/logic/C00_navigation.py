@@ -55,15 +55,19 @@ CONFIG = {
         # 이미 검출에 성공한 마커의 '좌표 정확도'만 올리는 단계라
         # 검출률을 떨어뜨릴 위험이 없다. 호모그래피 오차가 줄어든다.
         "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
-        # 이진화 윈도우를 촘촘히 탐색 (기본 3/23/10 → 3/33/4)
-        # 조명 불균일 환경에서 다양한 크기의 마커를 잡기 위해 필요.
-        "adaptiveThreshWinSizeMin": 3,
-        "adaptiveThreshWinSizeMax": 33,
-        "adaptiveThreshWinSizeStep": 4,
-        # 비트 판정 완화: 블러/반사로 비트가 흐릿한 마커도 허용
-        "errorCorrectionRate": 0.8,
-        "maxErroneousBitsInBorderRate": 0.5,
+
+        # 아래는 한때 넣었다가 되돌린 것들이다. 다시 넣기 전에 근거를 확인할 것.
+        #   adaptiveThreshWinSize 3/33/4     이진화를 3회 -> 8회로 늘린다.
+        #                                    --sweep에서 검출 개수 변화 0. 비용만 든다.
+        #   errorCorrectionRate 0.8          비트 판정 완화. 검출 개수 변화 0이었고,
+        #   maxErroneousBitsInBorderRate 0.5 오히려 오검출 위험을 키운다.
+        #                                    ID 하나만 잘못 읽혀도 호모그래피가 통째로 틀어진다.
     },
+
+    # 조명 보정(CLAHE). 검은 바닥에 가장자리가 어두운 환경에서 대비를 살린다.
+    # 끄면 프레임당 몇 ms를 아낄 수 있다. 호모그래피가 확정된 뒤에는
+    # 마커를 더 찾을 필요가 없으므로 꺼도 무방하다.
+    "USE_CLAHE": True,
     "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
     # 카메라가 고정 설치된 경우 True 권장.
@@ -254,6 +258,11 @@ class MarkerMapper:
         self.reproj_error = float('inf')  # 평균 재투영 오차 (cm)
         self.locked = False           # 품질 기준을 만족해 고정되었는지
         self._warned = set()          # 중복 경고 억제용
+        self._last_det_count = -1     # 검출 개수 로그를 바뀔 때만 찍기 위한 것
+
+        # CLAHE 객체는 한 번만 만든다. 매 프레임 생성하면 그만큼 낭비다.
+        self._clahe = (cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                       if CONFIG['USE_CLAHE'] else None)
 
         print(f"[INFO] ArUco 마커 검출기 초기화 완료. ({aruco_dict_name}, "
               f"등록된 마커 {len(self.marker_world_pos)}개)")
@@ -331,18 +340,21 @@ class MarkerMapper:
         Returns:
             {마커ID: (cx, cy)} 형태의 딕셔너리. cx, cy는 마커 중심의 이미지 좌표.
         """
+        # 호모그래피가 확정된 뒤에는 마커를 더 찾을 이유가 없다.
+        # (차량 위치는 저장된 행렬로 변환한다) 화면 표시용으로만 가볍게 훑는다.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # CLAHE: 조명 불균일(검은 바닥 + 가장자리 어두움) 보정
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        if self._clahe is not None:
+            gray = self._clahe.apply(gray)
         corners, ids, rejected = self.detector.detectMarkers(gray)
 
-        # 디버그: rejected가 많으면 비트 해독 실패, 적으면 사각형 자체 미검출
+        # 검출 상태 로그는 '바뀔 때만' 남긴다.
+        # 매 프레임 출력하면 콘솔 I/O만으로 FPS가 크게 떨어진다.
+        # (특히 SSH 터미널에서는 한 줄마다 flush + 네트워크 왕복이 발생한다)
         n_det = 0 if ids is None else len(ids)
-        n_rej = 0 if rejected is None else len(rejected)
-        if n_det < 6:  # LOCK 기준 미달일 때만 출력 (정상 동작 시 로그 억제)
-            print(f"[DEBUG] 마커 검출={n_det}, rejected={n_rej} "
-                  f"(rejected가 많으면 비트해독 실패, 적으면 윤곽 미검출)")
+        if n_det != self._last_det_count:
+            n_rej = 0 if rejected is None else len(rejected)
+            print(f"[마커] 검출 {n_det}개, 해독실패 후보 {n_rej}개")
+            self._last_det_count = n_det
 
         found = {}
         sizes = []
@@ -353,8 +365,12 @@ class MarkerMapper:
                 sizes.append(float(np.mean(
                     [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)])))
 
-        # 예측 기반 보강: 이미 아는 배치를 이용해 못 찾은 기둥을 다시 찾는다
-        if CONFIG['GUIDED_DETECTION']:
+        # 예측 기반 보강: 이미 아는 배치를 이용해 못 찾은 기둥을 다시 찾는다.
+        #
+        # 호모그래피가 확정된 뒤에는 하지 않는다. 마커를 더 찾아도 쓸 데가 없는데
+        # 못 찾은 기둥마다 잘라서 4배 확대 후 재검출하므로 비용이 크다.
+        # (이 조건이 없으면 확정 후에도 매 프레임 그 일을 반복한다)
+        if CONFIG['GUIDED_DETECTION'] and not self.locked:
             found = self._guided_detect(gray, found, rejected, sizes)
 
         return found
