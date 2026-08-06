@@ -9,65 +9,13 @@ from collections import deque
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C01_path_planner import route_length, distance_to_route
+from logic.B03_marker_detect import MarkerDetector
 
 # 설정 (Configuration)
 # 이 모듈은 '위치 추정 및 경로 안내'만 담당.
 #   - 검출 : B01_car_detection.py
 #   - 추적 : B02_car_mot.py  (여기서 나온 박스 정중앙점을 입력으로 사용)
 CONFIG = {
-    # ArUco 마커 설정
-    # 사전이 실제 인쇄물과 다르면 마커가 '하나도' 검출되지 않는다.
-    # (오검출이 아니라 완전 무검출이므로 화면에 아무 표시도 안 뜬다)
-    # 현재 인쇄물: 4x4 비트 마커 ID 1~10, 한 변 50mm.
-    #
-    # 생성기에서 '4x4_1000'으로 받았더라도 DICT_4X4_50으로 선언한다.
-    # OpenCV의 DICT_4X4_50은 DICT_4X4_1000의 앞 50개를 그대로 잘라낸 것이라
-    # ID 0~49의 패턴이 완전히 같다. 즉 같은 인쇄물을 쓰면서 사전만 작게
-    # 선언하면 오류 정정 비트를 더 받는다. (4x4_1000: 0비트 -> 4x4_50: 1비트)
-    #
-    # 사전별 비교 (기둥 10개 기준, python logic/C03_marker_calib.py --sweep로 측정 가능)
-    #   사전                  비트  최소px  오류정정  ID10개 최소해밍
-    #   DICT_4X4_50            4x4    24      1          5     <- 현재
-    #   DICT_5X5_50            5x5    28      3         10     (더 견고, 더 큼)
-    #   DICT_ARUCO_ORIGINAL    5x5    28      0          3     (이전 설정. 최악)
-    #
-    # 사전이 인쇄물과 다르면 마커가 '하나도' 검출되지 않는다.
-    # 마커를 다시 뽑으면 이 값과 PILL_MARKER_ID를 함께 확인할 것.
-    "ARUCO_DICT": "DICT_4X4_50",  # 마커 사전 (실제 출력한 마커와 일치해야 함)
-
-    # ArUco 검출 파라미터 덮어쓰기. 여기 없는 값은 OpenCV 기본값을 그대로 쓴다.
-    #
-    # !! 주의 !! 이 값들은 근거 없이 건드리면 검출률이 '떨어진다'.
-    # 실제로 polygonalApproxAccuracyRate를 0.03 -> 0.05로 올렸다가 마커가
-    # 거의 검출되지 않는 일이 있었다. 관대해질 것 같지만 반대로 동작한다.
-    # 컨투어 근사가 거칠어져 사각형 코너가 뭉개지고, 4각형 판정에서 탈락한다.
-    #
-    # 바꾸기 전에 반드시 logic/C03_marker_calib.py --sweep 으로 측정할 것.
-    # 추측이 아니라 '몇 개 잡히는지'를 보고 정해야 한다.
-    #
-    # 기본값 참고 (OpenCV 4.x)
-    #   adaptiveThreshWinSizeMin/Max/Step : 3 / 23 / 10
-    #   polygonalApproxAccuracyRate       : 0.03
-    #   minMarkerPerimeterRate            : 0.03
-    #   cornerRefinementMethod            : 0 (NONE)
-    "ARUCO_PARAMS": {
-        # 코너를 서브픽셀로 다듬는다.
-        # 이미 검출에 성공한 마커의 '좌표 정확도'만 올리는 단계라
-        # 검출률을 떨어뜨릴 위험이 없다. 호모그래피 오차가 줄어든다.
-        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
-
-        # 아래는 한때 넣었다가 되돌린 것들이다. 다시 넣기 전에 근거를 확인할 것.
-        #   adaptiveThreshWinSize 3/33/4     이진화를 3회 -> 8회로 늘린다.
-        #                                    --sweep에서 검출 개수 변화 0. 비용만 든다.
-        #   errorCorrectionRate 0.8          비트 판정 완화. 검출 개수 변화 0이었고,
-        #   maxErroneousBitsInBorderRate 0.5 오히려 오검출 위험을 키운다.
-        #                                    ID 하나만 잘못 읽혀도 호모그래피가 통째로 틀어진다.
-    },
-
-    # 조명 보정(CLAHE). 검은 바닥에 가장자리가 어두운 환경에서 대비를 살린다.
-    # 끄면 프레임당 몇 ms를 아낄 수 있다. 호모그래피가 확정된 뒤에는
-    # 마커를 더 찾을 필요가 없으므로 꺼도 무방하다.
-    "USE_CLAHE": True,
     "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
     # 카메라가 고정 설치된 경우 True 권장.
@@ -103,27 +51,6 @@ CONFIG = {
         os.path.join(os.path.dirname(__file__), '..', 'config', 'homography.npz')
     ),
 
-    # ---------------------------------------------------------------------
-    # 예측 기반 보강 검출 (Guided detection)
-    #
-    # 기둥의 실좌표는 이미 알고 있다. 그래서 마커 몇 개만 확실히 잡히면
-    # 나머지 기둥이 화면 어디에 있어야 하는지 계산할 수 있다.
-    # 그 좁은 영역만 확대해서 다시 찾으면, 전체 화면에서 찾을 때보다
-    # 훨씬 잘 잡힌다. 위치를 알고 찾는 것이라 오검출 위험도 낮다.
-    #
-    # 2단계로 동작한다.
-    #   1) 예상 위치 주변을 잘라 확대한 뒤 ArUco 재검출.
-    #      기대한 ID가 나올 때만 채택한다. (ID가 다르면 버림)
-    #   2) 그래도 못 읽으면, ID 해독에 실패한 사각형(rejected) 중
-    #      예상 위치에 딱 있는 것을 그 기둥으로 채택한다.
-    #      비트를 못 읽어도 '거기 있는 사각형은 그 기둥'이라는 배치 정보를 쓰는 것.
-    # ---------------------------------------------------------------------
-    "GUIDED_DETECTION": True,
-    "GUIDED_UPSCALE": 4.0,          # 잘라낸 영역을 몇 배로 확대할지
-    "GUIDED_WINDOW_SCALE": 3.0,     # 마커 크기의 몇 배 넓이로 자를지
-    "GUIDED_ADOPT_QUADS": True,     # 2단계(해독 실패 사각형 채택) 사용 여부
-    "GUIDED_MATCH_RATIO": 0.7,      # 예상 위치에서 마커 크기의 몇 배 이내여야 같은 것으로 볼지
-
     # 내비게이션 판정 기준
     # 거리 기준은 주차장 규모에 맞춰야 한다. 현재 목업은 40 x 140cm이고
     # 통로 폭이 10cm, 자리 간격이 35cm이므로 값들이 작다.
@@ -154,26 +81,6 @@ from logic.C02_lot_layout import (
 )
 
 # 시각화 색상 (BGR)
-def build_aruco_params(overrides=None):
-    """
-    ArUco 검출 파라미터를 만든다. OpenCV 기본값에서 시작해 필요한 것만 덮어쓴다.
-
-    Args:
-        overrides: {속성명: 값}. None이면 CONFIG['ARUCO_PARAMS'].
-
-    Returns:
-        cv2.aruco.DetectorParameters
-    """
-    params = aruco.DetectorParameters()
-    overrides = CONFIG['ARUCO_PARAMS'] if overrides is None else overrides
-    for name, value in overrides.items():
-        if not hasattr(params, name):
-            print(f"[경고] ArUco 파라미터 '{name}'은 존재하지 않습니다. 무시합니다.")
-            continue
-        setattr(params, name, value)
-    return params
-
-
 COLOR_MARKER = (255, 200, 0)    # 마커       - 하늘색
 COLOR_PATH   = (0, 255, 255)    # 안내 경로  - 노랑
 COLOR_TARGET = (255, 0, 255)    # 목표 지점  - 자홍
@@ -209,7 +116,7 @@ class MarkerMapper:
     이후 차량이 마커를 가려도 위치 추정이 끊기지 않는다.
     """
 
-    def __init__(self, aruco_dict_name=None, marker_world_pos=None,
+    def __init__(self, marker_world_pos=None,
                  min_markers=None, lock_homography=None, lock_markers=None,
                  max_error=None, min_spread=None, ransac_thresh_cm=None):
         """
@@ -220,7 +127,6 @@ class MarkerMapper:
         숫자나 사전 이름을 하드코딩하지 말 것. (MAIN_README 5절)
 
         Args:
-            aruco_dict_name:  ArUco 사전 이름 (None이면 CONFIG['ARUCO_DICT'])
             marker_world_pos: {마커ID: (x_cm, y_cm)} 형태의 실좌표 매핑
             min_markers:      호모그래피 계산을 시도할 최소 마커 수
             lock_homography:  True면 품질 기준 충족 시 호모그래피를 고정
@@ -229,7 +135,6 @@ class MarkerMapper:
             min_spread:       마커 배치의 최소 퍼짐 정도 (일직선 배치 거부)
             ransac_thresh_cm: RANSAC 이상치 판정 임계값 (cm, 실좌표 기준)
         """
-        aruco_dict_name = CONFIG['ARUCO_DICT'] if aruco_dict_name is None else aruco_dict_name
         min_markers = CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'] if min_markers is None else min_markers
         lock_homography = CONFIG['LOCK_HOMOGRAPHY'] if lock_homography is None else lock_homography
         lock_markers = CONFIG['MARKERS_FOR_LOCK'] if lock_markers is None else lock_markers
@@ -237,11 +142,7 @@ class MarkerMapper:
         min_spread = CONFIG['MIN_MARKER_SPREAD'] if min_spread is None else min_spread
         ransac_thresh_cm = CONFIG['RANSAC_THRESH_CM'] if ransac_thresh_cm is None else ransac_thresh_cm
 
-        dict_id = getattr(aruco, aruco_dict_name)
-        self.detector = aruco.ArucoDetector(
-            aruco.getPredefinedDictionary(dict_id),
-            build_aruco_params()
-        )
+        self.detector = MarkerDetector()
         self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
         self.min_markers = min_markers
         self.lock_homography = lock_homography
@@ -258,13 +159,8 @@ class MarkerMapper:
         self.reproj_error = float('inf')  # 평균 재투영 오차 (cm)
         self.locked = False           # 품질 기준을 만족해 고정되었는지
         self._warned = set()          # 중복 경고 억제용
-        self._last_det_count = -1     # 검출 개수 로그를 바뀔 때만 찍기 위한 것
 
-        # CLAHE 객체는 한 번만 만든다. 매 프레임 생성하면 그만큼 낭비다.
-        self._clahe = (cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                       if CONFIG['USE_CLAHE'] else None)
-
-        print(f"[INFO] ArUco 마커 검출기 초기화 완료. ({aruco_dict_name}, "
+        print(f"[INFO] ArUco 마커 검출기 초기화 완료. ("
               f"등록된 마커 {len(self.marker_world_pos)}개)")
 
         # 카메라가 고정이면 호모그래피는 상수다. 저장해 둔 것이 있으면 불러 쓴다.
@@ -403,176 +299,7 @@ class MarkerMapper:
         Returns:
             {마커ID: (cx, cy)} 형태의 딕셔너리. cx, cy는 마커 중심의 이미지 좌표.
         """
-        # 호모그래피가 확정된 뒤에는 마커를 더 찾을 이유가 없다.
-        # (차량 위치는 저장된 행렬로 변환한다) 화면 표시용으로만 가볍게 훑는다.
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if self._clahe is not None:
-            gray = self._clahe.apply(gray)
-        corners, ids, rejected = self.detector.detectMarkers(gray)
-
-        # 검출 상태 로그는 '바뀔 때만' 남긴다.
-        # 매 프레임 출력하면 콘솔 I/O만으로 FPS가 크게 떨어진다.
-        # (특히 SSH 터미널에서는 한 줄마다 flush + 네트워크 왕복이 발생한다)
-        n_det = 0 if ids is None else len(ids)
-        if n_det != self._last_det_count:
-            n_rej = 0 if rejected is None else len(rejected)
-            print(f"[마커] 검출 {n_det}개, 해독실패 후보 {n_rej}개")
-            self._last_det_count = n_det
-
-        found = {}
-        sizes = []
-        if ids is not None:
-            for corner, marker_id in zip(corners, ids.flatten()):
-                pts = corner[0]
-                found[int(marker_id)] = (float(pts[:, 0].mean()), float(pts[:, 1].mean()))
-                sizes.append(float(np.mean(
-                    [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)])))
-
-        # 예측 기반 보강: 이미 아는 배치를 이용해 못 찾은 기둥을 다시 찾는다.
-        #
-        # 호모그래피가 확정된 뒤에는 하지 않는다. 마커를 더 찾아도 쓸 데가 없는데
-        # 못 찾은 기둥마다 잘라서 4배 확대 후 재검출하므로 비용이 크다.
-        # (이 조건이 없으면 확정 후에도 매 프레임 그 일을 반복한다)
-        if CONFIG['GUIDED_DETECTION'] and not self.locked:
-            found = self._guided_detect(gray, found, rejected, sizes)
-
-        return found
-
-    # --- 예측 기반 보강 검출 -------------------------------------------------
-
-    def _homography_for_prediction(self, found):
-        """
-        '실좌표 -> 이미지'로 예측할 때 쓸 행렬을 구한다.
-
-        이미 확정된 호모그래피가 있으면 그것을 쓰고, 없으면 이번 프레임에
-        잡힌 마커만으로 임시로 하나 만든다. 임시 해는 부정확할 수 있지만
-        '어디쯤을 뒤져볼까'를 정하는 데는 충분하다.
-        """
-        if self.H_inv is not None:
-            return self.H_inv
-
-        img_pts, world_pts = [], []
-        for marker_id, img_pt in found.items():
-            world_pt = self.marker_world_pos.get(marker_id)
-            if world_pt is not None:
-                img_pts.append(img_pt)
-                world_pts.append(world_pt)
-
-        if len(img_pts) < 4:
-            return None
-
-        H, _ = cv2.findHomography(np.array(world_pts, np.float32),
-                                  np.array(img_pts, np.float32),
-                                  cv2.RANSAC if len(img_pts) > 4 else 0, 5.0)
-        return H
-
-    def _guided_detect(self, gray, found, rejected, sizes):
-        """
-        아직 못 찾은 기둥의 예상 위치를 계산해 그 부근만 다시 검출한다.
-
-        Args:
-            gray:     전처리된 흑백 프레임
-            found:    지금까지 찾은 {마커ID: 중심좌표}
-            rejected: ID 해독에 실패한 사각형 후보들
-            sizes:    이미 찾은 마커들의 한 변 픽셀 (창 크기 결정용)
-
-        Returns:
-            보강된 {마커ID: 중심좌표}
-        """
-        missing = [m for m in self.marker_world_pos if m not in found]
-        if not missing:
-            return found
-
-        world_to_img = self._homography_for_prediction(found)
-        if world_to_img is None:
-            return found      # 예측할 근거가 없다
-
-        # 창 크기 기준이 될 마커 한 변. 아직 아무것도 못 찾았으면 보수적으로 가정.
-        marker_px = float(np.median(sizes)) if sizes else 40.0
-        half = max(30.0, marker_px * CONFIG['GUIDED_WINDOW_SCALE'] / 2.0)
-
-        # 해독 실패 사각형들의 중심과 크기를 미리 계산 (2단계용)
-        quads = []
-        if rejected is not None:
-            for q in rejected:
-                pts = q[0]
-                side = float(np.mean(
-                    [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]))
-                quads.append(((float(pts[:, 0].mean()), float(pts[:, 1].mean())), side))
-
-        h, w = gray.shape[:2]
-        recovered_crop, recovered_quad = [], []
-
-        for marker_id in missing:
-            wx, wy = self.marker_world_pos[marker_id]
-            pred = cv2.perspectiveTransform(
-                np.array([[[float(wx), float(wy)]]], np.float32), world_to_img)[0][0]
-            px, py = float(pred[0]), float(pred[1])
-            if not (0 <= px < w and 0 <= py < h):
-                continue      # 화면 밖에 있어야 할 기둥
-
-            # 1단계: 예상 위치 주변을 잘라 확대한 뒤 재검출
-            if self._detect_in_window(gray, marker_id, px, py, half, found):
-                recovered_crop.append(marker_id)
-                continue
-
-            # 2단계: 해독 실패 사각형 중 예상 위치에 있는 것을 채택
-            if CONFIG['GUIDED_ADOPT_QUADS']:
-                limit = marker_px * CONFIG['GUIDED_MATCH_RATIO']
-                near = [(math.hypot(c[0] - px, c[1] - py), c, s)
-                        for c, s in quads
-                        if math.hypot(c[0] - px, c[1] - py) <= limit]
-                # 후보가 딱 하나일 때만 채택한다. 둘 이상이면 어느 것인지 알 수 없다.
-                if len(near) == 1:
-                    _, center, side = near[0]
-                    # 크기가 다른 마커들과 비슷해야 한다 (바닥 무늬 배제)
-                    if 0.5 * marker_px <= side <= 2.0 * marker_px:
-                        found[marker_id] = center
-                        recovered_quad.append(marker_id)
-
-        if recovered_crop or recovered_quad:
-            parts = []
-            if recovered_crop:
-                parts.append(f"확대 재검출 {sorted(recovered_crop)}")
-            if recovered_quad:
-                parts.append(f"위치로 채택 {sorted(recovered_quad)}")
-            self._warn_once("guided",
-                            f"[INFO] 예측 기반 보강 검출 동작 중: {' / '.join(parts)}\n"
-                            f"        (이 로그는 처음 한 번만 출력됩니다)")
-        return found
-
-    def _detect_in_window(self, gray, marker_id, px, py, half, found):
-        """
-        예상 위치 주변을 잘라 확대한 뒤 ArUco를 다시 돌린다.
-
-        기대한 ID가 나올 때만 채택한다. 다른 ID가 나오면 예측이 틀렸거나
-        엉뚱한 것을 본 것이므로 버린다. 이 검사가 오검출을 막는 핵심이다.
-
-        Returns:
-            채택했으면 True.
-        """
-        h, w = gray.shape[:2]
-        x1, y1 = int(max(0, px - half)), int(max(0, py - half))
-        x2, y2 = int(min(w, px + half)), int(min(h, py + half))
-        if x2 - x1 < 10 or y2 - y1 < 10:
-            return False
-
-        crop = gray[y1:y2, x1:x2]
-        scale = CONFIG['GUIDED_UPSCALE']
-        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-        corners, ids, _ = self.detector.detectMarkers(crop)
-        if ids is None:
-            return False
-
-        for corner, found_id in zip(corners, ids.flatten()):
-            if int(found_id) != marker_id:
-                continue      # 기대한 ID가 아니면 무시
-            pts = corner[0]
-            found[marker_id] = (x1 + float(pts[:, 0].mean()) / scale,
-                                y1 + float(pts[:, 1].mean()) / scale)
-            return True
-        return False
+        return self.detector.detect(frame)
 
     @staticmethod
     def _spread_ratio(points):
