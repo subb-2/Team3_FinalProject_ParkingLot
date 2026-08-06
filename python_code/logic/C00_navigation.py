@@ -55,6 +55,14 @@ CONFIG = {
         # 이미 검출에 성공한 마커의 '좌표 정확도'만 올리는 단계라
         # 검출률을 떨어뜨릴 위험이 없다. 호모그래피 오차가 줄어든다.
         "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+        # 이진화 윈도우를 촘촘히 탐색 (기본 3/23/10 → 3/33/4)
+        # 조명 불균일 환경에서 다양한 크기의 마커를 잡기 위해 필요.
+        "adaptiveThreshWinSizeMin": 3,
+        "adaptiveThreshWinSizeMax": 33,
+        "adaptiveThreshWinSizeStep": 4,
+        # 비트 판정 완화: 블러/반사로 비트가 흐릿한 마커도 허용
+        "errorCorrectionRate": 0.8,
+        "maxErroneousBitsInBorderRate": 0.5,
     },
     "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
@@ -221,7 +229,17 @@ class MarkerMapper:
             {마커ID: (cx, cy)} 형태의 딕셔너리. cx, cy는 마커 중심의 이미지 좌표.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self.detector.detectMarkers(gray)
+        # CLAHE: 조명 불균일(검은 바닥 + 가장자리 어두움) 보정
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+        corners, ids, rejected = self.detector.detectMarkers(gray)
+
+        # 디버그: rejected가 많으면 비트 해독 실패, 적으면 사각형 자체 미검출
+        n_det = 0 if ids is None else len(ids)
+        n_rej = 0 if rejected is None else len(rejected)
+        if n_det < 6:  # LOCK 기준 미달일 때만 출력 (정상 동작 시 로그 억제)
+            print(f"[DEBUG] 마커 검출={n_det}, rejected={n_rej} "
+                  f"(rejected가 많으면 비트해독 실패, 적으면 윤곽 미검출)")
 
         found = {}
         if ids is None:
