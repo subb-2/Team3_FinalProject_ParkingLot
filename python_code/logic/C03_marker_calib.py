@@ -163,6 +163,105 @@ def run_dict_sweep(frame, current_dict):
     return best_name
 
 
+def analyze_rejected(frame, dict_name):
+    """
+    ID 해독에 실패한 사각형 후보들의 크기를 분석한다.
+
+    '모양은 찾았는데 비트를 못 읽는' 상태일 때, 그 후보가 실제 마커인지
+    아니면 바닥 무늬 같은 잡음인지 구분해야 한다. 마커라면 크기가 문제고,
+    잡음이라면 마커는 아예 후보에도 못 든 것이다.
+
+    사각형이 비스듬히 보이면 한 방향으로 찌그러진다. 짧은 변이 결국
+    비트를 읽을 수 있는 해상도를 결정하므로 그쪽을 봐야 한다.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    detector = aruco.ArucoDetector(
+        aruco.getPredefinedDictionary(getattr(aruco, dict_name)),
+        build_aruco_params())
+    corners, ids, rejected = detector.detectMarkers(gray)
+
+    def sides(quad):
+        p = quad[0]
+        return [float(np.linalg.norm(p[i] - p[(i + 1) % 4])) for i in range(4)]
+
+    print("\n--- 사각형 후보 크기 분석 ---")
+    print("   (짧은 변이 비트 해독 가능 여부를 결정한다. 6칸 x 4px = 최소 24px)")
+
+    if ids is not None and len(ids):
+        print(f"\n   [검출 성공 {len(ids)}개]")
+        for quad, mid in zip(corners, ids.flatten()):
+            s = sides(quad)
+            print(f"      id{int(mid):<3d} 짧은변 {min(s):5.1f}px  긴변 {max(s):5.1f}px  "
+                  f"찌그러짐 {min(s)/max(s):.2f}")
+
+    if rejected is None or not len(rejected):
+        print("\n   [해독 실패 후보 없음]")
+        return
+
+    stats = [(min(sides(q)), max(sides(q))) for q in rejected]
+    # 마커일 법한 크기(짧은 변 10px 이상)만 추린다. 나머지는 바닥 잡음.
+    likely = sorted([s for s in stats if s[0] >= 10], reverse=True)
+
+    print(f"\n   [해독 실패 {len(rejected)}개 중 마커 크기일 법한 것 {len(likely)}개]")
+    for short, long in likely[:12]:
+        verdict = "크기 부족" if short < 24 else "크기는 충분 (초점/대비/반사 의심)"
+        print(f"      짧은변 {short:5.1f}px  긴변 {long:5.1f}px  "
+              f"찌그러짐 {short/long:.2f}   -> {verdict}")
+
+    if likely:
+        shorts = [s for s, _ in likely]
+        print(f"\n   해독 실패 후보의 짧은 변: "
+              f"최소 {min(shorts):.0f}px / 중앙값 {sorted(shorts)[len(shorts)//2]:.0f}px "
+              f"/ 최대 {max(shorts):.0f}px")
+
+
+def run_scale_sweep(frame, dict_name):
+    """
+    화면을 확대해 가며 검출 개수를 본다.
+
+    확대해도 정보량이 늘지는 않지만, ArUco는 칸마다 일정 픽셀을 샘플링하는
+    구조라 '픽셀 수가 모자라서' 실패하던 마커가 확대로 살아나는 경우가 있다.
+    확대로 개선되면 원인이 해상도/크기라는 뜻이고, 소프트웨어로 대응할 수 있다.
+    전혀 개선되지 않으면 초점이나 대비가 원인이므로 물리적으로 해결해야 한다.
+    """
+    dictionary = aruco.getPredefinedDictionary(getattr(aruco, dict_name))
+    params = build_aruco_params()
+
+    print("\n--- 확대 배율별 검출 ---")
+    print(f"{'배율':>6s}{'해상도':>14s}{'검출':>6s}{'후보':>6s}   검출된 ID")
+    print("-" * 60)
+
+    results = []
+    for scale in (1.0, 1.5, 2.0, 3.0):
+        if scale == 1.0:
+            img = frame
+        else:
+            img = cv2.resize(frame, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, ids, rejected = aruco.ArucoDetector(dictionary, params).detectMarkers(gray)
+        found = sorted(int(i) for i in ids.flatten()) if ids is not None else []
+        n_rej = len(rejected) if rejected is not None else 0
+        print(f"{scale:>5.1f}x{f'{img.shape[1]}x{img.shape[0]}':>14s}"
+              f"{len(found):>6d}{n_rej:>6d}   {found}")
+        results.append((len(found), scale))
+
+    best_n, best_scale = max(results)
+    base_n = results[0][0]
+    print()
+    if best_n > base_n:
+        print(f"[진단] {best_scale}x 확대에서 {best_n}개까지 늘어납니다 "
+              f"(원본 {base_n}개).")
+        print(f"        해상도/크기가 원인입니다. 마커를 크게 인쇄하거나")
+        print(f"        카메라를 가까이/정면으로 두면 해결됩니다.")
+        print(f"        임시로는 C00에서 확대 후 검출하도록 바꿀 수도 있습니다.")
+    else:
+        print(f"[진단] 확대해도 늘지 않습니다 ({base_n}개 그대로).")
+        print(f"        픽셀 수가 아니라 '화질'이 문제입니다.")
+        print(f"        초점이 안 맞거나, 반사/역광으로 대비가 무너졌거나,")
+        print(f"        인쇄가 흐린 경우입니다. marker_frame.jpg를 확대해 보세요.")
+
+
 def save_debug_image(frame, dict_name, path="marker_debug.jpg"):
     """
     검출 결과를 그린 이미지를 저장한다.
@@ -421,6 +520,8 @@ if __name__ == '__main__':
         if sweep:
             run_sweep(image, C00_CONFIG['ARUCO_DICT'])
             best = run_dict_sweep(image, C00_CONFIG['ARUCO_DICT'])
+            analyze_rejected(image, best)
+            run_scale_sweep(image, best)
             save_debug_image(image, best)
             sys.exit(0)
         markers = collect_markers(image)
@@ -447,6 +548,8 @@ if __name__ == '__main__':
         report_marker_size(count, side)
         run_sweep(frame, C00_CONFIG['ARUCO_DICT'])
         best = run_dict_sweep(frame, C00_CONFIG['ARUCO_DICT'])
+        analyze_rejected(frame, best)
+        run_scale_sweep(frame, best)
         cv2.imwrite("marker_frame.jpg", frame)
         print(f"[원본 프레임] {os.path.abspath('marker_frame.jpg')}")
         save_debug_image(frame, best)
