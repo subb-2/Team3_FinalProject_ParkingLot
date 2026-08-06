@@ -80,6 +80,46 @@ CONFIG = {
     "MIN_MARKER_SPREAD": 0.02,      # 마커가 한 줄에 몰려 있으면 거부 (0에 가까울수록 일직선)
     "RANSAC_THRESH_CM": 5.0,        # RANSAC 이상치 판정 임계값 (실좌표 cm 기준)
 
+    # ---------------------------------------------------------------------
+    # 호모그래피 캐시
+    #
+    # 카메라가 고정 설치되어 있으면 호모그래피는 '상수'다. 그런데 지금까지는
+    # 실행할 때마다 마커 6개를 새로 검출해야 했고, 검출 하나가 흔들리면
+    # 전체가 NOT READY로 멈췄다.
+    #
+    # 한 번 품질 기준을 만족하면 파일로 저장하고, 다음 실행부터는 그것을
+    # 그대로 불러 쓴다. 마커가 하나도 안 보여도 좌표 변환이 된다.
+    #
+    # 카메라를 옮겼으면 반드시 다시 잡아야 한다.
+    #   - C_main 실행 중이면 /recalibrate 호출
+    #   - 또는 캐시 파일을 지우고 재실행
+    # ---------------------------------------------------------------------
+    "USE_HOMOGRAPHY_CACHE": True,
+    "HOMOGRAPHY_CACHE": os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '..', 'config', 'homography.npz')
+    ),
+
+    # ---------------------------------------------------------------------
+    # 예측 기반 보강 검출 (Guided detection)
+    #
+    # 기둥의 실좌표는 이미 알고 있다. 그래서 마커 몇 개만 확실히 잡히면
+    # 나머지 기둥이 화면 어디에 있어야 하는지 계산할 수 있다.
+    # 그 좁은 영역만 확대해서 다시 찾으면, 전체 화면에서 찾을 때보다
+    # 훨씬 잘 잡힌다. 위치를 알고 찾는 것이라 오검출 위험도 낮다.
+    #
+    # 2단계로 동작한다.
+    #   1) 예상 위치 주변을 잘라 확대한 뒤 ArUco 재검출.
+    #      기대한 ID가 나올 때만 채택한다. (ID가 다르면 버림)
+    #   2) 그래도 못 읽으면, ID 해독에 실패한 사각형(rejected) 중
+    #      예상 위치에 딱 있는 것을 그 기둥으로 채택한다.
+    #      비트를 못 읽어도 '거기 있는 사각형은 그 기둥'이라는 배치 정보를 쓰는 것.
+    # ---------------------------------------------------------------------
+    "GUIDED_DETECTION": True,
+    "GUIDED_UPSCALE": 4.0,          # 잘라낸 영역을 몇 배로 확대할지
+    "GUIDED_WINDOW_SCALE": 3.0,     # 마커 크기의 몇 배 넓이로 자를지
+    "GUIDED_ADOPT_QUADS": True,     # 2단계(해독 실패 사각형 채택) 사용 여부
+    "GUIDED_MATCH_RATIO": 0.7,      # 예상 위치에서 마커 크기의 몇 배 이내여야 같은 것으로 볼지
+
     # 내비게이션 판정 기준
     # 거리 기준은 주차장 규모에 맞춰야 한다. 현재 목업은 40 x 140cm이고
     # 통로 폭이 10cm, 자리 간격이 35cm이므로 값들이 작다.
@@ -218,6 +258,69 @@ class MarkerMapper:
         print(f"[INFO] ArUco 마커 검출기 초기화 완료. ({aruco_dict_name}, "
               f"등록된 마커 {len(self.marker_world_pos)}개)")
 
+        # 카메라가 고정이면 호모그래피는 상수다. 저장해 둔 것이 있으면 불러 쓴다.
+        if CONFIG['USE_HOMOGRAPHY_CACHE']:
+            self.load_homography()
+
+    # --- 호모그래피 저장/복원 -----------------------------------------------
+
+    def save_homography(self, path=None):
+        """
+        확정된 호모그래피를 파일로 저장한다.
+
+        카메라가 고정 설치되어 있으면 이 행렬은 변하지 않으므로, 다음 실행부터는
+        마커를 다시 찾지 않아도 된다. 마커가 하나도 안 보여도 좌표 변환이 된다.
+        """
+        if self.H is None:
+            return False
+        path = CONFIG['HOMOGRAPHY_CACHE'] if path is None else path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            np.savez(
+                path,
+                H=self.H,
+                markers=self.calibrated_with,
+                error=self.reproj_error,
+                # 배치가 바뀌면 옛 행렬을 쓰면 안 되므로 함께 남긴다
+                marker_ids=np.array(sorted(self.marker_world_pos), dtype=np.int32),
+            )
+            print(f"[INFO] 호모그래피를 저장했습니다. {path}")
+            print(f"       다음 실행부터는 마커가 안 보여도 이 값을 씁니다. "
+                  f"카메라를 옮기면 /recalibrate 하거나 이 파일을 지우세요.")
+            return True
+        except OSError as e:
+            print(f"[경고] 호모그래피 저장 실패: {e}")
+            return False
+
+    def load_homography(self, path=None):
+        """저장해 둔 호모그래피를 불러온다. 배치가 바뀌었으면 무시한다."""
+        path = CONFIG['HOMOGRAPHY_CACHE'] if path is None else path
+        if not os.path.exists(path):
+            return False
+        try:
+            data = np.load(path)
+            saved_ids = set(int(i) for i in data['marker_ids'])
+        except Exception as e:
+            print(f"[경고] 호모그래피 파일을 읽을 수 없습니다: {e}")
+            return False
+
+        if saved_ids != set(self.marker_world_pos):
+            print(f"[경고] 저장된 호모그래피는 다른 마커 배치로 만든 것입니다. 무시합니다.")
+            print(f"       저장됨: {sorted(saved_ids)}")
+            print(f"       현재  : {sorted(self.marker_world_pos)}")
+            return False
+
+        self.H = data['H']
+        self.H_inv = np.linalg.inv(self.H)
+        self.calibrated_with = int(data['markers'])
+        self.reproj_error = float(data['error'])
+        self.locked = bool(self.lock_homography)
+
+        print(f"[INFO] 저장된 호모그래피를 불러왔습니다. "
+              f"(마커 {self.calibrated_with}개, 오차 {self.reproj_error:.2f}cm)")
+        print(f"       카메라를 옮겼다면 /recalibrate로 다시 잡으세요.")
+        return True
+
     def detect_markers(self, frame):
         """
         프레임에서 ArUco 마커를 검출.
@@ -242,14 +345,155 @@ class MarkerMapper:
                   f"(rejected가 많으면 비트해독 실패, 적으면 윤곽 미검출)")
 
         found = {}
-        if ids is None:
-            return found
+        sizes = []
+        if ids is not None:
+            for corner, marker_id in zip(corners, ids.flatten()):
+                pts = corner[0]
+                found[int(marker_id)] = (float(pts[:, 0].mean()), float(pts[:, 1].mean()))
+                sizes.append(float(np.mean(
+                    [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)])))
 
-        for corner, marker_id in zip(corners, ids.flatten()):
-            center = corner[0].mean(axis=0)
-            found[int(marker_id)] = (float(center[0]), float(center[1]))
+        # 예측 기반 보강: 이미 아는 배치를 이용해 못 찾은 기둥을 다시 찾는다
+        if CONFIG['GUIDED_DETECTION']:
+            found = self._guided_detect(gray, found, rejected, sizes)
 
         return found
+
+    # --- 예측 기반 보강 검출 -------------------------------------------------
+
+    def _homography_for_prediction(self, found):
+        """
+        '실좌표 -> 이미지'로 예측할 때 쓸 행렬을 구한다.
+
+        이미 확정된 호모그래피가 있으면 그것을 쓰고, 없으면 이번 프레임에
+        잡힌 마커만으로 임시로 하나 만든다. 임시 해는 부정확할 수 있지만
+        '어디쯤을 뒤져볼까'를 정하는 데는 충분하다.
+        """
+        if self.H_inv is not None:
+            return self.H_inv
+
+        img_pts, world_pts = [], []
+        for marker_id, img_pt in found.items():
+            world_pt = self.marker_world_pos.get(marker_id)
+            if world_pt is not None:
+                img_pts.append(img_pt)
+                world_pts.append(world_pt)
+
+        if len(img_pts) < 4:
+            return None
+
+        H, _ = cv2.findHomography(np.array(world_pts, np.float32),
+                                  np.array(img_pts, np.float32),
+                                  cv2.RANSAC if len(img_pts) > 4 else 0, 5.0)
+        return H
+
+    def _guided_detect(self, gray, found, rejected, sizes):
+        """
+        아직 못 찾은 기둥의 예상 위치를 계산해 그 부근만 다시 검출한다.
+
+        Args:
+            gray:     전처리된 흑백 프레임
+            found:    지금까지 찾은 {마커ID: 중심좌표}
+            rejected: ID 해독에 실패한 사각형 후보들
+            sizes:    이미 찾은 마커들의 한 변 픽셀 (창 크기 결정용)
+
+        Returns:
+            보강된 {마커ID: 중심좌표}
+        """
+        missing = [m for m in self.marker_world_pos if m not in found]
+        if not missing:
+            return found
+
+        world_to_img = self._homography_for_prediction(found)
+        if world_to_img is None:
+            return found      # 예측할 근거가 없다
+
+        # 창 크기 기준이 될 마커 한 변. 아직 아무것도 못 찾았으면 보수적으로 가정.
+        marker_px = float(np.median(sizes)) if sizes else 40.0
+        half = max(30.0, marker_px * CONFIG['GUIDED_WINDOW_SCALE'] / 2.0)
+
+        # 해독 실패 사각형들의 중심과 크기를 미리 계산 (2단계용)
+        quads = []
+        if rejected is not None:
+            for q in rejected:
+                pts = q[0]
+                side = float(np.mean(
+                    [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]))
+                quads.append(((float(pts[:, 0].mean()), float(pts[:, 1].mean())), side))
+
+        h, w = gray.shape[:2]
+        recovered_crop, recovered_quad = [], []
+
+        for marker_id in missing:
+            wx, wy = self.marker_world_pos[marker_id]
+            pred = cv2.perspectiveTransform(
+                np.array([[[float(wx), float(wy)]]], np.float32), world_to_img)[0][0]
+            px, py = float(pred[0]), float(pred[1])
+            if not (0 <= px < w and 0 <= py < h):
+                continue      # 화면 밖에 있어야 할 기둥
+
+            # 1단계: 예상 위치 주변을 잘라 확대한 뒤 재검출
+            if self._detect_in_window(gray, marker_id, px, py, half, found):
+                recovered_crop.append(marker_id)
+                continue
+
+            # 2단계: 해독 실패 사각형 중 예상 위치에 있는 것을 채택
+            if CONFIG['GUIDED_ADOPT_QUADS']:
+                limit = marker_px * CONFIG['GUIDED_MATCH_RATIO']
+                near = [(math.hypot(c[0] - px, c[1] - py), c, s)
+                        for c, s in quads
+                        if math.hypot(c[0] - px, c[1] - py) <= limit]
+                # 후보가 딱 하나일 때만 채택한다. 둘 이상이면 어느 것인지 알 수 없다.
+                if len(near) == 1:
+                    _, center, side = near[0]
+                    # 크기가 다른 마커들과 비슷해야 한다 (바닥 무늬 배제)
+                    if 0.5 * marker_px <= side <= 2.0 * marker_px:
+                        found[marker_id] = center
+                        recovered_quad.append(marker_id)
+
+        if recovered_crop or recovered_quad:
+            parts = []
+            if recovered_crop:
+                parts.append(f"확대 재검출 {sorted(recovered_crop)}")
+            if recovered_quad:
+                parts.append(f"위치로 채택 {sorted(recovered_quad)}")
+            self._warn_once("guided",
+                            f"[INFO] 예측 기반 보강 검출 동작 중: {' / '.join(parts)}\n"
+                            f"        (이 로그는 처음 한 번만 출력됩니다)")
+        return found
+
+    def _detect_in_window(self, gray, marker_id, px, py, half, found):
+        """
+        예상 위치 주변을 잘라 확대한 뒤 ArUco를 다시 돌린다.
+
+        기대한 ID가 나올 때만 채택한다. 다른 ID가 나오면 예측이 틀렸거나
+        엉뚱한 것을 본 것이므로 버린다. 이 검사가 오검출을 막는 핵심이다.
+
+        Returns:
+            채택했으면 True.
+        """
+        h, w = gray.shape[:2]
+        x1, y1 = int(max(0, px - half)), int(max(0, py - half))
+        x2, y2 = int(min(w, px + half)), int(min(h, py + half))
+        if x2 - x1 < 10 or y2 - y1 < 10:
+            return False
+
+        crop = gray[y1:y2, x1:x2]
+        scale = CONFIG['GUIDED_UPSCALE']
+        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        corners, ids, _ = self.detector.detectMarkers(crop)
+        if ids is None:
+            return False
+
+        for corner, found_id in zip(corners, ids.flatten()):
+            if int(found_id) != marker_id:
+                continue      # 기대한 ID가 아니면 무시
+            pts = corner[0]
+            found[marker_id] = (x1 + float(pts[:, 0].mean()) / scale,
+                                y1 + float(pts[:, 1].mean()) / scale)
+            return True
+        return False
 
     @staticmethod
     def _spread_ratio(points):
@@ -375,6 +619,9 @@ class MarkerMapper:
         if self.lock_homography and n >= self.lock_markers:
             self.locked = True
             print(f"[INFO] 호모그래피 확정. (마커 {n}개, 평균 오차 {error:.2f}cm)")
+            # 카메라가 고정이므로 다음 실행에서 재사용할 수 있게 저장해 둔다
+            if CONFIG['USE_HOMOGRAPHY_CACHE']:
+                self.save_homography()
         else:
             need = self.lock_markers if self.lock_homography else n
             print(f"[INFO] 호모그래피 갱신. (마커 {n}개, 평균 오차 {error:.2f}cm) "
@@ -424,14 +671,29 @@ class MarkerMapper:
         dst = cv2.perspectiveTransform(src, self.H_inv)
         return int(dst[0][0][0]), int(dst[0][0][1])
 
-    def reset(self):
-        """호모그래피를 초기화. (카메라를 다시 설치했을 때 사용)"""
+    def reset(self, clear_cache=True):
+        """
+        호모그래피를 초기화. (카메라를 다시 설치했을 때 사용)
+
+        저장된 캐시 파일도 함께 지운다. 지우지 않으면 다음 실행에서 옛 행렬을
+        다시 불러와 카메라를 옮긴 것이 반영되지 않는다.
+        """
         self.H = None
         self.H_inv = None
         self.calibrated_with = 0
         self.reproj_error = float('inf')
         self.locked = False
         self._warned.clear()
+
+        if clear_cache:
+            path = CONFIG['HOMOGRAPHY_CACHE']
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    print(f"[INFO] 저장된 호모그래피를 삭제했습니다. {path}")
+                except OSError as e:
+                    print(f"[경고] 캐시 파일을 지우지 못했습니다: {e}")
+
         print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
 
     def draw_markers(self, frame, markers):

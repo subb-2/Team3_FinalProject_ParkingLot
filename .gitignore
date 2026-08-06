@@ -47,3 +47,8 @@ yolo_dataset/
 __pycache__/
 *.pyc
 *.pyo
+
+# 런타임 생성물 (카메라 설치마다 달라짐)
+python_code/config/homography.npz
+python_code/marker_frame.jpg
+python_code/marker_debug.jpg
