@@ -49,6 +49,10 @@ CONFIG = {
     "MIN_HITS_FOR_ASSIGN": 30,      # 이 프레임 수 이상 '연속' 추적되어야 차량번호를 부여 (30fps 기준 1초)
     "TRAJECTORY_MAXLEN": 64,        # 궤적(Trajectory) 저장 최대 길이
 
+    # 지나온 경로를 화면에 선으로 그릴지. 궤적 자체는 진행 방향 계산에 계속
+    # 쓰이므로 저장은 유지하고, 화면 표시만 끈다.
+    "DRAW_TRAJECTORY": False,
+
     # =====================================================================
     # 단일 활성 차량(Single Active Vehicle) 모드
     #
@@ -774,12 +778,34 @@ class CarMOT:
         last = points[-1]
         return math.hypot(last[0] - oldest[0], last[1] - oldest[1]), threshold
 
+    @staticmethod
+    def _distance_to_target(world, target):
+        """
+        차량 위치에서 목표까지의 거리(cm).
+
+        target이 (x, y, 반폭, 반높이)면 '사각형까지의 거리'를 잰다.
+        자리 안에 들어와 있으면 0이 되고, 밖에 있으면 가장 가까운 변까지의
+        거리가 나온다. 이렇게 해야 자리 크기가 판정에 반영된다.
+
+        target이 (x, y)면 중심까지의 직선거리를 잰다. (예전 방식)
+        """
+        if len(target) >= 4:
+            dx = max(abs(world[0] - target[0]) - target[2], 0.0)
+            dy = max(abs(world[1] - target[1]) - target[3], 0.0)
+            return math.hypot(dx, dy)
+        return math.hypot(world[0] - target[0], world[1] - target[1])
+
     def _check_parked(self, track_id, now, target_of):
         """
         활성 차량이 목표 구역에 도착해 주차를 마쳤는지 판정한다.
 
-        목표 구역 중심에서 ARRIVAL_RADIUS_CM 이내에 ARRIVAL_HOLD_SEC 이상
-        머무르면 주차 완료로 보고 활성 차량을 해제한다. -> 다음 차 차례
+        목표 구역까지의 거리가 ARRIVAL_RADIUS_CM 이내인 상태로
+        ARRIVAL_HOLD_SEC 이상 머무르면 주차 완료로 보고 활성 차량을 해제한다.
+
+        target_of가 (x, y, 반폭, 반높이)를 주면 '자리 사각형까지의 거리'로 잰다.
+        중심까지의 거리로 재면 자리 크기를 무시하게 되어, 자리에 제대로 세워도
+        중심에서 그만큼 떨어져 있으면 도착으로 안 잡힌다.
+        (x, y)만 주면 예전처럼 중심까지의 거리로 잰다.
         """
         # 정지 감시 (안전장치용). 도착 판정과 무관하게 항상 갱신한다.
         moved, threshold = self._recent_movement(track_id, now)
@@ -796,7 +822,7 @@ class CarMOT:
             self._check_stuck(now)
             return
 
-        distance = math.hypot(world[0] - target[0], world[1] - target[1])
+        distance = self._distance_to_target(world, target)
         if distance > self.single['ARRIVAL_RADIUS_CM']:
             self._arrived_since = None      # 반경을 벗어났으면 처음부터 다시
             self._check_stuck(now)
@@ -1098,18 +1124,22 @@ class CarMOT:
             stats["uncovered"] = max(0, switches - self.rebind_count)
         return stats
 
-    def draw_tracks(self, frame, tracks, draw_trajectory=True):
+    def draw_tracks(self, frame, tracks, draw_trajectory=None):
         """
         추적 결과를 프레임에 Bounding Box, Track ID, 차량번호로 시각화.
 
         Args:
             frame:           OpenCV BGR 이미지 (numpy array, 원본이 수정됨)
             tracks:          update() 메서드의 반환 결과 리스트
-            draw_trajectory: 이동 궤적 선 표시 여부
+            draw_trajectory: 이동 궤적 선 표시 여부.
+                             None이면 CONFIG['DRAW_TRAJECTORY']를 따른다.
 
         Returns:
             시각화가 적용된 프레임 (입력 frame과 동일 객체)
         """
+        if draw_trajectory is None:
+            draw_trajectory = CONFIG['DRAW_TRAJECTORY']
+
         for trk in tracks:
             track_id = trk["track_id"]
             car_id = trk["car_id"]

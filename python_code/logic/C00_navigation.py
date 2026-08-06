@@ -827,6 +827,34 @@ class ParkingNavigator:
         spot_id = self.targets.get(car_id)
         return self.spot_world_pos.get(spot_id) if spot_id else None
 
+    def get_target_rect(self, car_id):
+        """
+        차량의 목표 주차 구역을 '사각형'으로 반환. (중심 + 반폭/반높이)
+
+        B02의 주차 완료 판정에 쓴다. 중심까지의 거리로만 판정하면 자리 크기를
+        무시하게 된다. 자리는 10 x 17.5cm(대형은 10 x 35cm)인데 중심에서
+        8cm 반경을 재면, 자리 입구에 제대로 세워도 도착으로 안 잡힌다.
+        사각형까지의 거리로 재면 '자리 안에 들어왔는가'가 자연스럽게 판정된다.
+
+        Args:
+            car_id: 차량 번호 4자리 문자열
+
+        Returns:
+            (x_cm, y_cm, 반폭_cm, 반높이_cm). 목표가 없으면 None.
+        """
+        spot_id = self.targets.get(car_id)
+        if not spot_id:
+            return None
+        center = self.spot_world_pos.get(spot_id)
+        if center is None:
+            return None
+
+        # 대형 구역처럼 여러 칸을 차지하는 자리는 그만큼 길다
+        cells = get_spot_cell_count(spot_id) or 1
+        half_w = C02_CONFIG['CELL_W_CM'] / 2.0
+        half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0
+        return (center[0], center[1], half_w, half_h)
+
     def sync_targets_from_parking_manager(self):
         """
         A01_parking_manager가 관리하는 입차 정보(cars_info)를 읽어

@@ -224,7 +224,7 @@ class ParkingNavigationPipeline:
         tracks = self.mot.update(
             detections,
             to_world=mapper.image_to_world if mapper.is_ready() else None,
-            target_of=self.navigator.get_target_world,
+            target_of=self.navigator.get_target_rect,
             parked_of=get_parked_world_positions
         )
         t_track = time.perf_counter()
