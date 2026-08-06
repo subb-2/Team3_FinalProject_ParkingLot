@@ -64,6 +64,12 @@ CONFIG = {
     # 내비게이션 연동 설정
     "AUTO_ASSIGN_SPOT": True,       # 차량번호 등록 시 A01_parking_manager로 빈자리를 자동 배정
     "DRAW_MARKERS": True,           # 검출된 ArUco 마커를 화면에 표시
+
+    # 등록된 배치(격자/기둥/자리/입출구)를 화면에 역투영해 겹쳐 그린다.
+    # 수동 보정이 제대로 됐는지 눈으로 확인하는 용도.
+    # 그려진 격자가 실제 매트 선과 겹쳐 보이면 좌표계가 맞은 것이다.
+    # 확인이 끝나면 꺼도 된다. (/overlay 로 실행 중에도 켜고 끌 수 있다)
+    "DRAW_LAYOUT_OVERLAY": True,
     "DRAW_NAVIGATION": True,        # 목표 지점 안내선을 화면에 표시
 }
 
@@ -229,6 +235,9 @@ class ParkingNavigationPipeline:
         t_nav = time.perf_counter()
 
         # 4) 시각화
+        #    배치 오버레이를 가장 먼저 그린다. 차량 박스나 경로선에 가리지 않게.
+        if CONFIG['DRAW_LAYOUT_OVERLAY']:
+            self.navigator.mapper.draw_layout_overlay(frame)
         if CONFIG['DRAW_MARKERS']:
             self.navigator.mapper.draw_markers(frame, self.navigator.latest_markers)
         self.mot.draw_tracks(frame, tracks)
@@ -566,7 +575,8 @@ if __name__ == '__main__':
                 <img src="/video_feed" width="{CONFIG['CAM_WIDTH']}" height="{CONFIG['CAM_HEIGHT']}">
                 <p>차량번호 수동 등록: <code>/enqueue/1234</code> | 현재 상태: <code>/status</code></p>
                 <p>호모그래피 재계산: <code>/recalibrate</code>
-                   | 구역별 빈자리: <code>/availability</code></p>
+                   | 구역별 빈자리: <code>/availability</code>
+                   | 배치 오버레이: <code>/overlay</code></p>
                 <p style="color:#ffd24d">마커가 잘 안 잡히면
                    <a href="/calibrate" style="color:#ffd24d">기둥 수동 보정</a>
                    에서 기둥을 직접 찍어 좌표계를 확정하세요. (카메라 고정 시 1회만)</p>
@@ -612,6 +622,18 @@ if __name__ == '__main__':
     def status():
         """현재 추적/내비게이션 상태와 FIFO 대기열을 조회."""
         return build_status(pipeline)
+
+    @app.route('/overlay')
+    @app.route('/overlay/<state>')
+    def overlay(state=None):
+        """배치 역투영 오버레이를 켜고 끈다. (/overlay/on, /overlay/off, /overlay)"""
+        if state == 'on':
+            CONFIG['DRAW_LAYOUT_OVERLAY'] = True
+        elif state == 'off':
+            CONFIG['DRAW_LAYOUT_OVERLAY'] = False
+        else:
+            CONFIG['DRAW_LAYOUT_OVERLAY'] = not CONFIG['DRAW_LAYOUT_OVERLAY']
+        return f"배치 오버레이: {'ON' if CONFIG['DRAW_LAYOUT_OVERLAY'] else 'OFF'}"
 
     @app.route('/recalibrate')
     def recalibrate():

@@ -78,9 +78,33 @@ from logic.C02_lot_layout import (
     SPOT_WORLD_POS,       # {구역ID: (x_cm, y_cm)}  기둥 사이 중점
     GATE1_WORLD_POS,      # 입구 (경로 안내 시작점)
     GATE2_WORLD_POS,      # 출구
+    cell_to_world,        # 격자 칸 -> 실좌표
+    CONFIG as C02_CONFIG, # 칸 크기(CELL_W_CM / CELL_H_CM)
+)
+# 역투영 오버레이(등록된 배치를 화면에 겹쳐 그리기)에 필요한 격자 정보
+from data.map_data import (
+    grid_map, spot_map, spot_type, coord_to_spot,
+    SPOT_CELLS, SPOT_TYPE_NAME, SPOT1, SPOT2, SPOT3, SPOT4,
+    PILL, GATE1_POS, GATE2_POS, get_rows, get_cols, get_spot_cell_count,
 )
 
 # 시각화 색상 (BGR)
+# 역투영 오버레이 색상 (BGR)
+# 등록된 격자를 화면에 겹쳐 그려 실물과 맞는지 눈으로 확인하기 위한 것.
+COLOR_OVERLAY_EDGE  = (90, 90, 90)      # 도로 격자선 - 어두운 회색
+COLOR_OVERLAY_BOUND = (255, 255, 255)   # 주차장 외곽 - 흰색
+COLOR_OVERLAY_PILL  = (0, 140, 255)     # 기둥       - 주황
+COLOR_OVERLAY_GATE1 = (0, 255, 0)       # 입구       - 초록
+COLOR_OVERLAY_GATE2 = (0, 128, 255)     # 출구       - 주황빨강
+
+# 주차 구역 종류별 색 (D00_ui_navi와 같은 규칙)
+COLOR_OVERLAY_SPOT = {
+    SPOT1: (130, 130, 130),   # 일반   - 회색
+    SPOT2: (255, 150, 0),     # 장애인 - 파랑
+    SPOT3: (60, 200, 255),    # 대형   - 노랑
+    SPOT4: (120, 220, 120),   # 전기차 - 초록
+}
+
 COLOR_MARKER = (255, 200, 0)    # 마커       - 하늘색
 COLOR_PATH   = (0, 255, 255)    # 안내 경로  - 노랑
 COLOR_TARGET = (255, 0, 255)    # 목표 지점  - 자홍
@@ -501,6 +525,126 @@ class MarkerMapper:
                     print(f"[경고] 캐시 파일을 지우지 못했습니다: {e}")
 
         print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
+
+    # --- 역투영 오버레이 -----------------------------------------------------
+
+    def _cells_to_image(self, cells):
+        """
+        격자 칸들을 감싸는 사각형을 이미지 좌표 폴리곤으로 바꾼다.
+
+        칸 하나든 여러 칸이든(대형 구역은 2칸) 하나의 사각형으로 묶어 그린다.
+
+        Args:
+            cells: [(row, col), ...] 같은 열에 붙어 있는 칸들
+
+        Returns:
+            (4, 2) int32 폴리곤. 변환할 수 없으면 None.
+        """
+        if self.H_inv is None or not cells:
+            return None
+
+        hw = C02_CONFIG['CELL_W_CM'] / 2.0
+        hh = C02_CONFIG['CELL_H_CM'] / 2.0
+        xs, ys = [], []
+        for row, col in cells:
+            cx, cy = cell_to_world((row, col))
+            xs += [cx - hw, cx + hw]
+            ys += [cy - hh, cy + hh]
+
+        corners = [(min(xs), min(ys)), (max(xs), min(ys)),
+                   (max(xs), max(ys)), (min(xs), max(ys))]
+        pts = cv2.perspectiveTransform(
+            np.array([corners], dtype=np.float32), self.H_inv)[0]
+        return pts.astype(np.int32)
+
+    def draw_layout_overlay(self, frame, show_grid=True, show_spots=True,
+                            show_pillars=True, show_gates=True, show_labels=True):
+        """
+        등록된 배치(격자/기둥/자리/입출구)를 현재 호모그래피로 화면에 역투영한다.
+
+        보정이 맞았는지 눈으로 확인하기 위한 것이다. 그려진 격자가 실제 매트의
+        선과 겹쳐 보이면 좌표계가 제대로 잡힌 것이고, 어긋나 보이면 잘못됐다.
+
+        어긋나는 모양으로 원인을 좁힐 수 있다.
+          - 전체가 한쪽으로 밀림      : 기둥 하나를 잘못 찍었다
+          - 전체가 늘어나거나 줄어듦  : C02의 CELL_W_CM / CELL_H_CM이 실제 치수와 다르다
+          - 사다리꼴로 찌그러짐       : 기둥 순서를 잘못 찍었다 (좌우/상하 뒤바뀜)
+
+        Args:
+            frame:        그릴 대상 프레임 (원본이 수정됨)
+            show_grid:    도로 격자선과 주차장 외곽
+            show_spots:   주차 구역 (종류별 색)
+            show_pillars: 기둥
+            show_gates:   입출구
+            show_labels:  구역 ID 등 글자
+
+        Returns:
+            frame (입력과 동일 객체)
+        """
+        if self.H_inv is None:
+            return frame
+
+        rows, cols = get_rows(), get_cols()
+
+        # 1) 도로 격자선. 배치 전체가 어떻게 투영되는지 한눈에 보여준다.
+        if show_grid:
+            for row in range(rows):
+                for col in range(cols):
+                    poly = self._cells_to_image([(row, col)])
+                    if poly is not None:
+                        cv2.polylines(frame, [poly], True, COLOR_OVERLAY_EDGE, 1, cv2.LINE_AA)
+
+            # 주차장 외곽은 굵게. 매트 가장자리와 맞는지 보기 위한 기준선.
+            outline = self._cells_to_image(
+                [(0, 0), (0, cols - 1), (rows - 1, 0), (rows - 1, cols - 1)])
+            if outline is not None:
+                cv2.polylines(frame, [outline], True, COLOR_OVERLAY_BOUND, 2, cv2.LINE_AA)
+
+        # 2) 주차 구역. 종류별로 색을 나눠 그린다. (대형은 2칸이 한 자리)
+        if show_spots:
+            for spot_id, cells in spot_map.items():
+                poly = self._cells_to_image(cells)
+                if poly is None:
+                    continue
+                color = COLOR_OVERLAY_SPOT.get(spot_type.get(spot_id), (200, 200, 200))
+                cv2.polylines(frame, [poly], True, color, 2, cv2.LINE_AA)
+                if show_labels:
+                    cx = int(poly[:, 0].mean())
+                    cy = int(poly[:, 1].mean())
+                    cv2.putText(frame, spot_id, (cx - 16, cy + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+        # 3) 기둥. 실제 기둥 윗면과 겹쳐야 한다. 여기가 어긋나면 보정이 틀린 것이다.
+        if show_pillars:
+            for marker_id, (wx, wy) in self.marker_world_pos.items():
+                pt = cv2.perspectiveTransform(
+                    np.array([[[float(wx), float(wy)]]], np.float32), self.H_inv)[0][0]
+                cx, cy = int(pt[0]), int(pt[1])
+                cv2.drawMarker(frame, (cx, cy), COLOR_OVERLAY_PILL,
+                               cv2.MARKER_CROSS, 16, 2)
+                if show_labels:
+                    cv2.putText(frame, str(marker_id), (cx + 9, cy - 9),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                COLOR_OVERLAY_PILL, 2, cv2.LINE_AA)
+
+        # 4) 입출구
+        if show_gates:
+            for pos, label, color in (
+                (GATE1_POS, "IN", COLOR_OVERLAY_GATE1),
+                (GATE2_POS, "OUT", COLOR_OVERLAY_GATE2),
+            ):
+                if pos is None:
+                    continue
+                poly = self._cells_to_image([pos])
+                if poly is None:
+                    continue
+                cv2.polylines(frame, [poly], True, color, 2, cv2.LINE_AA)
+                if show_labels:
+                    cv2.putText(frame, label,
+                                (int(poly[:, 0].mean()) - 14, int(poly[:, 1].mean()) + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+
+        return frame
 
     def draw_markers(self, frame, markers):
         """
