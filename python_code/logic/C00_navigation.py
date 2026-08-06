@@ -205,13 +205,18 @@ class MarkerMapper:
         path = CONFIG['HOMOGRAPHY_CACHE'] if path is None else path
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            ids = sorted(self.marker_world_pos)
             np.savez(
                 path,
                 H=self.H,
                 markers=self.calibrated_with,
                 error=self.reproj_error,
-                # 배치가 바뀌면 옛 행렬을 쓰면 안 되므로 함께 남긴다
-                marker_ids=np.array(sorted(self.marker_world_pos), dtype=np.int32),
+                # 배치가 바뀌면 옛 행렬을 쓰면 안 되므로 함께 남긴다.
+                # ID만으로는 부족하다. 격자 열 배분을 바꾸면 ID는 그대로인데
+                # 실좌표만 달라지므로, 좌표까지 저장해 두고 대조해야 한다.
+                marker_ids=np.array(ids, dtype=np.int32),
+                marker_world=np.array([self.marker_world_pos[i] for i in ids],
+                                      dtype=np.float64),
             )
             print(f"[INFO] 호모그래피를 저장했습니다. {path}")
             print(f"       다음 실행부터는 마커가 안 보여도 이 값을 씁니다. "
@@ -300,6 +305,25 @@ class MarkerMapper:
             print(f"[경고] 저장된 호모그래피는 다른 마커 배치로 만든 것입니다. 무시합니다.")
             print(f"       저장됨: {sorted(saved_ids)}")
             print(f"       현재  : {sorted(self.marker_world_pos)}")
+            return False
+
+        # 기둥의 실좌표가 바뀌었는지 확인한다.
+        # 격자 열 배분을 고치면 마커 ID는 그대로인데 실좌표만 달라진다.
+        # 이걸 안 보면 옛 행렬을 그대로 불러와 좌표가 통째로 어긋난다.
+        saved_world = data.get('marker_world') if hasattr(data, 'get') else None
+        if saved_world is None and 'marker_world' in getattr(data, 'files', []):
+            saved_world = data['marker_world']
+        ids = sorted(self.marker_world_pos)
+        current_world = np.array([self.marker_world_pos[i] for i in ids], dtype=np.float64)
+
+        if saved_world is None:
+            print("[경고] 저장된 호모그래피에 기둥 실좌표가 없습니다. (구버전 파일)")
+            print("       격자가 그때와 같은지 확인할 수 없으므로 무시합니다. 다시 보정하세요.")
+            return False
+        if not np.allclose(np.asarray(saved_world, dtype=np.float64), current_world, atol=0.1):
+            print("[경고] 저장된 호모그래피는 지금과 다른 격자 배치로 만든 것입니다. 무시합니다.")
+            print("       (grid_map의 열 배분이나 CELL_W_CM / CELL_H_CM이 바뀌었습니다)")
+            print("       /calibrate 에서 다시 잡으세요.")
             return False
 
         self.H = data['H']

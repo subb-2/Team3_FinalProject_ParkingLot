@@ -45,7 +45,7 @@ SPOT_TYPE_NAME = {
 # 2칸으로 그려져 있지만 실제로는 '1자리'다.
 # 이 표에 따라 같은 열에서 연속된 같은 종류 칸들을 자리 하나로 묶는다.
 #
-# 예) col 11의 row 1, 2가 모두 SPOT3 -> 두 칸을 묶어 대형 1자리
+# 예) col 12의 row 1, 2가 모두 SPOT3 -> 두 칸을 묶어 대형 1자리
 #     col 0의 row 1, 2가 모두 SPOT1  -> span이 1이므로 각각 별개 자리
 #
 # 종류를 추가하면 여기에도 넣을 것. 없으면 1로 취급한다.
@@ -57,10 +57,10 @@ SPOT_CELL_SPAN = {
 }
 
 
-# 주차장 그리드 맵 (9행 x 12열)
+# 주차장 그리드 맵 (9행 x 13열)
 # 구조:
-#   - 바깥 양쪽 열(col 0 = 왼쪽, col 11 = 오른쪽)에 주차 구역이 늘어서 있다.
-#   - 가운데 col 4 / col 7은 중앙 섬 두 개. 각각 기둥 2개 사이에 대형 구역 2칸.
+#   - 바깥 양쪽 열(col 0 = 왼쪽, col 12 = 오른쪽)에 주차 구역이 늘어서 있다.
+#   - 가운데 col 5 / col 7은 중앙 섬 두 개. 각각 기둥 2개 사이에 전기차 구역 2칸.
 #   - 그 사이(col 1~3, 5~6, 8~10)와 맨 아랫줄(row 8)이 전부 도로다.
 #   - 입구(GATE1)는 아래 오른쪽(row 8, col 8), 출구(GATE2)는 아래 왼쪽(row 8, col 3).
 #     입구로 들어와 안쪽을 돌고 왼쪽 아래 출구로 빠지는 흐름이 된다.
@@ -71,17 +71,23 @@ SPOT_CELL_SPAN = {
 #   기둥 사이에 자리가 몇 칸이 들어가든(현재는 2칸씩) 상관없고,
 #   마지막 기둥 바깥의 자리(예: row 7)는 외삽으로 처리된다.
 #   자세한 계산은 logic/C02_lot_layout.py의 build_spot_world_pos 참고.
+# 열 배분은 실측에 맞춘 것이다. (기둥 중심 사이 거리, CELL_W_CM = 10cm 기준)
+#   왼쪽 열(c0) <-> 왼쪽 섬(c5)    = 5칸 = 50cm
+#   왼쪽 섬(c5) <-> 오른쪽 섬(c7)  = 2칸 = 20cm
+#   오른쪽 섬(c7) <-> 오른쪽 열(c12) = 5칸 = 50cm
+#   전체 폭 (c0 <-> c12)           = 12칸 = 120cm
+# 실물 치수가 바뀌면 이 배분과 C02의 CELL_W_CM을 함께 고칠 것.
 grid_map = [
-    # col: 0       1       2       3       4       5       6       7       8       9      10      11
-        [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 0
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 1
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 2
-        [PILL   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 3
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 4
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
-        [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 6
-        [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 7
-        [ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD],  # row 8
+    # col: 0       1       2       3       4       5       6       7       8       9      10      11      12
+        [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 0
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 1
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 2
+        [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 3
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 4
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
+        [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 6
+        [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 7
+        [ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD   ,ROAD],  # row 8
 ]
 
 # 기둥(PILL) -> ArUco 마커 ID 매핑
@@ -107,34 +113,39 @@ grid_map = [
 #     1     (0,  0)      (  0.0,   0.0)   왼쪽 열   · 맨 위
 #     2     (3,  0)      (  0.0,  52.5)   왼쪽 열   · 가운데
 #     3     (6,  0)      (  0.0, 105.0)   왼쪽 열   · 맨 아래
-#     4     (2,  4)      ( 40.0,  35.0)   중앙 섬 좌 · 위
-#     5     (5,  4)      ( 40.0,  87.5)   중앙 섬 좌 · 아래
+#     4     (2,  5)      ( 50.0,  35.0)   중앙 섬 좌 · 위
+#     5     (5,  5)      ( 50.0,  87.5)   중앙 섬 좌 · 아래
 #     6     (2,  7)      ( 70.0,  35.0)   중앙 섬 우 · 위
 #     7     (5,  7)      ( 70.0,  87.5)   중앙 섬 우 · 아래
-#     8     (0, 11)      (110.0,   0.0)   오른쪽 열 · 맨 위
-#     9     (3, 11)      (110.0,  52.5)   오른쪽 열 · 가운데
-#    10     (6, 11)      (110.0, 105.0)   오른쪽 열 · 맨 아래
+#     8     (0, 12)      (120.0,   0.0)   오른쪽 열 · 맨 위
+#     9     (3, 12)      (120.0,  52.5)   오른쪽 열 · 가운데
+#    10     (6, 12)      (120.0, 105.0)   오른쪽 열 · 맨 아래
 #
-#          c0          c4        c7          c11
+#          c0          c5      c7            c12
 #    r0   (1)                                (8)      <- 입출구에서 먼 쪽
-#    r2              (4)       (6)
+#    r2              (4)     (6)
 #    r3   (2)                                (9)
-#    r5              (5)       (7)
+#    r5              (5)     (7)
 #    r6   (3)                                (10)
 #    r8         출구 c3            입구 c8            <- 입출구가 있는 줄
 #
+#   실측 (기둥 중심 사이)
+#     1 <-> 4   50cm    1 <-> 8   120cm
+#     4 <-> 6   20cm    1 <-> 3   105cm
+#     6 <-> 8   50cm
+#
 #   실좌표는 CELL_W_CM / CELL_H_CM(C02_lot_layout.CONFIG)에서 계산된 값이다.
-#   지금은 10.0 x 17.5cm 가정이라 주차장이 110 x 105cm가 된다.
-#   실제 목업 치수가 다르면 그 CONFIG를 먼저 고칠 것.
+#   10.0 x 17.5cm 기준으로 주차장이 120 x 105cm가 된다.
+#   실제 목업 치수가 다르면 그 CONFIG와 위 열 배분을 함께 고칠 것.
 #
 #   11~13번 등 이 표에 없는 마커는 주차장에서 치울 것. 남아 있으면 검출은
 #   되지만 호모그래피에 쓰이지 않아 화면에 빨간 점 + "11?"로 계속 뜬다.
 # ---------------------------------------------------------------------
 PILL_MARKER_ID = {
     (0, 0): 1,  (3, 0): 2,  (6, 0): 3,
-    (2, 4): 4,  (5, 4): 5,
+    (2, 5): 4,  (5, 5): 5,
     (2, 7): 6,  (5, 7): 7,
-    (0, 11): 8, (3, 11): 9, (6, 11): 10,
+    (0, 12): 8, (3, 12): 9, (6, 12): 10,
 }
 
 # 역방향 매핑: 마커 ID -> 격자 좌표
@@ -149,8 +160,8 @@ MARKER_ID_CELL = {mid: cell for cell, mid in PILL_MARKER_ID.items()}
 #   번호     : 같은 열 안에서 위(row 0)부터 1, 2, 3 ...
 #
 # 현재 배치에서는 이렇게 나온다.
-#   A = col 0 (왼쪽)   B = col 4 (중앙 섬 좌)
-#   C = col 7 (중앙 섬 우)   D = col 11 (오른쪽)
+#   A = col 0 (왼쪽)   B = col 5 (중앙 섬 좌)
+#   C = col 7 (중앙 섬 우)   D = col 12 (오른쪽)
 #
 # 주의: 열을 추가/삭제하면 구역 문자가 통째로 밀린다. (예전 A-1이 B-1이 된다)
 #       주차 중인 차가 있는 상태로 배치를 바꾸지 말 것.
