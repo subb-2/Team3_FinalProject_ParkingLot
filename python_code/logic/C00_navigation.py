@@ -505,17 +505,48 @@ class MarkerMapper:
     def draw_markers(self, frame, markers):
         """
         검출된 마커(기둥)의 위치와 ID를 프레임에 표시.
-
-        마커는 기둥이므로 주차 구역 이름을 붙이지 않는다.
-        좌표표에 없는 ID는 호모그래피에 쓰이지 않으므로 '?'로 구분해 표시한다.
+        호모그래피가 고정(LOCKED)된 상태라면, 현재 화면에 보이지 않는 기둥들도
+        변환 행렬을 역산하여 이론적인(수동으로 픽스된) 위치에 계속 파란색으로 그려준다.
         """
+        import numpy as np
+
+        # 1. LOCKED 상태라면, 모든 기둥의 '이론적(가상) 위치'를 계산해서 먼저 그린다.
+        if self.locked and self.H is not None:
+            # H는 [월드 -> 이미지] 변환 행렬
+            world_pts = []
+            m_ids = []
+            for m_id, (wx, wy) in self.marker_world_pos.items():
+                world_pts.append([wx, wy])
+                m_ids.append(m_id)
+            
+            if world_pts:
+                world_pts = np.array([world_pts], dtype=np.float32)
+                img_pts = cv2.perspectiveTransform(world_pts, self.H)[0]
+                
+                for i, (cx, cy) in enumerate(img_pts):
+                    m_id = m_ids[i]
+                    cx, cy = int(cx), int(cy)
+                    # 수동으로 찍어둔 가상의 마커 위치를 그려줌 (cyan-ish blue)
+                    cv2.circle(frame, (cx, cy), 6, COLOR_MARKER, -1)
+                    cv2.putText(frame, str(m_id), (cx + 8, cy - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_MARKER, 2, cv2.LINE_AA)
+
+        # 2. 실시간으로 검출된(물리적으로 무늬를 읽어낸) 마커들은 좀 더 굵게 또는 겹쳐 그린다.
+        # (LOCKED 상태에서는 1번에서 이미 그렸으므로 위치가 거의 겹침)
         for marker_id, (cx, cy) in markers.items():
             cx, cy = int(cx), int(cy)
             known = marker_id in self.marker_world_pos
-            cv2.circle(frame, (cx, cy), 6, COLOR_MARKER if known else (0, 0, 255), -1)
-            label = str(marker_id) if known else f"{marker_id}?"
-            cv2.putText(frame, label, (cx + 8, cy - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_MARKER, 2, cv2.LINE_AA)
+            if not known:
+                # 모르는 마커(오인식)는 빨간색
+                cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+                cv2.putText(frame, f"{marker_id}?", (cx + 8, cy - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2, cv2.LINE_AA)
+            elif not self.locked:
+                # 아직 잠기기 전이면 실시간 검출 마커만 그림
+                cv2.circle(frame, (cx, cy), 6, COLOR_MARKER, -1)
+                cv2.putText(frame, str(marker_id), (cx + 8, cy - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_MARKER, 2, cv2.LINE_AA)
+
         return frame
 
 
