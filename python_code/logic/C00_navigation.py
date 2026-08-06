@@ -20,6 +20,28 @@ CONFIG = {
     # (오검출이 아니라 완전 무검출이므로 화면에 아무 표시도 안 뜬다)
     # 현재 인쇄물: dataset/aruco-*.svg = 5x5 비트, DICT_ARUCO_ORIGINAL 의 ID 1~13.
     "ARUCO_DICT": "DICT_ARUCO_ORIGINAL",  # 마커 사전 (실제 출력한 마커와 일치해야 함)
+
+    # ArUco 검출 파라미터 덮어쓰기. 여기 없는 값은 OpenCV 기본값을 그대로 쓴다.
+    #
+    # !! 주의 !! 이 값들은 근거 없이 건드리면 검출률이 '떨어진다'.
+    # 실제로 polygonalApproxAccuracyRate를 0.03 -> 0.05로 올렸다가 마커가
+    # 거의 검출되지 않는 일이 있었다. 관대해질 것 같지만 반대로 동작한다.
+    # 컨투어 근사가 거칠어져 사각형 코너가 뭉개지고, 4각형 판정에서 탈락한다.
+    #
+    # 바꾸기 전에 반드시 logic/C03_marker_calib.py --sweep 으로 측정할 것.
+    # 추측이 아니라 '몇 개 잡히는지'를 보고 정해야 한다.
+    #
+    # 기본값 참고 (OpenCV 4.x)
+    #   adaptiveThreshWinSizeMin/Max/Step : 3 / 23 / 10
+    #   polygonalApproxAccuracyRate       : 0.03
+    #   minMarkerPerimeterRate            : 0.03
+    #   cornerRefinementMethod            : 0 (NONE)
+    "ARUCO_PARAMS": {
+        # 코너를 서브픽셀로 다듬는다.
+        # 이미 검출에 성공한 마커의 '좌표 정확도'만 올리는 단계라
+        # 검출률을 떨어뜨릴 위험이 없다. 호모그래피 오차가 줄어든다.
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+    },
     "MIN_MARKERS_FOR_HOMOGRAPHY": 4, # 호모그래피 계산을 시도할 최소 마커 수
 
     # 카메라가 고정 설치된 경우 True 권장.
@@ -66,6 +88,26 @@ from logic.C02_lot_layout import (
 )
 
 # 시각화 색상 (BGR)
+def build_aruco_params(overrides=None):
+    """
+    ArUco 검출 파라미터를 만든다. OpenCV 기본값에서 시작해 필요한 것만 덮어쓴다.
+
+    Args:
+        overrides: {속성명: 값}. None이면 CONFIG['ARUCO_PARAMS'].
+
+    Returns:
+        cv2.aruco.DetectorParameters
+    """
+    params = aruco.DetectorParameters()
+    overrides = CONFIG['ARUCO_PARAMS'] if overrides is None else overrides
+    for name, value in overrides.items():
+        if not hasattr(params, name):
+            print(f"[경고] ArUco 파라미터 '{name}'은 존재하지 않습니다. 무시합니다.")
+            continue
+        setattr(params, name, value)
+    return params
+
+
 COLOR_MARKER = (255, 200, 0)    # 마커       - 하늘색
 COLOR_PATH   = (0, 255, 255)    # 안내 경로  - 노랑
 COLOR_TARGET = (255, 0, 255)    # 목표 지점  - 자홍
@@ -130,31 +172,9 @@ class MarkerMapper:
         ransac_thresh_cm = CONFIG['RANSAC_THRESH_CM'] if ransac_thresh_cm is None else ransac_thresh_cm
 
         dict_id = getattr(aruco, aruco_dict_name)
-
-        # 검출 파라미터 조정.
-        # 기본값 그대로 쓰면 마커가 프레임마다 잡혔다 안 잡혔다 한다.
-        # 이 목업은 마커가 기둥 '위'에 있어 비스듬히 보이고, 바닥이 반사되는
-        # 회색이라 기본 임계값으로는 경계가 잘 안 잡힌다.
-        params = aruco.DetectorParameters()
-
-        # 코너를 서브픽셀로 다듬는다. 검출 안정성과 호모그래피 정확도가
-        # 가장 크게 개선되는 항목이다. (연산 비용은 미미)
-        params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
-        params.cornerRefinementWinSize = 5
-
-        # 적응형 이진화 창 크기 범위를 넓힌다.
-        # 조명이 고르지 않거나 마커가 작게 보일 때 검출률이 올라간다.
-        params.adaptiveThreshWinSizeMin = 3
-        params.adaptiveThreshWinSizeMax = 33
-        params.adaptiveThreshWinSizeStep = 4
-
-        # 비스듬히 보이는 마커를 버리지 않도록 후보 판정을 약간 완화한다.
-        params.polygonalApproxAccuracyRate = 0.05
-        params.minMarkerPerimeterRate = 0.02
-
         self.detector = aruco.ArucoDetector(
             aruco.getPredefinedDictionary(dict_id),
-            params
+            build_aruco_params()
         )
         self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
         self.min_markers = min_markers

@@ -8,7 +8,7 @@ from collections import defaultdict
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.map_data import grid_map, PILL, PILL_MARKER_ID, get_rows, get_cols
-from logic.C00_navigation import CONFIG as C00_CONFIG, MarkerMapper
+from logic.C00_navigation import CONFIG as C00_CONFIG, MarkerMapper, build_aruco_params
 from logic.B00_camera_input import get_camera
 
 # =====================================================================
@@ -33,6 +33,13 @@ from logic.B00_camera_input import get_camera
 # 사용법 (젯슨에서):
 #   python logic/C03_marker_calib.py              # 카메라로 측정
 #   python logic/C03_marker_calib.py 사진.jpg     # 저장된 이미지로 측정
+#   python logic/C03_marker_calib.py --sweep      # 검출 파라미터 비교 측정
+#   python logic/C03_marker_calib.py --sweep 사진.jpg
+#
+# --sweep는 여러 파라미터 조합으로 같은 화면을 돌려 '몇 개 잡히는지'를
+# 비교해 준다. 검출 파라미터는 추측으로 건드리면 오히려 나빠지므로
+# (실제로 polygonalApproxAccuracyRate를 올렸다가 검출이 거의 죽은 적이 있다)
+# C00의 ARUCO_PARAMS를 바꾸기 전에 이걸로 먼저 측정할 것.
 #
 # 주의: 카메라를 옮기거나 마커를 다시 붙이면 반드시 다시 돌릴 것.
 # =====================================================================
@@ -51,6 +58,113 @@ CONFIG = {
     # 가끔 튀는 오검출(다른 사전의 무늬가 우연히 읽히는 경우)을 걸러낸다.
     "MIN_SEEN_RATIO": 0.5,
 }
+
+
+# --sweep에서 비교해 볼 파라미터 조합.
+# 이름 -> {속성명: 값}. 빈 dict는 OpenCV 기본값을 뜻한다.
+SWEEP_PRESETS = {
+    "기본값(OpenCV)": {},
+    "코너정밀화만 (현재 설정)": {
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+    },
+    "이진화 촘촘히": {
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+        "adaptiveThreshWinSizeMin": 3,
+        "adaptiveThreshWinSizeMax": 33,
+        "adaptiveThreshWinSizeStep": 4,
+    },
+    "작은 마커 허용": {
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+        "minMarkerPerimeterRate": 0.01,
+    },
+    "비트 판정 완화": {
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+        "errorCorrectionRate": 0.8,
+        "maxErroneousBitsInBorderRate": 0.5,
+    },
+    "샘플링 촘촘히(작은 마커용)": {
+        "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
+        "perspectiveRemovePixelPerCell": 8,
+        "minMarkerPerimeterRate": 0.01,
+    },
+    "코너근사 완화 (역효과 사례)": {
+        "polygonalApproxAccuracyRate": 0.05,
+    },
+}
+
+
+def measure_marker_size(frame, dict_name):
+    """
+    검출된 마커가 화면에서 몇 픽셀인지 잰다. (해상도가 충분한지 판단용)
+
+    Returns:
+        (검출 개수, 평균 한 변 픽셀). 검출이 없으면 (0, 0.0).
+    """
+    detector = aruco.ArucoDetector(
+        aruco.getPredefinedDictionary(getattr(aruco, dict_name)),
+        build_aruco_params({})
+    )
+    corners, ids, _ = detector.detectMarkers(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    if ids is None or len(ids) == 0:
+        return 0, 0.0
+    sides = []
+    for c in corners:
+        pts = c[0]
+        sides.extend(float(np.linalg.norm(pts[i] - pts[(i + 1) % 4])) for i in range(4))
+    return len(ids), float(np.mean(sides))
+
+
+def run_sweep(frame, dict_name):
+    """파라미터 조합별로 검출 개수를 비교 출력한다."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    dictionary = aruco.getPredefinedDictionary(getattr(aruco, dict_name))
+
+    print(f"\n{'조합':30s}{'검출':>6s}   검출된 ID")
+    print("-" * 66)
+    best_name, best_count = None, -1
+    for name, overrides in SWEEP_PRESETS.items():
+        detector = aruco.ArucoDetector(dictionary, build_aruco_params(overrides))
+        _, ids, _ = detector.detectMarkers(gray)
+        found = sorted(int(i) for i in ids.flatten()) if ids is not None else []
+        print(f"{name:30s}{len(found):>6d}   {found}")
+        if len(found) > best_count:
+            best_name, best_count = name, len(found)
+
+    print(f"\n가장 많이 잡은 조합: '{best_name}' ({best_count}개)")
+    if best_count:
+        overrides = SWEEP_PRESETS[best_name]
+        print("C00_navigation.CONFIG['ARUCO_PARAMS']에 넣을 값:")
+        print("    " + (repr(overrides) if overrides else "{}  # 기본값 그대로"))
+
+
+def report_marker_size(count, side_px):
+    """
+    마커가 화면에서 몇 픽셀인지 보고하고, 해상도가 부족하면 알려준다.
+
+    5x5 비트 마커(DICT_ARUCO_ORIGINAL)는 테두리를 포함해 7x7 칸이다.
+    OpenCV는 칸마다 perspectiveRemovePixelPerCell(기본 4)픽셀을 샘플링하므로
+    한 변이 최소 7 x 4 = 28px은 되어야 비트를 안정적으로 읽는다.
+    실전에서는 그 두 배(약 50px)는 되어야 흔들리지 않는다.
+    """
+    MIN_PX, COMFORTABLE_PX = 28, 50
+
+    if count == 0:
+        print("\n[크기] 마커를 검출하지 못해 크기를 잴 수 없습니다.")
+        return
+
+    print(f"\n[크기] 마커 {count}개, 한 변 평균 {side_px:.0f}px")
+    if side_px < MIN_PX:
+        print(f"        !! 너무 작습니다 (최소 {MIN_PX}px 필요). "
+              f"이 크기로는 비트를 못 읽어 검출이 들쭉날쭉합니다.")
+        print(f"        해상도를 올리거나(예: 640x480 -> 1280x720) "
+              f"마커를 크게 인쇄하세요.")
+        print(f"        해상도를 2배로 올리면 한 변도 약 2배 "
+              f"({side_px:.0f} -> {side_px*2:.0f}px)가 됩니다.")
+    elif side_px < COMFORTABLE_PX:
+        print(f"        아슬아슬합니다 (여유 있으려면 {COMFORTABLE_PX}px 권장). "
+              f"조명이나 각도가 나빠지면 놓칠 수 있습니다.")
+    else:
+        print(f"        충분합니다.")
 
 
 def expected_pillar_cells():
@@ -190,15 +304,47 @@ if __name__ == '__main__':
     print(f"\n[사전] {C00_CONFIG['ARUCO_DICT']} "
           f"(인쇄물과 다르면 마커가 '하나도' 검출되지 않습니다)")
 
+    args = [a for a in sys.argv[1:] if a != '--sweep']
+    sweep = '--sweep' in sys.argv
+
     # 이미지 파일이 주어지면 그것으로, 아니면 카메라로
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
+    if args:
+        path = args[0]
         image = cv2.imread(path)
         if image is None:
             print(f"\n[ERROR] 이미지를 열 수 없습니다: {path}")
             sys.exit(1)
-        print(f"\n[INFO] 이미지에서 검출: {path}")
+        print(f"\n[INFO] 이미지에서 검출: {path}  ({image.shape[1]}x{image.shape[0]})")
+
+        count, side = measure_marker_size(image, C00_CONFIG['ARUCO_DICT'])
+        report_marker_size(count, side)
+        if sweep:
+            run_sweep(image, C00_CONFIG['ARUCO_DICT'])
+            sys.exit(0)
         markers = collect_markers(image)
+    elif sweep:
+        print(f"\n[INFO] 카메라를 엽니다... "
+              f"({CONFIG['CAM_WIDTH']}x{CONFIG['CAM_HEIGHT']})")
+        cap = get_camera(sensor_id=CONFIG['CAM_SENSOR_ID'],
+                         width=CONFIG['CAM_WIDTH'],
+                         height=CONFIG['CAM_HEIGHT'],
+                         framerate=CONFIG['CAM_FPS'])
+        if not cap.isOpened():
+            print("[ERROR] 카메라를 열 수 없습니다.")
+            sys.exit(1)
+        try:
+            for _ in range(10):        # 노출이 안정될 때까지 몇 장 버린다
+                ret, frame = cap.read()
+        finally:
+            cap.release()
+        if not ret:
+            print("[ERROR] 프레임을 읽을 수 없습니다.")
+            sys.exit(1)
+        print(f"[INFO] 실제 프레임 크기: {frame.shape[1]}x{frame.shape[0]}")
+        count, side = measure_marker_size(frame, C00_CONFIG['ARUCO_DICT'])
+        report_marker_size(count, side)
+        run_sweep(frame, C00_CONFIG['ARUCO_DICT'])
+        sys.exit(0)
     else:
         print(f"\n[INFO] 카메라를 엽니다... "
               f"({CONFIG['CAM_WIDTH']}x{CONFIG['CAM_HEIGHT']})")
