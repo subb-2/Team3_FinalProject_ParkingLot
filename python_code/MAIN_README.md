@@ -211,10 +211,23 @@ B02가 이 원칙을 두 겹으로 뒷받침한다. `track_id`는 바뀌어도 `
 | 추적기 파라미터 | `config/ocsort.yaml` (사용 중) / `config/bytetrack.yaml` (비교용). ultralytics 내장 파일을 쓰지 않는다. 어떤 추적기를 쓸지는 yaml의 `tracker_type`이 결정 |
 | 단일 활성 차량 / 주차 판정 반경 | `B02_car_mot.CONFIG['SINGLE_ACTIVE']` |
 | 재바인딩 파라미터 | `B02_car_mot.CONFIG['REBIND']` |
-| 주차장 지도 / 구역 목록 | `data/map_data.py` |
-| 차량 정보 / 요금 | `data/car_data.py` |
+| 주차장 지도 / 구역 목록 | `data/map_data.py`의 `grid_map` (나머지는 여기서 자동 생성) |
 | 마커 ID 배치 | `data/map_data.py`의 `PILL_MARKER_ID` |
+| 자리 배정 순서 | `data/map_data.py`의 `SPOT_PRIORITY` |
+| 요금 | `data/car_data.py`의 `get_fee_config()` |
 | 격자 칸 크기 (cm) | `C02_lot_layout.CONFIG` |
+
+**시연 전에 만지는 차량 관련 설정은 `data/car_data.py` 한 곳에 모아두었다.**
+
+| 설정 | 용도 |
+|---|---|
+| `car_types` | 번호판 → 차량 종류. 어느 종류의 구역으로 갈지 결정한다 |
+| `INITIAL_PARKED` | 시작부터 세워둘 차량. 자리 상태 + 차량 정보 + 종류를 함께 채운다 |
+| `TEST_PRESET_CAR_NUMBERS` | UART 없이 돌릴 때 순서대로 입차시킬 번호 |
+
+`TEST_PRESET_CAR_NUMBERS`와 `INITIAL_PARKED`에 적은 번호는 `car_types`에도 등록해야 한다. 등록하지 않으면 전부 일반 차량으로 처리되어 대형/전기차 시나리오를 확인할 수 없다. (누락되면 import 시점에 경고가 뜬다)
+
+`ENABLE_UART`가 켜져 있으면 `TEST_PRESET_CAR_NUMBERS`는 무시된다. 둘 다 넣으면 실제 입차와 테스트 번호가 뒤섞여 FIFO 순서가 어긋나기 때문이다.
 
 규칙:
 

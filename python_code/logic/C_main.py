@@ -45,7 +45,8 @@ CONFIG = {
 
     # 차량번호 입력 소스 설정
     "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
-    "TEST_PRESET_CAR_NUMBERS": ["1234", "1998", "0828", "9999"],  # UART 없이 테스트할 차량번호(순서대로 FIFO 등록)
+    # UART 없이 테스트할 차량번호는 data/car_data.py의 TEST_PRESET_CAR_NUMBERS에서 관리한다.
+    # 차량 종류 등록부(car_types)와 같은 곳에 두어야 어느 자리로 갈지 함께 볼 수 있다.
 
     # 내비게이션 연동 설정
     "AUTO_ASSIGN_SPOT": True,       # 차량번호 등록 시 A01_parking_manager로 빈자리를 자동 배정
@@ -273,19 +274,24 @@ def register_car_number(car_id):
 def setup_car_number_source():
     """
     FIFO에 차량번호를 공급할 소스를 설정에 따라 준비.
-      - ENABLE_UART            : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
-      - TEST_PRESET_CAR_NUMBERS: 지정한 번호를 순서대로 미리 등록
+      - ENABLE_UART : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
+      - 그 외       : car_data.TEST_PRESET_CAR_NUMBERS를 순서대로 등록
+
+    UART를 켜면 테스트 번호는 넣지 않는다. 둘 다 넣으면 실제 입차와 테스트
+    번호가 뒤섞여 자리 배정과 FIFO 순서가 어긋난다.
     """
-    # 1) 실제 UART 수신 (A00_uart_rx)
-    #    A00은 내부에서 handle_car_entry와 enqueue_car_number를 모두 호출하므로
-    #    별도의 빈자리 배정이 필요 없다.
+    # 실제 UART 수신 (A00_uart_rx)
+    # A00은 내부에서 handle_car_entry와 enqueue_car_number를 모두 호출하므로
+    # 별도의 자리 배정이 필요 없다.
     if CONFIG['ENABLE_UART']:
         from logic.A00_uart_rx import uart_rx_main
         threading.Thread(target=uart_rx_main, daemon=True).start()
         print("[INFO] A00_uart_rx 수신 스레드를 시작했습니다.")
+        return
 
-    # 2) 미리 지정해 둔 차량번호를 순서대로 등록 (빈자리 배정 + FIFO)
-    for car_id in CONFIG['TEST_PRESET_CAR_NUMBERS']:
+    # 미리 지정해 둔 차량번호를 순서대로 등록 (차량 종류별 자리 배정 + FIFO)
+    from data.car_data import TEST_PRESET_CAR_NUMBERS
+    for car_id in TEST_PRESET_CAR_NUMBERS:
         register_car_number(car_id)
 
 

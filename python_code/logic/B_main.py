@@ -35,7 +35,8 @@ CONFIG = {
 
     # 차량번호 입력 소스 설정
     "ENABLE_UART": False,           # True: A00_uart_rx로 실제 Zybo UART 수신 (하드웨어 필요)
-    "TEST_PRESET_CAR_NUMBERS": ["1234","1998","0828","9999"],  # UART 없이 테스트할 차량번호를 순서대로 입력. 예: ["1234", "5678", "9012"]
+    # UART 없이 테스트할 차량번호는 data/car_data.py의 TEST_PRESET_CAR_NUMBERS에서 관리한다.
+    # 차량 종류 등록부(car_types)와 같은 곳에 두어야 어느 자리로 갈지 함께 볼 수 있다.
 }
 
 # 통합 파이프라인
@@ -140,17 +141,22 @@ class ParkingVisionPipeline:
 def setup_car_number_source():
     """
     FIFO에 차량번호를 공급할 소스를 설정에 따라 준비한다.
-      - ENABLE_UART            : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
-      - TEST_PRESET_CAR_NUMBERS: 지정한 번호를 순서대로 미리 등록
+      - ENABLE_UART : A00_uart_rx를 별도 스레드로 실행 (실제 Zybo 연동)
+      - 그 외       : car_data.TEST_PRESET_CAR_NUMBERS를 순서대로 등록
+
+    UART를 켜면 테스트 번호는 넣지 않는다. 둘 다 넣으면 실제 입차와 테스트
+    번호가 뒤섞여 FIFO 순서가 어긋난다.
     """
-    # 1) 실제 UART 수신 (A00_uart_rx)
     if CONFIG['ENABLE_UART']:
         from logic.A00_uart_rx import uart_rx_main
         threading.Thread(target=uart_rx_main, daemon=True).start()
         print("[INFO] A00_uart_rx 수신 스레드를 시작했습니다.")
+        return
 
-    # 2) 미리 지정해 둔 차량번호를 순서대로 FIFO에 등록
-    for car_id in CONFIG['TEST_PRESET_CAR_NUMBERS']:
+    # 미리 지정해 둔 차량번호를 순서대로 FIFO에 등록
+    # (B_main은 자리 배정 없이 추적만 확인하는 용도라 FIFO에만 넣는다)
+    from data.car_data import TEST_PRESET_CAR_NUMBERS
+    for car_id in TEST_PRESET_CAR_NUMBERS:
         enqueue_car_number(car_id)
 
 
