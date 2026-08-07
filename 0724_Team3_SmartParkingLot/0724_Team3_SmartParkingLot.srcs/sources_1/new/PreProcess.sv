@@ -30,6 +30,7 @@ module PreProcess(
     // SR04 -> VGA
     logic w_capture;
     logic w_vga_done;
+    assign vga_done = w_vga_done;
 
     /********* Sensor *********/
     sr04 U_SR04(
@@ -38,6 +39,7 @@ module PreProcess(
         .reset(reset),
         .o_echo(echo),
         .i_cnn_done(cnn_done),
+        .i_vga_done(w_vga_done),
         .o_trigger(trigger),
         .o_capture(w_capture),
         .o_close(w_close)
@@ -60,7 +62,7 @@ module PreProcess(
         .i_pixel_addr(pixel_addr),
         .o_pixel_data(pixel_data),
         .i_capture(w_capture),
-        .o_vga_done(vga_done)
+        .o_vga_done(w_vga_done)
     );
 
     /********* UART *********/
