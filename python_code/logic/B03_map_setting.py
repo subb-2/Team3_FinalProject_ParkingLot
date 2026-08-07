@@ -3,7 +3,20 @@ import os
 import json
 import numpy as np
 
-
+def load_pillar_pixels():
+    """저장된 기둥 픽셀 좌표를 불러온다. 없으면 None."""
+    import json as _json
+    path = os.path.join(
+        os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = _json.load(f)
+        return {int(k): tuple(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[경고] 기둥 픽셀 좌표 로드 실패: {e}")
+        return None
 
 CALIBRATE_HTML = """
 <html><head><meta charset="utf-8"><title>주차장 맵 초기 보정</title>
