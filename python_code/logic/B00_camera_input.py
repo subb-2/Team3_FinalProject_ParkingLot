@@ -32,9 +32,41 @@ def get_gstreamer_pipeline(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIG
         f"video/x-raw, format=(string)BGR ! appsink"
     )
 
+class UndistortedCapture:
+    """
+    VideoCapture를 감싸서 read()가 왜곡을 편 프레임을 돌려주게 한다.
+
+    파이프라인 곳곳에서 cap.read()를 부르므로, 여기 한 곳에서 펴 주면
+    검출/추적/마커가 전부 같은 보정된 프레임을 쓴다. 부르는 쪽은 고칠 것이 없다.
+
+    보정값이 없으면 아무 일도 하지 않고 원본을 그대로 넘긴다.
+    """
+
+    def __init__(self, cap, undistorter):
+        self._cap = cap
+        self._undistorter = undistorter
+
+    def read(self):
+        ok, frame = self._cap.read()
+        if not ok:
+            return ok, frame
+        return ok, self._undistorter.apply(frame)
+
+    def __getattr__(self, name):
+        # isOpened / release / set / get 등은 원본 객체에 그대로 넘긴다
+        return getattr(self._cap, name)
+
+
 def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
-               framerate=DEFAULT_FPS):
-    """카메라 객체를 생성하여 반환합니다."""
+               framerate=DEFAULT_FPS, undistort=True):
+    """
+    카메라 객체를 생성하여 반환합니다.
+
+    Args:
+        undistort: 렌즈 왜곡 보정을 적용할지. 보정값(config/camera_calib.npz)이
+                   없으면 이 값과 무관하게 원본이 나온다.
+                   보정값은 logic/B04_lens_calib.py로 만든다.
+    """
     if sys.platform == 'win32':
         # 윈도우 환경에서는 일반 웹캠 사용 (GStreamer 미사용)
         print(f"[INFO] 윈도우 환경 감지됨: 웹캠(장치 {sensor_id}) 연결 시도...")
@@ -45,12 +77,32 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
         # 해상도 설정
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        return cap
     else:
         # Jetson / Linux 환경 (GStreamer 파이프라인 사용)
         print(f"[INFO] Linux 환경 감지됨: GStreamer 파이프라인 연결 시도...")
         pipeline = get_gstreamer_pipeline(sensor_id, width, height, framerate)
-        return cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+    return _wrap_undistort(cap) if undistort else cap
+
+
+def _wrap_undistort(cap):
+    """
+    보정값이 있으면 왜곡을 펴는 래퍼로 감싼다. 없으면 원본을 그대로 반환.
+
+    B04를 아직 안 돌렸어도 문제없이 동작해야 하므로, 보정값이 없으면
+    조용히 원본을 쓴다. (B04가 만들어 두면 그때부터 자동으로 적용된다)
+    """
+    try:
+        from logic.B04_lens_calib import Undistorter
+    except Exception as e:
+        print(f"[경고] 렌즈 보정 모듈을 불러오지 못했습니다: {e}")
+        return cap
+
+    undistorter = Undistorter()
+    if not undistorter.is_ready():
+        return cap
+    return UndistortedCapture(cap, undistorter)
 
 # 카메라 객체
 cap = None

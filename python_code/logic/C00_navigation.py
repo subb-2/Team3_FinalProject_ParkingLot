@@ -11,6 +11,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C01_path_planner import route_length, distance_to_route
 from logic.B03_marker_detect import MarkerDetector
 
+
+def _lens_calibrated():
+    """
+    렌즈 왜곡 보정값이 준비되어 있는지.
+
+    호모그래피 캐시가 '보정 전/후' 중 어느 상태에서 만들어졌는지 기록하고
+    대조하는 데 쓴다. B04를 아직 안 만들었거나 못 불러와도 죽지 않아야 하므로
+    실패하면 보정 없음으로 본다.
+    """
+    try:
+        from logic.B04_lens_calib import has_calibration
+        return bool(has_calibration())
+    except Exception:
+        return False
+
 # 설정 (Configuration)
 # 이 모듈은 '위치 추정 및 경로 안내'만 담당.
 #   - 검출 : B01_car_detection.py
@@ -205,6 +220,7 @@ class MarkerMapper:
             self.load_homography()
 
     # --- 호모그래피 저장/복원 -----------------------------------------------
+    # (_lens_calibrated는 이 클래스 밖, 모듈 끝에 정의되어 있다)
 
     def save_homography(self, path=None):
         """
@@ -230,6 +246,10 @@ class MarkerMapper:
                 marker_ids=np.array(ids, dtype=np.int32),
                 marker_world=np.array([self.marker_world_pos[i] for i in ids],
                                       dtype=np.float64),
+                # 렌즈 보정을 켜고 끄면 화소 위치가 통째로 달라진다.
+                # 보정 전에 잡은 행렬을 보정 후에 그대로 쓰면 좌표가 전부 밀린다.
+                # 눈에 띄는 오류 없이 조용히 어긋나므로 반드시 대조해야 한다.
+                lens_undistorted=bool(_lens_calibrated()),
             )
             print(f"[INFO] 호모그래피를 저장했습니다. {path}")
             print(f"       다음 실행부터는 마커가 안 보여도 이 값을 씁니다. "
@@ -343,6 +363,26 @@ class MarkerMapper:
             print("[경고] 저장된 호모그래피는 지금과 다른 격자 배치로 만든 것입니다. 무시합니다.")
             print("       (grid_map의 열 배분이나 CELL_W_CM / CELL_H_CM이 바뀌었습니다)")
             print("       /calibrate 에서 다시 잡으세요.")
+            return False
+
+        # 렌즈 보정을 켜거나 끄면 화소 위치가 통째로 달라진다.
+        # 이걸 대조하지 않으면 보정 전에 잡은 행렬을 보정 후에 그대로 써서
+        # 좌표가 조용히 전부 밀린다. 오류가 안 나서 알아채기 어렵다.
+        saved_lens = None
+        if 'lens_undistorted' in getattr(data, 'files', []):
+            saved_lens = bool(data['lens_undistorted'])
+        now_lens = _lens_calibrated()
+        if saved_lens is None:
+            print("[경고] 저장된 호모그래피에 렌즈 보정 여부가 없습니다. (구버전 파일)")
+            print("       무시합니다. /calibrate 에서 다시 잡으세요.")
+            return False
+        if saved_lens != now_lens:
+            was = "보정 적용" if saved_lens else "보정 없음"
+            now = "보정 적용" if now_lens else "보정 없음"
+            print(f"[경고] 저장된 호모그래피는 '{was}' 상태에서 만든 것인데 "
+                  f"지금은 '{now}'입니다. 무시합니다.")
+            print("       렌즈 보정을 켜고 끄면 화면이 달라지므로 "
+                  "/calibrate 에서 다시 잡아야 합니다.")
             return False
 
         self.H = data['H']
