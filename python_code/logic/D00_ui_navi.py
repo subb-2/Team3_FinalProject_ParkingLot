@@ -59,6 +59,17 @@ CONFIG = {
     "NAV_TOP_WIDTH_RATIO": 0.30, # 원근 상단 폭 비율 (작을수록 원근감이 강함)
     "NAV_BANNER_H": 118,        # 상단 턴 안내 배너 높이
     "NAV_HEADING_SMOOTH": 0.25, # 화면 회전 감속 계수 (0~1, 작을수록 부드러움)
+
+    # 화면을 차량 진행 방향에 맞춰 돌릴지 여부.
+    #
+    #   False (기본) : 방위 고정. 2번 주차장 상태 화면과 같은 방향으로 서 있고,
+    #                  차가 움직여도 위아래가 바뀌지 않는다. 목업처럼 주차장
+    #                  전체가 한눈에 들어오는 크기에서는 화면이 계속 도는 것보다
+    #                  어디가 어디인지 알아보기 쉽다.
+    #   True         : 헤딩업. 진행 방향이 항상 화면 위쪽이 된다. (자동차 내비 방식)
+    #
+    # 어느 쪽이든 내 차 아이콘은 실제 진행 방향을 가리킨다.
+    "NAV_HEADING_UP": False,
     "NAV_SHOW_MINIMAP": True,   # 좌하단 전체 조감도 표시
     "NAV_MINIMAP_W": 210,
     "NAV_MINIMAP_H": 168,
@@ -102,6 +113,11 @@ COLOR_NAV_CAR     = (80, 230, 80)    # 내 차량
 COLOR_NAV_ACCENT  = (60, 220, 255)   # 강조 (거리, 화살표)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# 방위 고정 화면에서 쓰는 시선 방향.
+# _world_to_flat의 각도 규약(x축 오른쪽 0도, y축 아래로 +90도)에서 -90도가
+# '월드의 위쪽(-y)이 화면 위쪽'이다. 즉 2번 주차장 상태 화면과 같은 방향.
+FIXED_VIEW_HEADING = -90.0
 
 
 # 좌표계 해석
@@ -250,7 +266,8 @@ class NavigationView:
 
         self.car_y = int(self.height * CONFIG['NAV_CAR_Y_RATIO'])
         self.banner_h = CONFIG['NAV_BANNER_H']
-        self._display_heading = None
+        self._display_heading = None        # 지도 회전 (헤딩업일 때만 쓴다)
+        self._display_car_heading = None    # 내 차 아이콘이 가리키는 방향
 
         self._layout = None
         self._sync_layout()
@@ -339,6 +356,45 @@ class NavigationView:
         dst = cv2.perspectiveTransform(src, self._warp)
         return int(dst[0][0][0]), int(dst[0][0][1])
 
+    def _view_heading(self, nav):
+        """
+        지도를 어느 방향으로 세울지 결정.
+
+        NAV_HEADING_UP이 꺼져 있으면 방위를 고정한다. 차가 움직일 때마다
+        화면 전체가 도는 것을 막기 위해서다.
+        """
+        if not CONFIG['NAV_HEADING_UP']:
+            return FIXED_VIEW_HEADING
+        return self._update_heading(nav)
+
+    def _car_heading(self, nav, view_heading):
+        """
+        내 차 아이콘이 가리킬 방향(화면 기준 각도, 위쪽이 0).
+
+        진행 방향을 아직 모르면(정지 등) 직전 값을 유지하고, 그것도 없으면
+        화면 위쪽을 가리킨다. 매 프레임 튀지 않게 지도 회전과 같은 계수로
+        완만하게 따라간다.
+        """
+        heading = nav.get("heading_deg")
+        if heading is None:
+            wp = nav.get("next_waypoint") or nav.get("target_world")
+            pos = nav.get("world_pos")
+            if wp is not None and pos is not None:
+                heading = math.degrees(math.atan2(wp[1] - pos[1], wp[0] - pos[0]))
+        if heading is None:
+            heading = self._display_car_heading
+        if heading is None:
+            return 0.0
+
+        if self._display_car_heading is None:
+            self._display_car_heading = heading
+        else:
+            diff = (heading - self._display_car_heading + 180) % 360 - 180
+            self._display_car_heading += diff * CONFIG['NAV_HEADING_SMOOTH']
+
+        # 지도가 view_heading 방향으로 서 있으므로, 그 차이만큼만 돌리면 된다
+        return (self._display_car_heading - view_heading + 180) % 360 - 180
+
     def _update_heading(self, nav):
         """
         화면 회전에 쓸 진행 방향을 결정.
@@ -393,7 +449,7 @@ class NavigationView:
             return self._render_waiting(fps, extra_info)
 
         car_pos = nav["world_pos"]
-        heading = self._update_heading(nav)
+        heading = self._view_heading(nav)
 
         # 1) 노면 레이어를 '위에서 본' 상태로 그린 뒤 원근 변환
         ground = np.full((self.height, self.width, 3), COLOR_NAV_GROUND, dtype=np.uint8)
@@ -407,7 +463,7 @@ class NavigationView:
 
         # 2) 원근 영향을 받지 않아야 하는 요소는 그 위에 직접 그린다
         self._draw_spot_labels(canvas, car_pos, heading, nav)
-        self._draw_car(canvas)
+        self._draw_car(canvas, self._car_heading(nav, heading))
         self._draw_banner(canvas, nav)
         self._draw_bottom_bar(canvas, nav, fps, extra_info)
         if CONFIG['NAV_SHOW_MINIMAP']:
@@ -491,18 +547,33 @@ class NavigationView:
                        max(8, int(self.cell_w * self.scale * 0.4)),
                        COLOR_GATE, 2, cv2.LINE_AA)
 
+    def _route_points(self, nav):
+        """
+        내 차에서 목적지까지 이어 그릴 점들. 없으면 None.
+
+        경로 계획(C01)이 있으면 남은 경유점을 따라가고, 없으면 목적지까지
+        직선으로 잇는다. 픽셀 모드에는 경로 계획이 없어 목적지가 정해져 있는데도
+        아무 선도 그리지 않던 것을 메운다.
+        """
+        route = nav.get("route")
+        if route and len(route) >= 2:
+            idx = min(nav.get("route_index", 1), len(route) - 1)
+            return list(route[idx:])
+
+        target = nav.get("target_world")
+        return [target] if target is not None else None
+
     def _draw_ground_route(self, layer, car_pos, heading, nav):
         """
         주행 경로를 굵은 띠로 그린다.
         내비게이션의 파란 경로선처럼 보이도록 테두리를 덧그린다.
         """
-        route = nav.get("route")
-        if not route or len(route) < 2:
+        rest = self._route_points(nav)
+        if not rest:
             return
 
-        idx = min(nav.get("route_index", 1), len(route) - 1)
         pts = [self._world_to_flat(car_pos, car_pos, heading)]
-        pts += [self._world_to_flat(p, car_pos, heading) for p in route[idx:]]
+        pts += [self._world_to_flat(p, car_pos, heading) for p in rest]
         arr = np.array(pts, dtype=np.int32)
 
         cv2.polylines(layer, [arr], False, COLOR_NAV_ROUTE_E, 26, cv2.LINE_AA)
@@ -534,13 +605,24 @@ class NavigationView:
             cv2.putText(canvas, spot_id, (x - tw // 2, y + 4),
                         FONT, scale, color, 1, cv2.LINE_AA)
 
-    def _draw_car(self, canvas):
-        """내 차량. 화면 아래쪽 고정 위치에 삼각형으로 그린다."""
+    def _draw_car(self, canvas, screen_heading_deg=0.0):
+        """
+        내 차량. 화면 고정 위치에 삼각형으로 그린다.
+
+        방위 고정 화면에서는 지도가 돌지 않으므로 이 아이콘이 진행 방향을
+        가리켜야 한다. screen_heading_deg는 화면 위쪽을 0으로 한 각도다.
+        (헤딩업 화면에서는 항상 0이라 예전과 똑같이 위를 본다)
+        """
         cx = self.width // 2
         cy = self._flat_to_screen((self.width / 2, self.car_y))[1]
 
-        pts = np.array([[cx, cy - 20], [cx - 15, cy + 16], [cx, cy + 8], [cx + 15, cy + 16]],
-                       dtype=np.int32)
+        shape = [(0, -20), (-15, 16), (0, 8), (15, 16)]
+        rad = math.radians(screen_heading_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        pts = np.array(
+            [[int(cx + x * cos_a - y * sin_a), int(cy + x * sin_a + y * cos_a)]
+             for x, y in shape], dtype=np.int32)
+
         cv2.fillPoly(canvas, [pts], COLOR_NAV_CAR, cv2.LINE_AA)
         cv2.polylines(canvas, [pts], True, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -685,10 +767,9 @@ class NavigationView:
                 color = COLOR_SPOT_BY_TYPE.get(spot_type.get(spot_id), (100, 100, 100))
                 cv2.rectangle(canvas, p1, p2, color, 1)
 
-        route = nav.get("route")
-        if route and len(route) >= 2:
-            idx = min(nav.get("route_index", 1), len(route) - 1)
-            pts = np.array([to_mini(car_pos)] + [to_mini(p) for p in route[idx:]],
+        rest = self._route_points(nav)
+        if rest:
+            pts = np.array([to_mini(car_pos)] + [to_mini(p) for p in rest],
                            dtype=np.int32)
             cv2.polylines(canvas, [pts], False, COLOR_NAV_ROUTE, 2, cv2.LINE_AA)
 

@@ -466,6 +466,56 @@ def _build_track_items(pipeline):
     return items
 
 
+def world_to_cell(world_cm):
+    """
+    cm 좌표를 격자 좌표(행, 열)로. 소수까지 그대로 돌려준다.
+
+    2번 구간은 격자를 칸 단위로 그리므로, 차량 점을 찍으려면 cm가 아니라
+    '몇 번째 칸의 어디쯤'인지가 필요하다. cell_to_world의 역변환이다.
+
+    Returns:
+        (row, col) 실수. (0.0, 0.0)이 ORIGIN_CELL 칸의 중심이다.
+    """
+    origin_row, origin_col = C02_CONFIG['ORIGIN_CELL']
+    return (world_cm[1] / C02_CONFIG['CELL_H_CM'] + origin_row,
+            world_cm[0] / C02_CONFIG['CELL_W_CM'] + origin_col)
+
+
+def _build_cars_on_map(pipeline):
+    """
+    2번 구간 격자 위에 찍을 차량 점 목록.
+
+    픽셀 모드의 world_pos는 이미지 픽셀이므로 cm로 옮긴 뒤 격자 좌표로 바꾼다.
+    (MarkerMapper.pixel_to_cm. 호모그래피 모드면 이미 cm라 그대로 쓴다)
+
+    Returns:
+        [{"key", "car_id", "row", "col", "parked", "target_spot"}, ...]
+    """
+    mapper = pipeline.navigator.mapper
+    cars = []
+
+    for nav in pipeline.latest_nav:
+        pos = nav.get("world_pos")
+        if pos is None:
+            continue
+        world = mapper.pixel_to_cm(pos) or pos
+        row, col = world_to_cell(world)
+
+        car_id = nav.get("car_id")
+        info = cars_info.get(car_id) if car_id else None
+        cars.append({
+            # 번호가 아직 안 붙은 차도 점은 찍는다. 화면에서 사라졌다 나타나면
+            # 오히려 헷갈리기 때문이다. 대신 색을 달리한다.
+            "key": car_id or f"#{nav.get('track_id')}",
+            "car_id": car_id,
+            "row": round(row, 3),
+            "col": round(col, 3),
+            "parked": bool(info and info.get("parked")),
+            "target_spot": nav.get("target_spot"),
+        })
+    return cars
+
+
 # 화면 상태 (0.5초마다 브라우저가 가져간다)
 def build_ui_state(pipeline, rx_feed, watcher):
     """
@@ -527,6 +577,8 @@ def build_ui_state(pipeline, rx_feed, watcher):
 
         # --- 2번 구간 ---
         "spots": spots,
+        # 격자 위에 실시간으로 움직이는 차량 점
+        "cars_on_map": _build_cars_on_map(pipeline),
         "assigned_pending": assigned_pending,
         "availability": {
             info["name"]: {"empty": info["empty"], "total": info["total"]}
@@ -623,8 +675,23 @@ FINAL_UI_HTML = r"""
  /* 크기는 fitLot()이 픽셀로 넣는다.
     aspect-ratio + max-width/height 조합은 폭도 높이도 auto인 flex 자식에서
     0으로 무너진다. 남는 공간을 재서 직접 계산하는 편이 확실하다. */
- #lot{display:grid;gap:2px}
+ #lot{display:grid;gap:2px;position:relative}
  .cell{border-radius:2px;position:relative;min-width:0;min-height:0}
+
+ /* 격자 위를 실시간으로 움직이는 차량 점.
+    칸(그리드 아이템)이 아니라 격자 전체를 덮는 한 겹 위에 올린다.
+    transition 시간을 폴링 주기에 맞춰 두면 0.4초마다 오는 위치가
+    뚝뚝 끊기지 않고 이어져 보인다. */
+ #cars{position:absolute;inset:0;pointer-events:none}
+ .car{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+      border-radius:50%;background:var(--accent);border:2px solid #0b0b0d;
+      box-shadow:0 0 0 2px rgba(63,169,255,.35);
+      transition:left .4s linear, top .4s linear}
+ .car.parked{background:var(--ok);box-shadow:0 0 0 2px rgba(76,207,106,.3)}
+ .car.unknown{background:var(--warn);box-shadow:0 0 0 2px rgba(255,176,58,.3)}
+ .car > span{position:absolute;left:13px;top:-5px;font-size:10px;font-weight:700;
+             color:var(--text);text-shadow:0 0 4px #000,0 0 4px #000;
+             white-space:nowrap;font-variant-numeric:tabular-nums}
  .cell.road{background:#212125}
  .cell.gate1,.cell.gate2{background:#2b3b2b;border:1px solid #4f7a4f}
  .cell.pill{background:#3a3f49;border:1px solid #58606f}
@@ -837,6 +904,11 @@ function buildLot(lay){
     }
   }
 
+  // 차량 점을 올릴 겹. 칸을 다 만든 뒤에 붙인다 (innerHTML='' 로 지워지므로)
+  const cars = document.createElement('div');
+  cars.id = 'cars';
+  lot.appendChild(cars);
+
   const av = document.getElementById('avail');
   av.dataset.legend = JSON.stringify(lay.legend);
 
@@ -927,6 +999,47 @@ function renderLot(st){
   fitLot();
 }
 
+// 격자 위 차량 점.
+// 칸 사이 간격(CSS의 gap)까지 계산에 넣는다. 퍼센트로만 두면 간격이 쌓여
+// 오른쪽/아래로 갈수록 점이 실제 칸에서 밀린다.
+const LOT_GAP = 2;
+const carEls = {};
+
+function renderCars(st){
+  const lot = document.getElementById('lot');
+  const box = document.getElementById('cars');
+  if (!layout || !box) return;
+
+  const w = lot.clientWidth, h = lot.clientHeight;
+  if (!w || !h) return;
+  const cw = (w - (layout.cols - 1) * LOT_GAP) / layout.cols;
+  const ch = (h - (layout.rows - 1) * LOT_GAP) / layout.rows;
+
+  const seen = new Set();
+  (st.cars_on_map || []).forEach(c => {
+    // 격자 밖으로 크게 벗어난 값은 좌표가 튄 것이다. 찍지 않는다.
+    if (c.row < -1 || c.row > layout.rows || c.col < -1 || c.col > layout.cols) return;
+    seen.add(c.key);
+
+    let el = carEls[c.key];
+    if (!el){
+      el = document.createElement('div');
+      el.innerHTML = '<span></span>';
+      box.appendChild(el);
+      carEls[c.key] = el;
+      el.querySelector('span').textContent = c.key;
+    }
+    el.className = 'car' + (c.parked ? ' parked' : '') + (c.car_id ? '' : ' unknown');
+    el.style.left = (c.col * (cw + LOT_GAP) + cw / 2) + 'px';
+    el.style.top  = (c.row * (ch + LOT_GAP) + ch / 2) + 'px';
+  });
+
+  // 사라진 차의 점은 지운다
+  for (const key of Object.keys(carEls)){
+    if (!seen.has(key)){ carEls[key].remove(); delete carEls[key]; }
+  }
+}
+
 const NOTICE_CLASS = {
   parked_ok:        'ok',
   misparked:        'bad',
@@ -1003,6 +1116,7 @@ async function tick(){
     const st = await (await fetch('/ui_state')).json();
     renderRx(st.rx);
     renderLot(st);
+    renderCars(st);
     renderNotice(st.latest_event);
     renderCam(st);
     renderNav(st);
