@@ -207,8 +207,7 @@ class MarkerMapper:
         if saved:
             self.set_pillar_pixels(saved)
             print(f"[INFO] 저장된 기둥 픽셀 좌표를 불러왔습니다. ({len(saved)}개)")
-        elif CONFIG['USE_HOMOGRAPHY_CACHE']:
-            self.load_homography()
+
 
     # --- 호모그래피 저장/복원 -----------------------------------------------
     # (_lens_calibrated는 이 클래스 밖, 모듈 끝에 정의되어 있다)
@@ -523,29 +522,7 @@ class MarkerMapper:
         self.spot_pixels = build_spot_pixel_pos(pillar_pixels)
         self.gate_pixels = build_gate_pixel_pos(pillar_pixels)
 
-        # 호모그래피도 함께 계산 (기존 호환용 - cm 단위가 필요한 곳이 있을 수 있음)
-        img_pts, world_pts, used = [], [], []
-        for marker_id, pt in pillar_pixels.items():
-            world_pt = self.marker_world_pos.get(int(marker_id))
-            if world_pt is None:
-                continue
-            img_pts.append((float(pt[0]), float(pt[1])))
-            world_pts.append(world_pt)
-            used.append(int(marker_id))
 
-        if len(img_pts) >= 4:
-            H, _ = cv2.findHomography(
-                np.array(img_pts, np.float32), np.array(world_pts, np.float32),
-                cv2.RANSAC if len(img_pts) > 4 else 0, self.ransac_thresh_cm)
-            if H is not None:
-                self.H = H
-                self.H_inv = np.linalg.inv(H)
-                self.calibrated_with = len(img_pts)
-                self.reproj_error = self._reprojection_error(H, img_pts, world_pts)
-                self.locked = True
-                self.marker_image_pos = {mid: pt for mid, pt in zip(used, img_pts)}
-                if CONFIG['USE_HOMOGRAPHY_CACHE']:
-                    self.save_homography()
 
         msg = (f"픽셀 기반 보정 완료. 기둥 {len(pillar_pixels)}개, "
                f"자리 {len(self.spot_pixels)}개 위치 계산됨.")
