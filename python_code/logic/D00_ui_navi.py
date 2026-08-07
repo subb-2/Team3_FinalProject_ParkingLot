@@ -103,6 +103,102 @@ COLOR_NAV_ACCENT  = (60, 220, 255)   # 강조 (거리, 화살표)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
+
+# 좌표계 해석
+#
+# 이 시스템은 좌표계가 두 가지다. 화면을 그리는 쪽이 둘을 섞으면
+# 차는 이쪽, 주차 구역은 저쪽에 그려져 아무것도 맞지 않는다.
+#
+#   1) 호모그래피 모드 : 마커로 호모그래피를 잡은 경우.
+#      C00이 주는 world_pos가 실제 cm다. 배치도 cm(SPOT_WORLD_POS)다.
+#   2) 픽셀 모드       : /calibrate에서 기둥을 직접 찍은 경우.
+#      호모그래피가 없다. C00은 world_pos에 '이미지 픽셀 좌표'를 그대로
+#      담아 주고(C00_navigation.update의 is_pixel_mode 분기), 자리 좌표도
+#      navigator.spot_pixels의 픽셀 좌표다.
+#
+# 아래 함수가 '지금 어느 쪽인지'와 '그 좌표계에서의 배치'를 한 곳에서 정한다.
+def _median(values):
+    """중앙값. 비어 있으면 None. (원근 때문에 평균보다 중앙값이 안전하다)"""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def cell_size_from_pillars(pillar_pixels):
+    """
+    클릭한 기둥 픽셀 좌표에서 격자 한 칸의 픽셀 크기를 추정한다.
+
+    픽셀 모드에는 cm 환산이 없다. CELL_W_CM(10cm)에 임의의 상수(8px/cm)를
+    곱해 쓰면 가로세로 비율이 실제 화면과 어긋난다. 카메라가 비스듬히 보고
+    있어서 가로 1cm와 세로 1cm의 픽셀 수가 애초에 다르기 때문이다.
+    (이 목업에서는 세로가 가로의 절반도 안 된다)
+
+    같은 행에 있는 기둥 쌍에서 가로 간격을, 같은 열에 있는 쌍에서 세로
+    간격을 재면 화면에 실제로 보이는 칸 크기가 그대로 나온다.
+
+    Returns:
+        (cell_w_px, cell_h_px). 잴 수 없으면 (None, None).
+    """
+    cell_of = {mid: cell for cell, mid in PILL_MARKER_ID.items()}
+    known = [(cell_of[mid], pos) for mid, pos in pillar_pixels.items()
+             if mid in cell_of]
+
+    dxs, dys = [], []
+    for i, ((r1, c1), p1) in enumerate(known):
+        for (r2, c2), p2 in known[i + 1:]:
+            if r1 == r2 and c1 != c2:
+                dxs.append(abs(p2[0] - p1[0]) / abs(c2 - c1))
+            elif c1 == c2 and r1 != r2:
+                dys.append(abs(p2[1] - p1[1]) / abs(r2 - r1))
+
+    cell_w, cell_h = _median(dxs), _median(dys)
+    if cell_w is None and cell_h is None:
+        return None, None
+
+    # 한쪽만 재졌으면 설계상의 가로세로 비로 나머지를 추정한다
+    ratio = C02_CONFIG['CELL_H_CM'] / C02_CONFIG['CELL_W_CM']
+    if cell_w is None:
+        cell_w = cell_h / ratio
+    if cell_h is None:
+        cell_h = cell_w * ratio
+    return cell_w, cell_h
+
+
+def resolve_layout(navigator):
+    """
+    지금 좌표계에 맞는 배치를 돌려준다.
+
+    Args:
+        navigator: ParkingNavigator 인스턴스 (None이면 cm 기본 배치)
+
+    Returns:
+        {
+          "pixel_mode": bool,
+          "spot_pos":   {구역ID: (x, y)},   # 모드에 맞는 단위 (cm 또는 px)
+          "gate_pos":   (x, y) 또는 None,
+          "cell_w":     격자 한 칸의 가로 크기 (같은 단위),
+          "cell_h":     격자 한 칸의 세로 크기 (같은 단위),
+        }
+    """
+    mapper = getattr(navigator, 'mapper', None)
+    pillar_pixels = getattr(mapper, 'pillar_pixels', None)
+
+    if pillar_pixels:
+        spot_pos = dict(getattr(navigator, 'spot_pixels', None) or mapper.spot_pixels)
+        gate_pos = mapper.gate_pixels[0] if mapper.gate_pixels else None
+        cell_w, cell_h = cell_size_from_pillars(pillar_pixels)
+        if cell_w is None:
+            # 기둥이 한 줄로만 찍힌 경우. 자리 간격으로라도 크기를 잡는다.
+            cell_w = cell_h = 60.0
+        return {"pixel_mode": True, "spot_pos": spot_pos, "gate_pos": gate_pos,
+                "cell_w": cell_w, "cell_h": cell_h}
+
+    spot_pos = dict(getattr(navigator, 'spot_world_pos', None) or SPOT_WORLD_POS)
+    return {"pixel_mode": False, "spot_pos": spot_pos, "gate_pos": GATE1_WORLD_POS,
+            "cell_w": C02_CONFIG['CELL_W_CM'], "cell_h": C02_CONFIG['CELL_H_CM']}
+
 # 안내 상수 -> 화면에 띄울 짧은 영문 (OpenCV는 한글 렌더링 불가)
 MANEUVER_LABEL = {
     GUIDE_STRAIGHT: "GO STRAIGHT",
@@ -148,32 +244,52 @@ class NavigationView:
         self.width = width or CONFIG['NAV_WIDTH']
         self.height = height or CONFIG['NAV_HEIGHT']
 
-        self.is_pixel_mode = navigator is not None and getattr(navigator, 'pillar_pixels', None)
-
-        if self.is_pixel_mode:
-            self.spot_world_pos = dict(navigator.spot_pixels)
-            self.gate_world_pos = navigator.gate_pixels[0] if navigator.gate_pixels[0] else GATE1_WORLD_POS
-            self.scale = 1.2
-            self.cell_scale = 8.0
-        else:
-            if spot_world_pos is not None:
-                self.spot_world_pos = dict(spot_world_pos)
-            elif navigator is not None and getattr(navigator, 'spot_world_pos', None):
-                self.spot_world_pos = dict(navigator.spot_world_pos)
-            else:
-                self.spot_world_pos = dict(SPOT_WORLD_POS)
-            self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE1_WORLD_POS
-            self.scale = CONFIG['NAV_PX_PER_CM']
-            self.cell_scale = 1.0
+        # 호출자가 직접 지정한 배치는 navigator보다 우선한다 (단독 테스트용)
+        self._spot_override = dict(spot_world_pos) if spot_world_pos is not None else None
+        self._gate_override = gate_world_pos
 
         self.car_y = int(self.height * CONFIG['NAV_CAR_Y_RATIO'])
         self.banner_h = CONFIG['NAV_BANNER_H']
         self._display_heading = None
 
+        self._layout = None
+        self._sync_layout()
         self._build_perspective()
 
-        print(f"[INFO] 차량 시점 내비게이션 화면 초기화 완료. "
-              f"({self.width}x{self.height}, {self.scale:.1f} px/cm)")
+    def _sync_layout(self):
+        """
+        navigator의 보정 상태를 읽어 좌표계를 맞춘다. (매 프레임 호출)
+
+        생성 시점에 한 번만 읽으면 안 된다. 보정(/calibrate)은 프로그램이
+        뜬 뒤에 하므로, 그때는 자리 좌표가 아직 비어 있고 픽셀 모드인지도
+        알 수 없다. 그 상태로 굳으면 차 위치는 픽셀(예: 332,260), 배치는
+        cm(0~120) 좌표가 되어 주차장이 화면 밖 저 멀리 그려진다.
+        안내 화면에 노면만 덩그러니 보이던 원인이 이것이다.
+        """
+        layout = resolve_layout(self.navigator)
+        if self._spot_override is not None:
+            layout['spot_pos'] = dict(self._spot_override)
+        if self._gate_override is not None:
+            layout['gate_pos'] = self._gate_override
+        if layout == self._layout:
+            return
+
+        self._layout = layout
+        self.is_pixel_mode = layout['pixel_mode']
+        self.spot_world_pos = layout['spot_pos']
+        self.gate_world_pos = layout['gate_pos']
+        self.cell_w = layout['cell_w']
+        self.cell_h = layout['cell_h']
+
+        # 확대 배율. 두 좌표계에서 '화면에 보이는 한 칸의 크기'가 같아지도록
+        # 맞춘다. cm 모드면 NAV_PX_PER_CM 그대로다.
+        self.scale = (CONFIG['NAV_PX_PER_CM'] * C02_CONFIG['CELL_W_CM']) / self.cell_w
+
+        unit = "px" if self.is_pixel_mode else "cm"
+        print(f"[INFO] 차량 시점 내비게이션 화면 좌표계 설정. "
+              f"({self.width}x{self.height}, {'픽셀' if self.is_pixel_mode else '호모그래피'} 모드, "
+              f"자리 {len(self.spot_world_pos)}개, 한 칸 {self.cell_w:.0f}x{self.cell_h:.0f}{unit}, "
+              f"배율 {self.scale:.2f})")
 
     def _build_perspective(self):
         """
@@ -270,6 +386,9 @@ class NavigationView:
             from data.map_data import spot_status as live_status
             spot_status = live_status
 
+        # 보정이 실행 중에 바뀔 수 있으므로 매번 좌표계를 확인한다
+        self._sync_layout()
+
         if nav is None or nav.get("world_pos") is None:
             return self._render_waiting(fps, extra_info)
 
@@ -309,26 +428,32 @@ class NavigationView:
         return canvas
 
     def _draw_ground_grid(self, layer, car_pos, heading):
-        """노면 격자. 차량이 움직이는 느낌(속도감)을 준다."""
+        """
+        노면 격자. 차량이 움직이는 느낌(속도감)을 준다.
+
+        간격은 주차장 한 칸으로 잡는다. 고정 cm 값을 쓰면 픽셀 모드에서
+        간격이 수십 배 촘촘해져 화면이 회색으로 덮인다.
+        """
         if not CONFIG['SHOW_GRID']:
             return
 
-        step = CONFIG['GRID_STEP_CM']
-        span = 260.0    # 격자를 그릴 범위 (cm)
+        step_x, step_y = self.cell_w, self.cell_h
+        # 화면을 덮을 만큼만 그린다. 회전을 감안해 대각선 길이를 쓴다.
+        span = math.hypot(self.width, self.height) / self.scale
 
-        # 차량 위치를 격자 간격에 맞춰 반올림해 기준점을 잡는다
-        bx = math.floor(car_pos[0] / step) * step
-        by = math.floor(car_pos[1] / step) * step
+        # 차량 위치를 격자 간격에 맞춰 내림해 기준점을 잡는다
+        bx = math.floor(car_pos[0] / step_x) * step_x
+        by = math.floor(car_pos[1] / step_y) * step_y
 
-        n = int(span / step)
-        for i in range(-n, n + 1):
-            x = bx + i * step
+        for i in range(-int(span / step_x) - 1, int(span / step_x) + 2):
+            x = bx + i * step_x
             p1 = self._world_to_flat((x, by - span), car_pos, heading)
             p2 = self._world_to_flat((x, by + span), car_pos, heading)
             cv2.line(layer, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
                      COLOR_GRID, 1, cv2.LINE_AA)
 
-            y = by + i * step
+        for i in range(-int(span / step_y) - 1, int(span / step_y) + 2):
+            y = by + i * step_y
             p3 = self._world_to_flat((bx - span, y), car_pos, heading)
             p4 = self._world_to_flat((bx + span, y), car_pos, heading)
             cv2.line(layer, (int(p3[0]), int(p3[1])), (int(p4[0]), int(p4[1])),
@@ -337,12 +462,12 @@ class NavigationView:
     def _draw_ground_spots(self, layer, car_pos, heading, spot_status, nav):
         """주차 구역을 회전된 사각형으로 그린다."""
         ratio = CONFIG['SPOT_FILL_RATIO']
-        hw = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * ratio / 2
+        hw = self.cell_w * ratio / 2
         target = nav.get("target_spot")
 
         for spot_id, (sx, sy) in self.spot_world_pos.items():
             # 대형 구역은 한 자리가 세로 2칸이므로 그만큼 길게 그린다
-            hh = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * get_spot_cell_count(spot_id) * ratio / 2
+            hh = self.cell_h * get_spot_cell_count(spot_id) * ratio / 2
             corners = [(sx - hw, sy - hh), (sx + hw, sy - hh),
                        (sx + hw, sy + hh), (sx - hw, sy + hh)]
             pts = np.array([self._world_to_flat(c, car_pos, heading) for c in corners],
@@ -363,7 +488,8 @@ class NavigationView:
         if self.gate_world_pos is not None:
             g = self._world_to_flat(self.gate_world_pos, car_pos, heading)
             cv2.circle(layer, (int(g[0]), int(g[1])),
-                       int(6 * self.scale / 7 + 6), COLOR_GATE, 2, cv2.LINE_AA)
+                       max(8, int(self.cell_w * self.scale * 0.4)),
+                       COLOR_GATE, 2, cv2.LINE_AA)
 
     def _draw_ground_route(self, layer, car_pos, heading, nav):
         """
@@ -427,8 +553,18 @@ class NavigationView:
         cv2.rectangle(canvas, (0, 0), (w, self.banner_h), COLOR_NAV_BANNER, -1)
         cv2.line(canvas, (0, self.banner_h), (w, self.banner_h), (70, 70, 74), 1)
 
-        maneuver = nav.get("maneuver") or nav.get("guide") or GUIDE_UNKNOWN
+        # 다음 동작. maneuver는 경로 계획이 있을 때만 채워진다.
+        # 픽셀 모드에는 경로 계획이 없어 maneuver가 늘 UNKNOWN이므로,
+        # 그때는 C00이 목표 방향으로 계산해 둔 guide를 쓴다.
+        # (이걸 안 보고 있어서 안내가 항상 SEARCHING으로만 떴다)
+        maneuver = nav.get("maneuver")
+        if not maneuver or maneuver == GUIDE_UNKNOWN:
+            maneuver = nav.get("guide") or GUIDE_UNKNOWN
+
+        # 다음 동작까지의 거리도 마찬가지. 없으면 목적지까지 남은 거리를 쓴다.
         dist = nav.get("maneuver_distance_cm")
+        if dist is None:
+            dist = nav.get("distance_cm")
 
         # 좌측: 방향 화살표 아이콘
         self._draw_maneuver_icon(canvas, (66, self.banner_h // 2), maneuver)
@@ -496,7 +632,9 @@ class NavigationView:
             car_id = nav.get("car_id") or f"#{nav.get('track_id')}"
             wx, wy = nav["world_pos"]
             parts.append(f"CAR {car_id}")
-            parts.append(f"({wx:.0f},{wy:.0f})cm")
+            # 픽셀 모드의 좌표는 cm가 아니라 이미지 픽셀이다. cm로 적어두면
+            # 값이 이상해 보여 좌표계를 의심하게 된다.
+            parts.append(f"({wx:.0f},{wy:.0f}){'px' if self.is_pixel_mode else 'cm'}")
         if fps is not None:
             parts.append(f"{fps:.1f} fps")
         if extra_info:
@@ -519,11 +657,14 @@ class NavigationView:
         cv2.rectangle(canvas, (x0, y0), (x0 + mw, y0 + mh), (80, 80, 84), 1)
 
         # 전체 구역이 들어가도록 축척 계산
-        xs = [p[0] for p in self.spot_world_pos.values()] + [self.gate_world_pos[0], car_pos[0]]
-        ys = [p[1] for p in self.spot_world_pos.values()] + [self.gate_world_pos[1], car_pos[1]]
-        pad = 18.0
-        min_x, max_x = min(xs) - pad, max(xs) + pad
-        min_y, max_y = min(ys) - pad, max(ys) + pad
+        xs = [p[0] for p in self.spot_world_pos.values()] + [car_pos[0]]
+        ys = [p[1] for p in self.spot_world_pos.values()] + [car_pos[1]]
+        if self.gate_world_pos is not None:
+            xs.append(self.gate_world_pos[0])
+            ys.append(self.gate_world_pos[1])
+        # 여백은 한 칸의 크기에 비례해서 준다 (모드마다 단위가 다르므로)
+        min_x, max_x = min(xs) - self.cell_w, max(xs) + self.cell_w
+        min_y, max_y = min(ys) - self.cell_h, max(ys) + self.cell_h
         s = min((mw - 16) / max(max_x - min_x, 1e-6), (mh - 16) / max(max_y - min_y, 1e-6))
 
         def to_mini(p):
@@ -531,9 +672,9 @@ class NavigationView:
 
         target = nav.get("target_spot")
         ratio = CONFIG['SPOT_FILL_RATIO']
-        hw = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * ratio / 2
+        hw = self.cell_w * ratio / 2
         for spot_id, pos in self.spot_world_pos.items():
-            hh = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * get_spot_cell_count(spot_id) * ratio / 2
+            hh = self.cell_h * get_spot_cell_count(spot_id) * ratio / 2
             p1 = to_mini((pos[0] - hw, pos[1] - hh))
             p2 = to_mini((pos[0] + hw, pos[1] + hh))
             if spot_id == target:
@@ -614,6 +755,13 @@ class NavigationMapUI:
         self.width = width or CONFIG['MAP_WIDTH']
         self.height = height or CONFIG['MAP_HEIGHT']
 
+        # 이 조감도는 항상 cm 좌표계로 그린다. 격자(벽/도로/기둥)를
+        # cell_to_world로 배치하기 때문이다. 픽셀 모드일 때 들어오는
+        # 픽셀 좌표는 _to_world가 cm로 바꿔서 넘긴다.
+        self.cell_scale = 1.0
+        self._px_to_cm = None
+        self._px_key = None
+
         # 주차 구역 실좌표 확보 (우선순위: 인자 > navigator > C00 기본값)
         if spot_world_pos is not None:
             self.spot_world_pos = dict(spot_world_pos)
@@ -674,6 +822,60 @@ class NavigationMapUI:
         self.offset_x = margin + (usable_w - span_x * self.scale) / 2
         self.offset_y = margin + (usable_h - span_y * self.scale) / 2
 
+    def _refresh_px_to_cm(self):
+        """
+        픽셀 모드일 때 쓸 '이미지 픽셀 -> cm' 변환을 준비한다.
+
+        이 조감도의 배경(격자/기둥/도로)은 cm 좌표로 그려진다. 그런데
+        픽셀 모드에서는 C00이 차량 위치를 이미지 픽셀로 준다. 그대로 찍으면
+        차가 주차장 밖 엉뚱한 곳에 나타난다.
+
+        보정 때 찍은 기둥은 '픽셀 좌표'와 '설계상 cm 좌표'를 둘 다 아는
+        점들이다. 그 대응으로 변환 행렬을 구하면 차량 픽셀을 cm로 옮길 수 있다.
+        """
+        mapper = getattr(self.navigator, 'mapper', None)
+        pillar_pixels = getattr(mapper, 'pillar_pixels', None)
+        if not pillar_pixels:
+            self._px_to_cm = None
+            self._px_key = None
+            return
+        if getattr(self, '_px_key', None) == pillar_pixels:
+            return      # 이미 같은 보정으로 만들어 둔 것이 있다
+
+        ids = [i for i in pillar_pixels if i in mapper.marker_world_pos]
+        if len(ids) < 4:
+            self._px_to_cm = None
+            self._px_key = dict(pillar_pixels)
+            return
+
+        src = np.array([pillar_pixels[i] for i in ids], dtype=np.float32)
+        dst = np.array([mapper.marker_world_pos[i] for i in ids], dtype=np.float32)
+        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+        self._px_to_cm = H
+        self._px_key = dict(pillar_pixels)
+
+    def _to_cm(self, pt):
+        """픽셀 모드로 들어온 좌표를 cm로 바꾼다. cm 모드면 그대로 돌려준다."""
+        if pt is None or self._px_to_cm is None:
+            return pt
+        src = np.array([[[float(pt[0]), float(pt[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, self._px_to_cm)
+        return float(dst[0][0][0]), float(dst[0][0][1])
+
+    def _to_cm_results(self, nav_results):
+        """nav 결과의 좌표들을 이 화면의 좌표계(cm)로 옮긴 사본을 만든다."""
+        if self._px_to_cm is None:
+            return nav_results
+        out = []
+        for nav in nav_results:
+            n = dict(nav)
+            n["world_pos"] = self._to_cm(nav.get("world_pos"))
+            n["target_world"] = self._to_cm(nav.get("target_world"))
+            if nav.get("route"):
+                n["route"] = [self._to_cm(p) for p in nav["route"]]
+            out.append(n)
+        return out
+
     def world_to_map(self, world_pt):
         """
         주차장 실좌표(cm)를 맵 화면 좌표(px)로 변환.
@@ -707,6 +909,10 @@ class NavigationMapUI:
             spot_status = live_status
 
         canvas = np.full((self.height, self.width, 3), COLOR_BG, dtype=np.uint8)
+
+        # 픽셀 모드면 차량 좌표를 cm로 옮겨서 그린다 (배경이 cm 좌표계다)
+        self._refresh_px_to_cm()
+        nav_results = self._to_cm_results(nav_results)
 
         # 현재 목표로 지정된 구역들 (강조 표시용)
         target_spots = {n["target_spot"] for n in nav_results if n.get("target_spot")}
@@ -902,7 +1108,8 @@ class NavigationMapUI:
                 continue
 
             points = history[-CONFIG['TRAJECTORY_MAX_POINTS']:]
-            pts = np.array([self.world_to_map(p) for p in points], dtype=np.int32)
+            pts = np.array([self.world_to_map(self._to_cm(p)) for p in points],
+                           dtype=np.int32)
             cv2.polylines(canvas, [pts], False, COLOR_TRAJECTORY, 1, cv2.LINE_AA)
 
     def _draw_vehicles(self, canvas, nav_results):

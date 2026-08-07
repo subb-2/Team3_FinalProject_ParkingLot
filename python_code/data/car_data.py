@@ -178,10 +178,21 @@ INITIAL_PARKED = {
 #       (등록되지 않은 번호가 있으면 아래에서 경고를 출력한다)
 TEST_PRESET_CAR_NUMBERS = ["1234", "1998", "1111", "2222", "3333", "4444"]
 
+def _initial_parked_car_ids():
+    """INITIAL_PARKED에 적힌 차량번호 집합. (("9999", 45) 형태도 처리)"""
+    ids = set()
+    for entry in INITIAL_PARKED.values():
+        ids.add(entry[0] if isinstance(entry, (tuple, list)) else entry)
+    return ids
+
+
 for _car_id in TEST_PRESET_CAR_NUMBERS:
     if _car_id not in car_types:
         print(f"[경고] TEST_PRESET_CAR_NUMBERS의 '{_car_id}'가 car_types에 없습니다. "
               f"'{DEFAULT_CAR_TYPE}' 차량으로 처리됩니다.")
+    if _car_id in _initial_parked_car_ids():
+        print(f"[안내] '{_car_id}'는 INITIAL_PARKED에 이미 세워둔 차량입니다. "
+              f"입차 요청은 '이미 주차 중'으로 거부되고 안내는 시작되지 않습니다.")
 
 
 def _apply_initial_parked():
@@ -231,6 +242,8 @@ def _apply_initial_parked():
               f"<- '{car_id}'({get_car_type(car_id)}){elapsed_note}")
 
 # 실제 적용은 cars_info가 만들어진 뒤(파일 맨 아래)에 한다.
+# 그 호출을 빠뜨리면 여기 적어둔 자리가 계속 '빈자리'로 남아 새 차에게
+# 그대로 배정된다. 반드시 파일 끝의 호출과 짝을 이룰 것.
 
 # 요금 설정
 def get_fee_config():
@@ -283,4 +296,13 @@ def get_car_info(car_id):
         주차 정보 딕셔너리 또는 None
     """
     return cars_info.get(car_id, None)
+
+
+# =====================================================================
+# 초기 상태 적용 (import 시 1회)
+# =====================================================================
+# cars_info가 만들어진 뒤에 불러야 하므로 파일 맨 아래에 둔다.
+# INITIAL_PARKED에 적은 자리를 여기서 "full"로 막고 차량 정보를 채운다.
+# 이 호출이 없으면 미리 세워둔 자리가 빈자리로 남아 새 차에게 배정된다.
+_apply_initial_parked()
 
