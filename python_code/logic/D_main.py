@@ -9,6 +9,7 @@ from flask import Flask, Response
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from logic.B00_camera_input import JPEG_PARAMS
 from logic.C_main import (
     CONFIG as C_CONFIG, open_camera, build_pipeline,
     setup_car_number_source, register_car_number, build_status,
@@ -59,7 +60,10 @@ class PipelineRunner:
     def __init__(self, pipeline):
         self.pipeline = pipeline
         self._frame = None          # 검출/추적/마커까지 그려진 최신 프레임
-        self._lock = threading.Lock()
+        self._seq = 0               # 프레임 일련번호 (새 프레임인지 판단용)
+        self._jpeg = None           # 위 프레임을 인코딩한 결과 (한 번만 인코딩)
+        # 여러 화면이 같은 프레임을 기다리므로 Lock이 아니라 Condition을 쓴다.
+        self._cond = threading.Condition()
         self._stop = threading.Event()
         self._thread = None
         self._last_error = None
@@ -85,14 +89,18 @@ class PipelineRunner:
                 print("[ERROR] 카메라 프레임을 읽을 수 없습니다. 처리 스레드를 종료합니다.")
                 break
 
+            # 카메라가 들고 있는 원본에 직접 그리지 않는다.
+            # /snapshot(보정 화면)이 같은 배열을 보기 때문에, 여기서 격자와
+            # 박스를 그려버리면 보정할 때 깨끗한 사진을 찍을 수 없다.
+            frame = frame.copy()
+
             # 처리 중 예외가 나도 스레드를 죽이지 않는다.
             # 죽으면 화면이 조용히 멈춰 원인을 알 수 없기 때문이다.
             try:
                 self.pipeline.process_frame(frame)
             except Exception as exc:
                 self._report_error(exc)
-                with self._lock:
-                    self._frame = self._error_canvas(frame, exc)
+                self._publish(self._error_canvas(frame, exc))
                 time.sleep(0.5)
                 continue
 
@@ -105,9 +113,15 @@ class PipelineRunner:
                 frame_count = 0
 
             self.pipeline.draw_status(frame)
+            self._publish(frame)
 
-            with self._lock:
-                self._frame = frame
+    def _publish(self, frame):
+        """처리가 끝난 프레임을 화면들에게 알린다."""
+        with self._cond:
+            self._frame = frame
+            self._jpeg = None       # 새 프레임이므로 인코딩 결과는 버린다
+            self._seq += 1
+            self._cond.notify_all()
 
     def _report_error(self, exc):
         """같은 오류는 한 번만 자세히 출력한다. (매 프레임 도배 방지)"""
@@ -134,14 +148,54 @@ class PipelineRunner:
 
     def latest_frame(self):
         """가장 최근에 처리된 프레임의 복사본. 아직 없으면 None."""
-        with self._lock:
+        with self._cond:
             return None if self._frame is None else self._frame.copy()
+
+    def latest_jpeg(self, last_seq=0, timeout=2.0):
+        """
+        가장 최근 프레임의 JPEG 바이트를 (일련번호, 바이트)로 반환.
+
+        last_seq와 같은 프레임뿐이면 새 프레임이 올 때까지 기다린다.
+        같은 장면을 몇 번이고 다시 인코딩하는 낭비를 없애기 위해서다.
+        (1280x720 인코딩은 한 장에 5~10ms다. 20fps로 헛돌리면 그것만으로
+         파이프라인 스레드에게서 CPU를 한참 뺏어간다)
+
+        인코딩 결과는 캐시해 두므로, 화면을 여러 개 열어도 프레임당 한 번만
+        인코딩한다.
+        """
+        with self._cond:
+            if self._seq == last_seq:
+                self._cond.wait(timeout)
+            seq, frame, jpeg = self._seq, self._frame, self._jpeg
+
+        if jpeg is not None or frame is None:
+            return seq, jpeg
+
+        # 인코딩은 락 밖에서 한다. 락을 쥔 채로 하면 그 5~10ms 동안
+        # 파이프라인 스레드가 다음 프레임을 내놓지 못하고 멈춰 선다.
+        ok, buf = cv2.imencode('.jpg', frame, JPEG_PARAMS)
+        payload = buf.tobytes() if ok else None
+
+        with self._cond:
+            # 그 사이 새 프레임이 왔다면 이 결과는 버린다 (캐시 오염 방지)
+            if self._seq == seq:
+                self._jpeg = payload
+        return seq, payload
 
 
 # MJPEG 스트리밍 헬퍼
+def _mjpeg_chunk(payload):
+    return (b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' + payload + b'\r\n')
+
+
 def mjpeg_response(render_fn, fps):
     """
     매 호출마다 한 장을 그려주는 함수를 MJPEG 스트림으로 만든다.
+
+    전송 간격은 '그리는 시간까지 포함해서' 맞춘다. 예전에는 그리고 나서
+    무조건 1/fps만큼 더 잤기 때문에, 20fps로 설정해도 그리기가 20ms 걸리면
+    실제로는 14fps밖에 나가지 않았다.
 
     Args:
         render_fn: BGR 이미지(numpy array)를 반환하는 함수. None을 반환하면 건너뛴다.
@@ -154,13 +208,38 @@ def mjpeg_response(render_fn, fps):
 
     def generate():
         while True:
+            start = time.perf_counter()
             canvas = render_fn()
             if canvas is not None:
-                ok, buf = cv2.imencode('.jpg', canvas)
+                ok, buf = cv2.imencode('.jpg', canvas, JPEG_PARAMS)
                 if ok:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
-            time.sleep(interval)
+                    yield _mjpeg_chunk(buf.tobytes())
+            time.sleep(max(0.0, interval - (time.perf_counter() - start)))
+
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+def mjpeg_runner_response(runner, fps):
+    """
+    PipelineRunner가 만든 프레임을 그대로 내보내는 MJPEG 스트림.
+
+    mjpeg_response와 달리 '새 프레임이 생겼을 때만' 전송한다. 파이프라인이
+    24fps인데 20fps로 퍼올리면 두 주기가 어긋나 같은 장면을 두 번 보내거나
+    한 장을 건너뛰어 화면이 규칙적으로 튄다. 새 프레임에 맞춰 보내면
+    파이프라인이 만든 그대로의 부드러움이 화면에 나온다.
+
+    fps는 상한으로만 쓴다. (파이프라인이 이보다 빠르면 프레임을 건너뛴다)
+    """
+    interval = 1.0 / max(fps, 1)
+
+    def generate():
+        last_seq = 0
+        while True:
+            start = time.perf_counter()
+            last_seq, payload = runner.latest_jpeg(last_seq)
+            if payload is not None:
+                yield _mjpeg_chunk(payload)
+            time.sleep(max(0.0, interval - (time.perf_counter() - start)))
 
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
@@ -213,7 +292,7 @@ if __name__ == '__main__':
     @app.route('/video_feed')
     def video_feed():
         """카메라 원본 + 검출/추적/마커 오버레이."""
-        return mjpeg_response(runner.latest_frame, CONFIG['VIDEO_FEED_FPS'])
+        return mjpeg_runner_response(runner, CONFIG['VIDEO_FEED_FPS'])
 
     @app.route('/nav_feed')
     def nav_feed():

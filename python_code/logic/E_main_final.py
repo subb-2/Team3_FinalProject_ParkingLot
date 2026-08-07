@@ -40,7 +40,7 @@ from logic.C_main import (
     CONFIG as C_CONFIG,
     open_camera, build_pipeline, register_car_number, build_status,
 )
-from logic.D_main import PipelineRunner, mjpeg_response
+from logic.D_main import PipelineRunner, mjpeg_response, mjpeg_runner_response
 from logic.D00_ui_navi import NavigationView, pick_my_vehicle
 from logic.E00_final_ui import (
     CONFIG as E00_CONFIG, RxFeed, ParkingWatcher,
@@ -210,7 +210,7 @@ def main():
     @app.route('/video_feed')
     def video_feed():
         """3번 구간 : 카메라 원본 + 검출/추적/마커 오버레이 (MJPEG)."""
-        return mjpeg_response(runner.latest_frame, CONFIG['CAM_FEED_FPS'])
+        return mjpeg_runner_response(runner, CONFIG['CAM_FEED_FPS'])
 
     @app.route('/nav_feed')
     def nav_feed():

@@ -11,7 +11,7 @@ from flask import Flask, Response, request
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from logic.B00_camera_input import get_camera
+from logic.B00_camera_input import get_camera, JPEG_PARAMS
 from logic.B01_car_detection import CarDetector, CONFIG as B01_CONFIG
 from logic.B02_car_mot import (
     CarMOT, CONFIG as B02_CONFIG,
@@ -202,7 +202,14 @@ class ParkingNavigationPipeline:
         mapper = self.navigator.mapper
         ready = mapper.is_ready()
 
-        cv2.putText(frame, f"FPS: {self.fps:.1f}", (10, 30),
+        # 처리 FPS 옆에 카메라가 실제로 주는 fps와 버린 프레임 수를 함께 적는다.
+        # 이 둘이 벌어져 있으면(예: cam 30 / FPS 24) 화면이 밀리는 원인은
+        # 처리 속도이고, 붙어 있으면 카메라나 전송이 원인이다.
+        cam_txt = ""
+        cam = self.cap
+        if hasattr(cam, "capture_fps"):
+            cam_txt = f"  (cam {cam.capture_fps:.0f} / drop {cam.dropped})"
+        cv2.putText(frame, f"FPS: {self.fps:.1f}{cam_txt}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
         cv2.putText(frame, f"Tracks: {len(self.latest_tracks)} (Matched: {matched})", (10, 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
@@ -274,6 +281,10 @@ class ParkingNavigationPipeline:
                 print("[ERROR] 카메라 프레임을 읽을 수 없습니다. 스트리밍을 종료합니다.")
                 break
 
+            # 카메라가 들고 있는 원본에 직접 그리지 않는다.
+            # /snapshot(보정 화면)이 같은 배열을 보기 때문이다.
+            frame = frame.copy()
+
             # 처리 중 예외가 나면 제너레이터가 죽어 스트림이 조용히 끊긴다.
             # 브라우저에는 깨진 이미지만 보여 원인을 알 수 없으므로,
             # 오류를 화면에 그대로 띄우고 스트리밍은 유지한다.
@@ -306,7 +317,7 @@ class ParkingNavigationPipeline:
                           f"목표={str(n['target_spot']):5s} 거리={dist:8s} 안내={n['guide_text']}")
 
             # JPEG 압축 후 웹 스트리밍 반환
-            ret, buffer = cv2.imencode('.jpg', frame)
+            ret, buffer = cv2.imencode('.jpg', frame, JPEG_PARAMS)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -455,8 +466,13 @@ def build_status(pipeline):
     if last_entry is not None:
         last_entry = {k: v for k, v in last_entry.items() if k != "time"}
 
+    cam = pipeline.cap
     return {
         "fps": round(pipeline.fps, 1),
+        # 카메라가 실제로 주는 fps와, 처리가 못 따라가 버린 프레임 수.
+        # fps보다 camera_fps가 크면 그 차이만큼 프레임을 버리고 있다는 뜻이다.
+        "camera_fps": round(getattr(cam, "capture_fps", 0.0), 1),
+        "dropped_frames": getattr(cam, "dropped", 0),
         "stage_ms": pipeline.stage_ms,
         "last_entry": last_entry,
         "availability": {
