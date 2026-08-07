@@ -1221,10 +1221,6 @@ class ParkingNavigator:
                 break
             state["index"] += 1
 
-    def get_route(self, car_id):
-        """차량의 현재 경로 경유점 리스트를 반환. 없으면 None."""
-        state = self.routes.get(car_id)
-        return list(state["waypoints"]) if state else None
 
     def compute_maneuver(self, route, index, world_pos):
         """
@@ -1335,10 +1331,6 @@ class ParkingNavigator:
             key=lambda s: self._distance(world_pos, self.spot_world_pos[s])
         )
 
-    def get_world_position(self, car_id):
-        """차량 번호로 현재 실좌표를 조회. 이력이 없으면 None."""
-        history = self.world_history.get(car_id)
-        return history[-1] if history else None
 
     def get_world_trajectory(self, car_id):
         """차량 번호로 실좌표 이동 궤적 리스트를 반환."""

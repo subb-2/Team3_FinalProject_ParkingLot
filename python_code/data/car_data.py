@@ -286,24 +286,3 @@ def get_car_info(car_id):
     """
     return cars_info.get(car_id, None)
 
-def get_spot_info(spot_id):
-    """
-    주차 구역 ID로 해당 구역의 정보를 조회합니다.
-    (공간 중심으로 조회할 때 사용)
-    
-    Args:
-        spot_id: 주차 구역 ID (예: "A-1")
-    
-    Returns:
-        주차 정보 딕셔너리 ({"car_id": "1234", "entry_time": ...}) 또는 None
-    """
-    if spot_status.get(spot_id) == "full":
-        for c_id, info in cars_info.items():
-            if info["spot_id"] == spot_id:
-                return {"car_id": c_id, "entry_time": info["entry_time"]}
-    return None
-
-
-# 미리 주차되어 있는 차량을 반영한다.
-# cars_info가 만들어진 뒤여야 하므로 파일 맨 아래에서 호출한다.
-_apply_initial_parked()

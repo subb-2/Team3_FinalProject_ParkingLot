@@ -316,48 +316,6 @@ def get_cols():
 # 차량이 항상 지나갈 수 있는 셀 타입
 DRIVABLE_CELLS = {ROAD, GATE1, GATE2}
 
-def is_valid_pos(row, col, open_spot=None):
-    """
-    주어진 좌표가 맵 범위 내이고 차량이 지나갈 수 있는 위치인지 확인합니다.
-
-    PILL(기둥)은 언제나 통과할 수 없습니다.
-    주차 구역(SPOT1~4)은 기본적으로 통과할 수 없고, 목적지로 지정된 구역만
-    예외적으로 열어줍니다. (통로를 따라 이동하도록 강제하기 위함)
-
-    Args:
-        row, col:  확인할 격자 좌표
-        open_spot: 진입을 허용할 주차 구역 ID (예: "A-1"). None이면 모두 차단.
-    """
-    if not (0 <= row < get_rows() and 0 <= col < get_cols()):
-        return False
-
-    cell = grid_map[row][col]
-    if cell in DRIVABLE_CELLS:
-        return True
-    if cell in SPOT_CELLS and open_spot is not None:
-        return coord_to_spot.get((row, col)) == open_spot
-    return False
-
-def get_all_spot_ids():
-    """정의된 모든 주차 구역 ID 리스트를 반환합니다."""
-    return list(spot_map.keys())
-
-def get_spot_entry_coord(spot_id):
-    """
-    주차 구역의 진입 좌표(도로와 인접한 첫 번째 칸)를 반환합니다.
-    BFS 경로 탐색 시 목적지로 사용됩니다.
-    """
-    if spot_id in spot_map:
-        return spot_map[spot_id][0]
-    return None
-
-def get_spot_type(spot_id):
-    """주차 구역의 셀 타입(SPOT1~SPOT4)을 반환합니다. 없으면 None."""
-    return spot_type.get(spot_id)
-
-def get_spot_type_name(spot_id):
-    """주차 구역 종류의 한글 이름을 반환합니다. (예: "장애인")"""
-    return SPOT_TYPE_NAME.get(spot_type.get(spot_id), "알 수 없음")
 
 def get_spot_ids_by_type(cell_type):
     """

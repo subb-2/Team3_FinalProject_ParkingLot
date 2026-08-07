@@ -92,16 +92,6 @@ A = 왼쪽 열, B = 오른쪽 열, C = 중앙 섬. 번호는 **입구에서 가�
 ### `get_rows()` / `get_cols()`
 그리드 맵의 행 수 / 열 수를 반환.
 
-### `is_valid_pos(row, col, open_spot=None)`
-해당 좌표가 맵 범위 안이고 차량이 지나갈 수 있는지 확인.
-`WALL`과 `PILL`은 항상 통과 불가. `SPOT`은 `open_spot`으로 지정된 구역만 통과 가능.
-
-### `get_all_spot_ids()`
-정의된 모든 주차 구역 ID 리스트를 반환.
-
-### `get_spot_entry_coord(spot_id)`
-주차 구역의 진입 좌표를 반환. 경로 탐색 시 목적지로 사용.
-
 ## 관련 모듈
 
 | 모듈 | 역할 |

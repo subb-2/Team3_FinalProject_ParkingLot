@@ -10,12 +10,12 @@ A00_uart_rx : Zybo(FPGA) → Jetson 차량번호 수신 모듈  [Wi-Fi(TCP) 버�
   byte2 상위4비트 = 3번째 자리, byte2 하위4비트 = 4번째 자리
   예) 0x12 0x34  ->  "1234"
 
-기존 UART 코드는 아래쪽 '[UART 버전 원본 코드]' 블록에 주석으로 보존해 두었다.
+시리얼 구현이 필요하면 git 이력에서 꺼낼 것. (Wi-Fi 전환 전 버전)
+
+TODO
+  - 같은 차량번호로 입차가 두 번 들어오는 경우 막기
+  - 입차 없이 출차만 들어오면 '정보 없음'으로 처리
 """
-
-# 입차 중복 막기
-# 입차 안했는데 출차 하는 경우 (정보없음 처리)
-
 
 import socket
 import threading
@@ -23,8 +23,6 @@ import time
 import datetime
 import sys
 import os
-
-# import serial   # [UART 버전] pyserial - Wi-Fi 버전에서는 사용하지 않음
 
 # 상위 디렉토리(python_code)를 import 경로에 추가하여 'logic' 패키지를 인식할 수 있도록 함
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -56,17 +54,7 @@ def get_wifi_config():
         'entry_port': 5001,     # 입차(Zybo1)가 접속할 포트
         'exit_port': 5002,      # 출차(Zybo2)가 접속할 포트
         'timeout': 1,           # accept/recv 대기 시간(초). 종료 응답성에 사용
-
-        # --- [UART 버전 설정] 보존 ---
-        # 'entry_port': '/dev/ttyTHS1',   # 입차(Zybo1) 포트
-        # 'exit_port':  '/dev/ttyTHS2',   # 출차(Zybo2) 포트
-        # 'baud_rate':  115200,           # 통신 속도
-        # 'timeout':    1,                # 응답 없으면 종료 하는 시간
     }
-
-
-# 기존 이름으로 호출하던 코드 호환용 별칭
-get_uart_config = get_wifi_config
 
 
 def parse_car_id(raw_data):
@@ -295,92 +283,3 @@ if __name__ == "__main__":
         send_test_packet(sys.argv[2], sys.argv[3])
     else:
         uart_rx_main()
-
-
-# =============================================================================
-# [UART 버전 원본 코드] - Wi-Fi 전환 전 시리얼 통신 구현. 필요 시 참고/복구용.
-# =============================================================================
-# import serial
-#
-# def get_uart_config():
-#     """
-#     UART 통신에 필요한 설정값을 반환.
-#     - 윈도우 환경: 'COM3', 'COM4' 등
-#     - 리눅스/젯슨 환경: '/dev/ttyUSB0', '/dev/ttyTHS1', '/dev/ttyACM0' 등
-#     """
-#     return {
-#         'entry_port': '/dev/ttyTHS1',   # 입차(Zybo1) 포트
-#         'exit_port': '/dev/ttyTHS2',    # 출차(Zybo2) 포트 (필요 시 실제 포트로 수정)
-#         'baud_rate': 115200,            # 통신 속도
-#         'timeout': 1                    # 응답 없으면 종료 하는 시간
-#     }
-#
-# def uart_rx_main():
-#     """
-#     Zybo 보드(입차/출차)와 UART 통신을 통해 데이터를 수신하고 파싱하는 모듈.
-#     """
-#     config = get_uart_config()
-#     ENTRY_PORT = config['entry_port']
-#     EXIT_PORT = config['exit_port']
-#     BAUD_RATE = config['baud_rate']
-#     TIMEOUT = config['timeout']
-#
-#     ser_entry = None
-#     ser_exit = None
-#
-#     # 입차 포트 연결 시도
-#     try:
-#         ser_entry = serial.Serial(ENTRY_PORT, BAUD_RATE, timeout=TIMEOUT)
-#         print(f"[입차] UART 연결 성공: {ENTRY_PORT} ({BAUD_RATE} bps)")
-#     except serial.SerialException as e:
-#         print(f"[경고] 입차 포트({ENTRY_PORT})를 열 수 없습니다. 입차 처리가 비활성화됩니다.")
-#
-#     # 출차 포트 연결 시도
-#     try:
-#         ser_exit = serial.Serial(EXIT_PORT, BAUD_RATE, timeout=TIMEOUT)
-#         print(f"[출차] UART 연결 성공: {EXIT_PORT} ({BAUD_RATE} bps)")
-#     except serial.SerialException as e:
-#         print(f"[경고] 출차 포트({EXIT_PORT})를 열 수 없습니다. 출차 처리가 비활성화됩니다.")
-#
-#     if not ser_entry and not ser_exit:
-#         print("[에러] 연결된 UART 포트가 하나도 없습니다. 프로그램을 종료합니다.")
-#         return
-#
-#     print("Zybo로부터 데이터 수신 대기 중 (Ctrl+C를 누르면 종료)...")
-#
-#     try:
-#         while True:
-#             # 1. 입차(Entry) 데이터 확인
-#             if ser_entry and ser_entry.in_waiting >= 1:
-#                 raw_data = ser_entry.read(2)
-#                 if len(raw_data) == 2:
-#                     car_id, b1, b2 = parse_car_id(raw_data)
-#                     receive_time = datetime.datetime.now().replace(second=0, microsecond=0)
-#                     print(f"\n[입차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
-#
-#                     # 입차 처리 호출
-#                     handle_car_entry(car_id, receive_time)
-#                     enqueue_car_number(car_id)
-#
-#             # 2. 출차(Exit) 데이터 확인
-#             if ser_exit and ser_exit.in_waiting >= 1:
-#                 raw_data = ser_exit.read(2)
-#                 if len(raw_data) == 2:
-#                     car_id, b1, b2 = parse_car_id(raw_data)
-#                     print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
-#
-#                     # 출차 및 요금 계산 호출
-#                     remove_car(car_id)
-#
-#             # CPU 과부하 방지를 위한 짧은 대기
-#             time.sleep(0.01)
-#
-#     except KeyboardInterrupt:
-#         print("\n수신 프로그램을 강제 종료합니다.")
-#     finally:
-#         if ser_entry and ser_entry.is_open:
-#             ser_entry.close()
-#             print("입차 시리얼 포트가 닫혔습니다.")
-#         if ser_exit and ser_exit.is_open:
-#             ser_exit.close()
-#             print("출차 시리얼 포트가 닫혔습니다.")

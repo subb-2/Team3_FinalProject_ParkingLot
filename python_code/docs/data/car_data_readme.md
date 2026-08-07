@@ -49,5 +49,3 @@
 ### `get_car_info(car_id)`
 차량 번호로 주차 정보를 조회. (`cars_info` 직접 조회)
 
-### `get_spot_info(spot_id)`
-구역 ID로 주차 정보를 조회. (`spot_status` 확인 후 `cars_info` 역방향 검색)

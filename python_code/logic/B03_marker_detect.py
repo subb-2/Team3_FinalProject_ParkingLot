@@ -111,7 +111,3 @@ class MarkerDetector:
         corners, ids, rejected = self._detector.detectMarkers(gray)
         return corners, ids, rejected
 
-    @property
-    def dict_name(self):
-        """현재 사용 중인 ArUco 사전 이름."""
-        return self._dict_name

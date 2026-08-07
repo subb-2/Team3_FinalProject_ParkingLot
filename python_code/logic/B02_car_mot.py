@@ -233,19 +233,6 @@ class CarNumberFIFO:
             print(f"[FIFO] 차량번호 '{car_id}' 출고 (잔여 {len(self._queue)}대)")
             return car_id
 
-    def peek(self):
-        """큐의 가장 앞 차량 번호를 삭제하지 않고 조회. 비어있으면 None."""
-        with self._lock:
-            return self._queue[0] if self._queue else None
-
-    def push_front(self, car_id):
-        """
-        차량 번호를 큐의 맨 앞으로 되돌림.
-        (부여했던 트랙이 유실되어 번호를 회수할 때 사용)
-        """
-        with self._lock:
-            self._queue.appendleft(car_id)
-            print(f"[FIFO] 차량번호 '{car_id}' 반환 (대기 {len(self._queue)}대)")
 
     def size(self):
         """큐에 대기 중인 차량 번호 개수."""
@@ -1067,20 +1054,6 @@ class CarMOT:
         if self.rebind_enable:
             self._expire_ghosts(now)
 
-    def get_car_id(self, track_id):
-        """Track ID에 매칭된 차량 번호를 반환. 없으면 None."""
-        return self.track_to_car.get(track_id)
-
-    def get_track_id(self, car_id):
-        """차량 번호에 매칭된 Track ID를 반환. 없으면 None."""
-        for t_id, c_id in self.track_to_car.items():
-            if c_id == car_id:
-                return t_id
-        return None
-
-    def get_trajectory(self, track_id):
-        """Track ID의 이동 궤적 리스트 [(cx, cy, timestamp), ...]를 반환."""
-        return list(self.trajectories.get(track_id, []))
 
     def track_id_stats(self, expected_cars=None):
         """
