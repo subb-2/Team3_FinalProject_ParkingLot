@@ -290,7 +290,23 @@ def main():
         data = request.get_json(silent=True) or {}
         points = {int(k): v for k, v in (data.get("points") or {}).items()}
         ok, message = pipeline.navigator.mapper.set_homography_from_points(points)
-        return {"ok": ok, "message": message}
+
+        # 보정에 성공했으면 자리 좌표를 방금 찍은 기둥에 맞춘다.
+        # 등록된 격자의 절대 거리가 실물과 다르면 기둥은 맞는데 자리만
+        # 어긋나는데, 이 단계가 그 차이를 없앤다. (anchor_spots_to_observed)
+        if ok:
+            anchored, moved, shift = pipeline.navigator.anchor_spots_to_observed()
+            if anchored and moved:
+                message += (f"  자리 {moved}개를 찍은 기둥 기준으로 옮겼습니다 "
+                            f"(최대 {shift:.1f}cm).")
+
+        residuals = pipeline.navigator.mapper.marker_residuals
+        return {
+            "ok": ok,
+            "message": message,
+            # 기둥별 오차. 유독 큰 값이 있으면 그 기둥을 잘못 찍은 것이다.
+            "residuals_cm": {str(k): round(v, 2) for k, v in sorted(residuals.items())},
+        }
 
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     print(f"  좌표계가 안 잡히면 /calibrate 에서 기둥을 직접 찍으세요.")

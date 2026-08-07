@@ -79,6 +79,7 @@ from logic.C02_lot_layout import (
     GATE1_WORLD_POS,      # 입구 (경로 안내 시작점)
     GATE2_WORLD_POS,      # 출구
     cell_to_world,        # 격자 칸 -> 실좌표
+    build_spot_world_pos, # 기둥 좌표 -> 자리 좌표 (같은 열 기둥 사이 보간)
     CONFIG as C02_CONFIG, # 칸 크기(CELL_W_CM / CELL_H_CM)
 )
 # 역투영 오버레이(등록된 배치를 화면에 겹쳐 그리기)에 필요한 격자 정보
@@ -184,6 +185,18 @@ class MarkerMapper:
         self.locked = False           # 품질 기준을 만족해 고정되었는지
         self._warned = set()          # 중복 경고 억제용
 
+        # 보정에 실제로 쓴 기둥의 이미지 좌표 {마커ID: (x_px, y_px)}.
+        #
+        # 이걸 들고 있어야 자리 좌표를 '등록된 격자'가 아니라 '실제로 관측된
+        # 기둥'에 붙일 수 있다. anchor_spots_to_observed 참고.
+        self.marker_image_pos = {}
+        # 기둥별 재투영 오차 {마커ID: cm}.
+        #
+        # 평균만 보면 한 기둥이 크게 틀어져도 묻힌다. 10개 중 하나가 8cm
+        # 어긋나 있어도 평균은 1cm 아래로 나올 수 있다. 화면에서 특정 구역만
+        # 어긋나 보일 때 어느 기둥이 범인인지 이 값으로 찾는다.
+        self.marker_residuals = {}
+
         print(f"[INFO] ArUco 마커 검출기 초기화 완료. ("
               f"등록된 마커 {len(self.marker_world_pos)}개)")
 
@@ -278,6 +291,12 @@ class MarkerMapper:
         self.calibrated_with = len(img_pts)
         self.reproj_error = error
         self.locked = True
+
+        # 찍은 위치와 기둥별 오차를 남긴다.
+        self.marker_image_pos = {mid: pt for mid, pt in zip(used, img_pts)}
+        per_point = self._per_point_error(H, img_pts, world_pts)
+        self.marker_residuals = {mid: float(e) for mid, e in zip(used, per_point)}
+        self._report_residuals()
 
         msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm"
         if len(img_pts) == 4:
@@ -377,6 +396,64 @@ class MarkerMapper:
         dst = cv2.perspectiveTransform(src, H).reshape(-1, 2)
         truth = np.array(world_pts, dtype=np.float32)
         return float(np.mean(np.linalg.norm(dst - truth, axis=1)))
+
+    def _report_residuals(self):
+        """
+        기둥별 재투영 오차를 표로 출력한다.
+
+        평균 오차는 한 기둥이 크게 틀어져도 묻힌다. 화면에서 특정 구역만
+        어긋나 보일 때, 이 표에서 유독 큰 값을 가진 기둥이 범인이다.
+
+        큰 값이 나오는 원인은 대개 셋 중 하나다.
+          1. 그 기둥을 잘못 찍었다 (다른 기둥을 찍었거나 순서가 밀렸다)
+          2. PILL_MARKER_ID의 마커 ID <-> 격자 칸 대응이 실제와 다르다
+          3. 렌즈 왜곡. 호모그래피는 직선을 직선으로만 보내므로 화면 가장자리의
+             휘어짐을 표현하지 못한다. 가장자리 기둥만 크게 나오면 이쪽이다.
+        """
+        if not self.marker_residuals:
+            return
+
+        ordered = sorted(self.marker_residuals.items(), key=lambda kv: -kv[1])
+        worst_id, worst = ordered[0]
+        mean = sum(self.marker_residuals.values()) / len(self.marker_residuals)
+
+        print(f"[보정] 기둥별 재투영 오차 (평균 {mean:.2f}cm / 최대 {worst:.2f}cm)")
+        for marker_id, err in sorted(self.marker_residuals.items()):
+            bar = '#' * min(int(err * 4), 30)
+            flag = '  <-- 확인 필요' if err > mean * 2 and err > 1.0 else ''
+            print(f"       마커 {marker_id:2d}  {err:5.2f}cm  {bar}{flag}")
+
+        # 한 기둥만 유독 크면 평균이 기준을 통과해도 그 근처 자리는 어긋난다.
+        if worst > mean * 2 and worst > 1.0:
+            print(f"[경고] 마커 {worst_id}번이 평균의 2배 넘게 틀어져 있습니다 "
+                  f"({worst:.2f}cm). 그 기둥을 잘못 찍었거나 PILL_MARKER_ID의 "
+                  f"대응이 실제와 다를 수 있습니다.")
+
+    def observed_marker_world(self):
+        """
+        보정 때 찍은 기둥의 이미지 좌표를 실좌표로 되돌린 값.
+
+        등록된 격자에서 계산한 marker_world_pos와 달리, 이쪽은 '실제로 화면에서
+        본 위치'다. 호모그래피가 완벽하면 둘은 같고, 어긋난 만큼 차이가 난다.
+
+        Returns:
+            {마커ID: (x_cm, y_cm)}. 보정 정보가 없으면 빈 dict.
+        """
+        if self.H is None or not self.marker_image_pos:
+            return {}
+        ids = list(self.marker_image_pos)
+        pts = np.array([self.marker_image_pos[i] for i in ids],
+                       dtype=np.float32).reshape(-1, 1, 2)
+        world = cv2.perspectiveTransform(pts, self.H).reshape(-1, 2)
+        return {mid: (float(w[0]), float(w[1])) for mid, w in zip(ids, world)}
+
+    @staticmethod
+    def _per_point_error(H, img_pts, world_pts):
+        """점마다의 재투영 오차(cm) 배열. 어느 기둥이 범인인지 찾는 용도."""
+        src = np.array(img_pts, dtype=np.float32).reshape(-1, 1, 2)
+        dst = cv2.perspectiveTransform(src, H).reshape(-1, 2)
+        truth = np.array(world_pts, dtype=np.float32)
+        return np.linalg.norm(dst - truth, axis=1)
 
     def update_homography(self, markers):
         """
@@ -834,6 +911,63 @@ class ParkingNavigator:
         self.routes.pop(car_id, None)
         print(f"[안내] 차량 '{car_id}' 목표 구역 설정: {spot_id}")
         return True
+
+    def anchor_spots_to_observed(self):
+        """
+        자리 좌표를 '실제로 찍은 기둥'에 다시 붙인다.
+
+        왜 필요한가
+          지금까지 자리 좌표는 등록된 격자(C02의 uniform_marker_world_pos)에서
+          계산했다. 격자는 모든 칸이 정확히 CELL_W x CELL_H라고 가정한다.
+          실물이 그 가정과 다르면, 호모그래피는 기둥에 맞춰 최선을 다해도
+          그 차이만큼 오차가 남고, 자리는 '가정된 위치'에 그려진다.
+          기둥은 맞는데 자리만 어긋나 보이는 것이 이 경우다.
+
+          이 메서드는 자리를 가정이 아니라 관측에 붙인다. 격자에서 가져오는
+          것은 '어느 기둥 사이에 어떤 자리가 있는가'라는 배치 정보뿐이고,
+          위치는 찍은 기둥에서 나온다. 절대 거리를 믿지 않는 셈이다.
+
+        왜 이게 더 맞는가
+          차량 위치도 호모그래피를 통해 나온다. 자리도 같은 경로로 만들면
+          둘이 같은 좌표계에 놓인다. 자리는 가정에서, 차량은 관측에서 오면
+          그 차이가 그대로 '주차 완료' 판정 오차가 된다.
+          절대 정확도보다 둘의 일치가 중요하다.
+
+        보간 자체는 실좌표에서 한다. 자리는 지면에서 기둥 사이에 균등하게
+        놓여 있으므로 지면 좌표에서 선형이다. 이미지에서 선형 보간하면
+        원근 때문에 먼 쪽이 밀린다.
+
+        Returns:
+            (성공 여부, 옮겨진 자리 수, 최대 이동 거리 cm)
+        """
+        observed = self.mapper.observed_marker_world()
+        if not observed:
+            return False, 0, 0.0
+
+        # 관측된 기둥만으로 자리 좌표를 다시 만든다.
+        # build_spot_world_pos는 같은 열 기둥 두 개와 행 비율로 보간하므로,
+        # 넘겨주는 기둥 좌표가 관측값이면 결과도 관측 기준이 된다.
+        new_pos = build_spot_world_pos(observed)
+        if not new_pos:
+            return False, 0, 0.0
+
+        moved, max_shift = 0, 0.0
+        for spot_id, pos in new_pos.items():
+            old = self.spot_world_pos.get(spot_id)
+            if old is not None:
+                shift = math.hypot(pos[0] - old[0], pos[1] - old[1])
+                if shift > 0.05:
+                    moved += 1
+                    max_shift = max(max_shift, shift)
+            self.spot_world_pos[spot_id] = pos
+
+        # 경로는 자리 좌표를 기준으로 계산되어 있으므로 다시 짜야 한다.
+        self.routes.clear()
+        self.planner = self._build_default_planner()
+
+        print(f"[보정] 자리 좌표를 관측된 기둥에 맞춰 다시 계산했습니다. "
+              f"({len(new_pos)}자리 중 {moved}개 이동, 최대 {max_shift:.2f}cm)")
+        return True, moved, max_shift
 
     def get_target_world(self, car_id):
         """
