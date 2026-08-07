@@ -1,21 +1,26 @@
 """
 E00_final_ui : 최종 통합 관제 화면
 
-화면을 세로로 3분할한다.
+화면을 세로 3열로 나누고, 왼쪽 열은 다시 위아래로 나눈다.
 
-    +----------------+----------------+----------------+
-    |   1) 수신       |  2) 주차장 상태  |  3) 실시간 안내  |
-    |                |                |                |
-    |  Zybo에서 온    |  전체 자리 현황  |  차량 시점      |
-    |  Wi-Fi UART    |  + 배정 자리     |  내비게이션     |
-    |  수신 값 목록    |    깜빡임       |  (D00 재사용)   |
-    |                |  + 하단 안내문    |                |
-    +----------------+----------------+----------------+
+    +---------------+-----------------+-----------------+
+    |  1) Zybo 수신  |                 |                 |
+    |     (30%)     |                 |                 |
+    +---------------+  3) 실시간 카메라 |  4) 실시간 안내   |
+    |               |                 |                 |
+    |  2) 주차장 상태 |   차량 검출/추적  |   차량 시점      |
+    |     (70%)     |   오버레이       |   내비게이션      |
+    |               |   (B01/B02)     |   (D00 재사용)   |
+    |  전체 자리 현황 |                 |                 |
+    |  + 배정 자리    |                 |                 |
+    |    깜빡임      |                 |                 |
+    |  + 하단 안내문  |                 |                 |
+    +---------------+-----------------+-----------------+
 
 왜 OpenCV 캔버스가 아니라 HTML인가
   1번과 2번 구간은 한글 안내문이 핵심이다. OpenCV의 putText는 한글을 못 그린다.
   (D00의 MANEUVER_LABEL이 전부 영문인 것도 그 때문이다)
-  3번 구간만 영상이므로, 영상은 MJPEG로 넣고 나머지는 브라우저가 그리게 했다.
+  3, 4번만 영상이므로 그 둘은 MJPEG로 넣고 나머지는 브라우저가 그리게 했다.
   깜빡이는 점도 CSS 애니메이션이 프레임을 새로 그리는 것보다 싸다.
 
 이 모듈이 하는 일
@@ -45,6 +50,7 @@ from data.map_data import (
 )
 from data.car_data import cars_info, get_car_type
 from logic.B02_car_mot import CONFIG as B02_CONFIG
+from logic.C02_lot_layout import CONFIG as C02_CONFIG
 
 
 # 설정 (Configuration)
@@ -358,6 +364,11 @@ def build_lot_layout():
         "rows": rows,
         "cols": cols,
         "cells": cells,
+        # 격자 한 칸의 실제 크기. 브라우저가 이 비율로 전체 격자의 가로세로비를
+        # 잡아 배치가 찌그러지지 않게 한다. 10/17.5를 화면 쪽에 박아두면
+        # C02의 CONFIG를 고쳤을 때 화면만 옛 비율로 남는다.
+        "cell_w_cm": C02_CONFIG['CELL_W_CM'],
+        "cell_h_cm": C02_CONFIG['CELL_H_CM'],
         "legend": [
             {"name": name, "color": SPOT_TYPE_CSS.get(t, "#8a8a8a")}
             for t, name in SPOT_TYPE_NAME.items()
@@ -447,6 +458,14 @@ def build_ui_state(pipeline, rx_feed, watcher):
             }
             for n in pipeline.latest_nav
         ],
+        # 카메라 구간이 쓰는 값. nav_results가 아니라 추적 결과를 센다.
+        # nav_results는 실좌표가 나온 차만 들어 있어, 호모그래피가 없으면
+        # 화면에 박스가 보이는데도 0으로 나온다.
+        "tracks": {
+            "total": len(pipeline.latest_tracks),
+            "matched": sum(1 for t in pipeline.latest_tracks if t.get("car_id")),
+        },
+        "stage_ms": pipeline.stage_ms,
         "fps": round(pipeline.fps, 1),
         "homography": homography,
         "markers": len(pipeline.navigator.latest_markers),
@@ -469,11 +488,19 @@ FINAL_UI_HTML = r"""
  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
       font-family:"Malgun Gothic","맑은 고딕","Noto Sans KR",sans-serif}
 
- /* 세로 3분할 */
- #app{display:grid;grid-template-columns:1fr 1.25fr 1.35fr;
+ /* 3분할. 왼쪽 칸은 다시 위아래로 나뉜다.
+    +---------+-----------+-----------+
+    | 1 수신   |           |           |
+    +---------+ 3 카메라   | 4 주차안내 |
+    | 2 주차장 |           |           |
+    +---------+-----------+-----------+                        */
+ #app{display:grid;grid-template-columns:1fr 1.45fr 1.25fr;
       gap:10px;padding:10px;height:100vh}
+ /* 30 : 70. fr로 주어야 사이의 gap이 비율에서 알아서 빠진다.
+    퍼센트로 주면 30%+70%+gap이 100%를 넘어 아래가 잘린다. */
+ #left{display:grid;grid-template-rows:3fr 7fr;gap:10px;min-height:0;min-width:0}
  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-      display:flex;flex-direction:column;min-width:0;overflow:hidden}
+      display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
  .col > h2{margin:0;padding:11px 14px;font-size:15px;font-weight:600;
            border-bottom:1px solid var(--line);display:flex;
            justify-content:space-between;align-items:center}
@@ -499,9 +526,12 @@ FINAL_UI_HTML = r"""
 
  /* ---- 2번 구간 : 주차장 상태 ---- */
  #lotwrap{flex:1;display:flex;align-items:center;justify-content:center;
-          padding:10px;min-height:0}
- #lot{display:grid;gap:2px;width:100%;max-width:100%}
- .cell{aspect-ratio:10/17.5;border-radius:2px;position:relative}
+          padding:8px;min-height:0;min-width:0}
+ /* 크기는 fitLot()이 픽셀로 넣는다.
+    aspect-ratio + max-width/height 조합은 폭도 높이도 auto인 flex 자식에서
+    0으로 무너진다. 남는 공간을 재서 직접 계산하는 편이 확실하다. */
+ #lot{display:grid;gap:2px}
+ .cell{border-radius:2px;position:relative;min-width:0;min-height:0}
  .cell.road{background:#212125}
  .cell.gate1,.cell.gate2{background:#2b3b2b;border:1px solid #4f7a4f}
  .cell.pill{background:#3a3f49;border:1px solid #58606f}
@@ -510,7 +540,8 @@ FINAL_UI_HTML = r"""
    align-items:center;justify-content:center;font-size:9px;color:#9aa6b8}
  .cell.spot{border:1.5px solid var(--c,#8a8a8a);background:#1e1e22;
             display:flex;align-items:center;justify-content:center;
-            font-size:9px;color:var(--c,#8a8a8a);font-weight:600;overflow:hidden}
+            font-size:clamp(6px,1.3vh,11px);color:var(--c,#8a8a8a);
+            font-weight:600;overflow:hidden}
  .cell.spot.full{background:rgba(255,77,77,.20);border-color:#ff6b6b;color:#ffbcbc}
  .cell.spot.pending{border-color:var(--bad);border-width:2px}
  /* 배정된 자리에서 깜빡이는 빨간 점 */
@@ -545,9 +576,18 @@ FINAL_UI_HTML = r"""
  .nt-note{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
  .nt-idle{font-size:13px;color:var(--dim)}
 
- /* ---- 3번 구간 : 실시간 안내 ---- */
+ /* ---- 3번 구간 : 카메라 (차량 검출) ---- */
+ /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
+    min-height:0이 없으면 flex 자식이 콘텐츠 크기만큼 밀어내 패널이 넘친다. */
+ #camwrap{flex:1;display:flex;align-items:center;justify-content:center;
+          background:#0e0e10;min-height:0;min-width:0;padding:6px}
+ #camimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
+ #caminfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
+          color:var(--dim);display:flex;justify-content:space-between;gap:10px}
+
+ /* ---- 4번 구간 : 실시간 안내 ---- */
  #navwrap{flex:1;display:flex;align-items:center;justify-content:center;
-          background:#0e0e10;min-height:0;padding:6px}
+          background:#0e0e10;min-height:0;min-width:0;padding:6px}
  #navimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
  #navinfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
           color:var(--dim);display:flex;justify-content:space-between;gap:10px}
@@ -556,27 +596,44 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 1번 구간 : Zybo 수신 -->
+  <!-- 왼쪽 칸 : 위 30% 수신 / 아래 70% 주차장 -->
+  <div id="left">
+
+    <!-- 1번 구간 : Zybo 수신 -->
+    <div class="col">
+      <h2><span><span class="num">1</span>Zybo 수신</span>
+          <span class="sub" id="rxcount">-</span></h2>
+      <div class="body" id="rxlist">
+        <div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>
+      </div>
+    </div>
+
+    <!-- 2번 구간 : 주차장 상태 -->
+    <div class="col">
+      <h2><span><span class="num">2</span>주차장 상태</span>
+          <span class="sub" id="lottime">-</span></h2>
+      <div id="lotwrap"><div id="lot"></div></div>
+      <div id="avail"></div>
+      <div id="notice"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
+    </div>
+
+  </div>
+
+  <!-- 3번 구간 : 카메라 실시간 (차량 검출/추적 오버레이) -->
   <div class="col">
-    <h2><span><span class="num">1</span>Zybo 수신</span>
-        <span class="sub" id="rxcount">-</span></h2>
-    <div class="body" id="rxlist">
-      <div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>
+    <h2><span><span class="num">3</span>실시간 카메라 (차량 검출)</span>
+        <span class="sub" id="camsub">-</span></h2>
+    <div id="camwrap"><img id="camimg" src="/video_feed"></div>
+    <div id="caminfo">
+      <span id="camdet">검출 대기 중</span>
+      <span><span class="pill" id="cammark">-</span>
+            <span class="pill" id="camfps">-</span></span>
     </div>
   </div>
 
-  <!-- 2번 구간 : 주차장 상태 -->
+  <!-- 4번 구간 : 실시간 주차 안내 -->
   <div class="col">
-    <h2><span><span class="num">2</span>주차장 상태</span>
-        <span class="sub" id="lottime">-</span></h2>
-    <div id="lotwrap"><div id="lot"></div></div>
-    <div id="avail"></div>
-    <div id="notice"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
-  </div>
-
-  <!-- 3번 구간 : 실시간 안내 -->
-  <div class="col">
-    <h2><span><span class="num">3</span>실시간 주차 안내</span>
+    <h2><span><span class="num">4</span>실시간 주차 안내</span>
         <span class="sub" id="navsub">-</span></h2>
     <div id="navwrap"><img id="navimg" src="/nav_feed"></div>
     <div id="navinfo">
@@ -590,7 +647,39 @@ FINAL_UI_HTML = r"""
 <script>
 const POLL_MS = __POLL_MS__;
 let layout = null;
+let lotAspect = 1;       // 격자 전체의 가로/세로 비
+let lotObserver = null;  // 아래 fitLot 주석 참고. 참조를 반드시 붙들어야 한다.
 const cellEls = {};      // 자리ID -> [칸 엘리먼트, ...]
+
+// 남는 공간에 맞춰 격자 크기를 정한다.
+// 주차장 칸은 세로로 길어(10 x 17.5cm) 격자 전체가 세로로 길쭉하다.
+// 폭에만 맞추면 아래가 잘리므로 가로/세로 중 좁은 쪽에 맞춘다.
+function fitLot(){
+  const wrap = document.getElementById('lotwrap');
+  const lot = document.getElementById('lot');
+  const pad = 16;
+  const availW = wrap.clientWidth - pad, availH = wrap.clientHeight - pad;
+  // 아직 배치 전이라 크기가 0이다. 지금 계산하면 0이 박히므로 그냥 넘긴다.
+  // 크기가 잡히면 아래 감시자들이 다시 부른다.
+  if (availW <= 0 || availH <= 0 || !(lotAspect > 0)) return;
+
+  const w = Math.min(availW, availH * lotAspect);
+  lot.style.width  = Math.floor(w) + 'px';
+  lot.style.height = Math.floor(w / lotAspect) + 'px';
+}
+
+// 크기가 잡히는 시점이 제각각이라 세 군데서 부른다.
+//   ResizeObserver : 패널 크기가 바뀔 때 (주 경로)
+//   rAF            : 첫 배치 직후. buildLot 시점에는 컨테이너가 0일 수 있다
+//   window resize  : 관찰자가 놓치는 경우의 최후 보루
+// lotObserver를 전역에 붙들어 두는 것이 중요하다. 지역 변수로 두면 참조가
+// 사라진 관찰자가 수거되어 콜백이 한 번도 오지 않는 일이 실제로 있었다.
+function watchLotSize(){
+  if (lotObserver) return;
+  lotObserver = new ResizeObserver(fitLot);
+  lotObserver.observe(document.getElementById('lotwrap'));
+  window.addEventListener('resize', fitLot);
+}
 
 // 격자를 한 번만 만든다. 이후에는 색과 점만 바꾼다.
 // 매번 다시 만들면 CSS 깜빡임 애니메이션이 폴링 주기마다 처음으로 돌아간다.
@@ -598,6 +687,10 @@ function buildLot(lay){
   layout = lay;
   const lot = document.getElementById('lot');
   lot.style.gridTemplateColumns = `repeat(${lay.cols}, 1fr)`;
+  lot.style.gridTemplateRows    = `repeat(${lay.rows}, 1fr)`;
+  // 칸의 실제 크기(cm)로 전체 비율을 잡는다. 칸마다 aspect-ratio를 걸면
+  // 행 높이가 제각각 계산되어 격자가 컨테이너를 넘는다.
+  lotAspect = (lay.cols * lay.cell_w_cm) / (lay.rows * lay.cell_h_cm);
   lot.innerHTML = '';
 
   for (let r = 0; r < lay.rows; r++){
@@ -630,6 +723,10 @@ function buildLot(lay){
 
   const av = document.getElementById('avail');
   av.dataset.legend = JSON.stringify(lay.legend);
+
+  fitLot();
+  requestAnimationFrame(fitLot);   // 첫 배치가 끝난 뒤 한 번 더
+  watchLotSize();
 }
 
 function esc(s){
@@ -706,6 +803,12 @@ function renderLot(st){
   }).join('');
 
   document.getElementById('lottime').textContent = st.time;
+
+  // 범례와 안내문을 채운 뒤에 맞춘다. 그 두 칸의 높이가 정해져야 격자에
+  // 남는 높이가 확정되기 때문이다. 먼저 재면 아래가 컨테이너를 넘친다.
+  // 값이 그대로면 같은 값을 다시 쓸 뿐이라 매 폴링마다 불러도 부담이 없다.
+  // (#lotwrap 높이는 flex:1로 패널이 정하므로 여기서 되먹임이 생기지 않는다)
+  fitLot();
 }
 
 const NOTICE_CLASS = {
@@ -731,7 +834,26 @@ function renderNotice(ev){
     (ev.note ? `<div class="nt-note">${esc(ev.note)}</div>` : '');
 }
 
-// ---- 3번 구간 ----
+// ---- 3번 구간 : 카메라 ----
+function renderCam(st){
+  const t = st.tracks;
+  document.getElementById('camsub').textContent =
+    t.total ? `검출 ${t.total}대` : '검출 없음';
+  document.getElementById('camdet').textContent = t.total
+    ? `검출 ${t.total}대 · 번호 매칭 ${t.matched}대`
+    : '검출 대기 중';
+
+  const m = document.getElementById('cammark');
+  m.textContent = `마커 ${st.markers}개`;
+  // 호모그래피는 마커 4개부터 만들어진다. 그 아래면 좌표가 안 나온다.
+  m.className = 'pill ' + (st.markers >= 4 ? 'ok' : 'bad');
+
+  const d = st.stage_ms || {};
+  document.getElementById('camfps').textContent =
+    d.detect != null ? `검출 ${d.detect}ms` : `${st.fps} FPS`;
+}
+
+// ---- 4번 구간 ----
 function renderNav(st){
   const guided = st.vehicles.find(v => v.car_id) || st.vehicles[0];
   document.getElementById('navguide').textContent = guided
@@ -757,6 +879,7 @@ async function tick(){
     renderRx(st.rx);
     renderLot(st);
     renderNotice(st.latest_event);
+    renderCam(st);
     renderNav(st);
   } catch (e) {
     console.error('상태 갱신 실패', e);

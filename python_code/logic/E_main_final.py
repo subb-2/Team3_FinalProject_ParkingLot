@@ -54,8 +54,10 @@ CONFIG = {
     "WEB_HOST": "0.0.0.0",
     "WEB_PORT": 5000,
 
-    # 3번 구간(차량 시점 안내)의 전송 프레임레이트 (Hz)
-    "NAV_FEED_FPS": 20,
+    # 영상 두 구간의 전송 프레임레이트 (Hz).
+    # 영상 처리는 백그라운드 스레드가 최대 속도로 돌고, 화면은 이 값으로 내보낸다.
+    "CAM_FEED_FPS": 20,             # 3번 구간 : 카메라 원본 + 검출/추적 오버레이
+    "NAV_FEED_FPS": 20,             # 4번 구간 : 차량 시점 안내
 
     # 3번 구간에 띄울 '내 차'. None이면 안내 중인 차를 자동으로 고른다.
     # 실행 중에는 /follow/<차량번호> 로 바꿀 수 있다.
@@ -202,18 +204,18 @@ def main():
         """세 구간이 그릴 현재 상태 전부."""
         return build_ui_state(pipeline, rx_feed, watcher)
 
+    @app.route('/video_feed')
+    def video_feed():
+        """3번 구간 : 카메라 원본 + 검출/추적/마커 오버레이 (MJPEG)."""
+        return mjpeg_response(runner.latest_frame, CONFIG['CAM_FEED_FPS'])
+
     @app.route('/nav_feed')
     def nav_feed():
-        """3번 구간 : 차량 시점 실시간 안내 (MJPEG)."""
+        """4번 구간 : 차량 시점 실시간 안내 (MJPEG)."""
         def render():
             nav = pick_my_vehicle(pipeline.latest_nav, my_car["id"])
             return view.render(nav, fps=pipeline.fps)
         return mjpeg_response(render, CONFIG['NAV_FEED_FPS'])
-
-    @app.route('/video_feed')
-    def video_feed():
-        """카메라 원본 + 검출/추적/마커 오버레이. (점검용)"""
-        return mjpeg_response(runner.latest_frame, CONFIG['NAV_FEED_FPS'])
 
     # --- 조작 ---------------------------------------------------------
     @app.route('/enqueue/<car_id>')
