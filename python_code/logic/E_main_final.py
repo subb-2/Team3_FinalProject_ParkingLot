@@ -163,16 +163,7 @@ def main():
     print(f"  {C_CONFIG['CAM_WIDTH']}x{C_CONFIG['CAM_HEIGHT']} "
           f"{C_CONFIG['CAM_FPS']}fps 로 열었습니다.")
 
-    # 렌즈 보정이 걸려 있는지 알려준다.
-    # 이게 없으면 화면 가장자리가 휘어 호모그래피 오차가 커지는데, 평균값만
-    # 보면 통과처럼 보여서 알아채기 어렵다. 시작할 때 상태를 못박아 둔다.
-    from logic.B03_map_setting import load_calibration
-    lens = load_calibration()
-    if lens:
-        print(f"  렌즈 왜곡 보정 적용 중 (RMS {lens['rms']:.3f}px, "
-              f"기준 {lens['image_size'][0]}x{lens['image_size'][1]})")
-    else:
-        print("  [주의] 렌즈 왜곡 보정이 없습니다.")
+
 
     # [3단계] MOT -------------------------------------------------------
     # 검출기(YOLO) 로딩이 가장 오래 걸리는 단계다.

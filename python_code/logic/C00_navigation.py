@@ -10,19 +10,7 @@ from collections import deque
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C01_path_planner import route_length, distance_to_route
 
-def _lens_calibrated():
-    """
-    렌즈 왜곡 보정값이 준비되어 있는지.
 
-    호모그래피 캐시가 '보정 전/후' 중 어느 상태에서 만들어졌는지 기록하고
-    대조하는 데 쓴다. B04를 아직 안 만들었거나 못 불러와도 죽지 않아야 하므로
-    실패하면 보정 없음으로 본다.
-    """
-    try:
-        from logic.B03_map_setting import has_calibration
-        return bool(has_calibration())
-    except Exception:
-        return False
 
 # 설정 (Configuration)
 # 이 모듈은 '위치 추정 및 경로 안내'만 담당.
@@ -249,10 +237,6 @@ class MarkerMapper:
                 marker_ids=np.array(ids, dtype=np.int32),
                 marker_world=np.array([self.marker_world_pos[i] for i in ids],
                                       dtype=np.float64),
-                # 렌즈 보정을 켜고 끄면 화소 위치가 통째로 달라진다.
-                # 보정 전에 잡은 행렬을 보정 후에 그대로 쓰면 좌표가 전부 밀린다.
-                # 눈에 띄는 오류 없이 조용히 어긋나므로 반드시 대조해야 한다.
-                lens_undistorted=bool(_lens_calibrated()),
             )
             print(f"[INFO] 호모그래피를 저장했습니다. {path}")
             print(f"       다음 실행부터는 마커가 안 보여도 이 값을 씁니다. "
@@ -308,33 +292,6 @@ class MarkerMapper:
             print(f"[경고] 수동 보정 재투영 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
                   f"하지만 수동 클릭을 최우선 적용하여 호모그래피를 강제 확정합니다.")
 
-        # 렌즈 왜곡(볼록함) 자동 보정
-        from logic.B03_map_setting import solve_radial_from_points, save_calibration
-        from logic.B00_camera_input import DEFAULT_WIDTH, DEFAULT_HEIGHT
-        
-        solve_points = {used[i]: img_pts[i] for i in range(len(used))}
-        solve_world = {used[i]: world_pts[i] for i in range(len(used))}
-        
-        lens_res = solve_radial_from_points(
-            solve_points, solve_world, (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-        )
-        msg_lens = ""
-        if lens_res and lens_res["improved"] > 0.1:
-            save_calibration(lens_res["camera_matrix"], lens_res["dist_coeffs"], 
-                             lens_res["image_size"], rms=0.0)
-            msg_lens = f"  (렌즈 왜곡 {lens_res['improved']:.1f}cm 추가 보정됨)"
-            
-            # 미래에 들어올 펴진 프레임에 대응하도록 H도 펴진 좌표계로 새로 구한다
-            img_arr = np.array(img_pts, dtype=np.float32).reshape(-1, 1, 2)
-            und = cv2.undistortPoints(img_arr, lens_res["camera_matrix"], 
-                                      lens_res["dist_coeffs"], P=lens_res["camera_matrix"])
-            img_pts = [(float(p[0][0]), float(p[0][1])) for p in und]
-            
-            H, _ = cv2.findHomography(
-                np.array(img_pts, np.float32), np.array(world_pts, np.float32),
-                cv2.RANSAC if len(img_pts) > 4 else 0, self.ransac_thresh_cm)
-            error = self._reprojection_error(H, img_pts, world_pts)
-
         self.H = H
         self.H_inv = np.linalg.inv(H)
         self.calibrated_with = len(img_pts)
@@ -347,7 +304,7 @@ class MarkerMapper:
         self.marker_residuals = {mid: float(e) for mid, e in zip(used, per_point)}
         self._report_residuals()
 
-        msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm" + msg_lens
+        msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm"
         if len(img_pts) == 4:
             # 4점은 항상 오차 0으로 맞춰진다. 즉 이 숫자로는 옳은지 알 수 없다.
             msg += ("  (주의: 4점은 오차가 항상 0으로 나와 검증이 불가능합니다. "
@@ -394,25 +351,7 @@ class MarkerMapper:
             print("       /calibrate 에서 다시 잡으세요.")
             return False
 
-        # 렌즈 보정을 켜거나 끄면 화소 위치가 통째로 달라진다.
-        # 이걸 대조하지 않으면 보정 전에 잡은 행렬을 보정 후에 그대로 써서
-        # 좌표가 조용히 전부 밀린다. 오류가 안 나서 알아채기 어렵다.
-        saved_lens = None
-        if 'lens_undistorted' in getattr(data, 'files', []):
-            saved_lens = bool(data['lens_undistorted'])
-        now_lens = _lens_calibrated()
-        if saved_lens is None:
-            print("[경고] 저장된 호모그래피에 렌즈 보정 여부가 없습니다. (구버전 파일)")
-            print("       무시합니다. /calibrate 에서 다시 잡으세요.")
-            return False
-        if saved_lens != now_lens:
-            was = "보정 적용" if saved_lens else "보정 없음"
-            now = "보정 적용" if now_lens else "보정 없음"
-            print(f"[경고] 저장된 호모그래피는 '{was}' 상태에서 만든 것인데 "
-                  f"지금은 '{now}'입니다. 무시합니다.")
-            print("       렌즈 보정을 켜고 끄면 화면이 달라지므로 "
-                  "/calibrate 에서 다시 잡아야 합니다.")
-            return False
+
 
         self.H = data['H']
         self.H_inv = np.linalg.inv(self.H)
