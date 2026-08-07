@@ -9,8 +9,6 @@ from collections import deque
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from logic.C01_path_planner import route_length, distance_to_route
-from logic.B03_marker_detect import MarkerDetector
-
 
 def _lens_calibrated():
     """
@@ -21,7 +19,7 @@ def _lens_calibrated():
     실패하면 보정 없음으로 본다.
     """
     try:
-        from logic.B04_lens_calib import has_calibration
+        from logic.B03_map_setting import has_calibration
         return bool(has_calibration())
     except Exception:
         return False
@@ -182,7 +180,6 @@ class MarkerMapper:
         min_spread = CONFIG['MIN_MARKER_SPREAD'] if min_spread is None else min_spread
         ransac_thresh_cm = CONFIG['RANSAC_THRESH_CM'] if ransac_thresh_cm is None else ransac_thresh_cm
 
-        self.detector = MarkerDetector()
         self.marker_world_pos = marker_world_pos or MARKER_WORLD_POS
         self.min_markers = min_markers
         self.lock_homography = lock_homography
@@ -306,7 +303,7 @@ class MarkerMapper:
                   f"하지만 수동 클릭을 최우선 적용하여 호모그래피를 강제 확정합니다.")
 
         # 렌즈 왜곡(볼록함) 자동 보정
-        from logic.B04_lens_calib import solve_radial_from_points, save_calibration
+        from logic.B03_map_setting import solve_radial_from_points, save_calibration
         from logic.B00_camera_input import DEFAULT_WIDTH, DEFAULT_HEIGHT
         
         solve_points = {used[i]: img_pts[i] for i in range(len(used))}
@@ -422,18 +419,6 @@ class MarkerMapper:
         print(f"       카메라를 옮겼다면 /recalibrate로 다시 잡으세요.")
         return True
 
-    def detect_markers(self, frame):
-        """
-        프레임에서 ArUco 마커를 검출.
-
-        Args:
-            frame: OpenCV BGR 이미지 (numpy array)
-
-        Returns:
-            {마커ID: (cx, cy)} 형태의 딕셔너리. cx, cy는 마커 중심의 이미지 좌표.
-        """
-        return self.detector.detect(frame)
-
     @staticmethod
     def _spread_ratio(points):
         """
@@ -520,110 +505,6 @@ class MarkerMapper:
         dst = cv2.perspectiveTransform(src, H).reshape(-1, 2)
         truth = np.array(world_pts, dtype=np.float32)
         return np.linalg.norm(dst - truth, axis=1)
-
-    def update_homography(self, markers):
-        """
-        검출된 마커로 이미지 -> 실좌표 변환 행렬을 계산.
-
-        첫 성공을 그대로 고정하지 않고, 더 많은 마커로 더 정확한 해가
-        나오면 갈아탄다. 충분한 품질(마커 수와 재투영 오차)에 도달했을 때만
-        고정하며, 그 전까지는 매 프레임 다시 시도한다.
-
-        이렇게 하는 이유: 마커가 정확히 4개면 대응이 틀려 있어도 그 4점에는
-        항상 오차 0으로 맞춰진다. 즉 4점 해는 검증 자체가 불가능하므로,
-        최소 개수로 성급히 고정하면 잘못된 좌표계가 영구히 굳어버린다.
-
-        Args:
-            markers: detect_markers()의 반환 결과 {마커ID: (cx, cy)}
-
-        Returns:
-            호모그래피가 유효하면 True, 아니면 False.
-        """
-        # 품질 기준을 만족해 고정된 상태면 재계산하지 않음
-        # (차량이 마커를 가려도 좌표 추정이 끊기지 않도록)
-        if self.locked:
-            return True
-
-        # 실좌표가 등록된 마커만 사용
-        img_pts, world_pts, unknown = [], [], []
-        for marker_id, img_pt in markers.items():
-            world_pt = self.marker_world_pos.get(marker_id)
-            if world_pt is None:
-                unknown.append(marker_id)
-                continue
-            img_pts.append(img_pt)
-            world_pts.append(world_pt)
-
-        # 검출은 됐는데 좌표표에 없는 마커를 알려준다.
-        # 이게 있으면 화면에는 마커가 여러 개 보이는데 'N/6 markers'는 안 올라가는,
-        # 원인을 찾기 어려운 상태가 된다. (화면에는 빨간 점 + "11?"로 표시된다)
-        if unknown:
-            self._warn_once(
-                "unknown_markers",
-                f"[경고] 검출됐지만 좌표가 등록되지 않은 마커: {sorted(unknown)}\n"
-                f"        data/map_data.py의 PILL_MARKER_ID에 없는 ID입니다. "
-                f"호모그래피에 쓰이지 않습니다.\n"
-                f"        현재 등록된 ID: {sorted(self.marker_world_pos)}\n"
-                f"        실제 기둥에 붙인 마커와 표가 일치하는지 확인하세요."
-            )
-
-        n = len(img_pts)
-        if n < self.min_markers:
-            return self.H is not None
-
-        # 마커가 한 줄에 몰려 있으면 그 줄 밖의 좌표를 신뢰할 수 없다
-        spread = self._spread_ratio(img_pts)
-        if spread < self.min_spread:
-            self._warn_once("spread",
-                            f"[경고] 마커가 한 줄에 몰려 있어 호모그래피를 건너뜁니다. "
-                            f"(퍼짐 정도 {spread:.4f} < {self.min_spread}) "
-                            f"윗줄과 아랫줄 마커가 함께 보이도록 하세요.")
-            return self.H is not None
-
-        img_arr = np.array(img_pts, dtype=np.float32)
-        world_arr = np.array(world_pts, dtype=np.float32)
-
-        # 마커가 4개를 넘으면 RANSAC으로 이상치(ID 오인식 등)를 배제
-        method = cv2.RANSAC if n > 4 else 0
-        H, _ = cv2.findHomography(img_arr, world_arr, method, self.ransac_thresh_cm)
-        if H is None:
-            return self.H is not None
-
-        error = self._reprojection_error(H, img_pts, world_pts)
-
-        # 오차가 큰 해는 채택하지 않음 (마커 배치와 등록 좌표가 어긋난 상태)
-        if error > self.max_error:
-            self._warn_once("error",
-                            f"[경고] 호모그래피 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
-                            f"MARKER_WORLD_POS가 실제 마커 배치와 일치하는지 확인하세요.")
-            return self.H is not None
-
-        # 기존 해보다 나을 때만 교체 (마커가 더 많거나, 같은 수면 오차가 더 작을 때)
-        better = (
-            self.H is None
-            or n > self.calibrated_with
-            or (n == self.calibrated_with and error < self.reproj_error)
-        )
-        if not better:
-            return True
-
-        self.H = H
-        self.H_inv = np.linalg.inv(H)
-        self.calibrated_with = n
-        self.reproj_error = error
-
-        # 품질이 충분하면 고정. 그 전까지는 계속 더 나은 해를 찾는다.
-        if self.lock_homography and n >= self.lock_markers:
-            self.locked = True
-            print(f"[INFO] 호모그래피 확정. (마커 {n}개, 평균 오차 {error:.2f}cm)")
-            # 카메라가 고정이므로 다음 실행에서 재사용할 수 있게 저장해 둔다
-            if CONFIG['USE_HOMOGRAPHY_CACHE']:
-                self.save_homography()
-        else:
-            need = self.lock_markers if self.lock_homography else n
-            print(f"[INFO] 호모그래피 갱신. (마커 {n}개, 평균 오차 {error:.2f}cm) "
-                  f"- 마커 {need}개 이상 보이면 확정합니다.")
-        return True
 
     def _warn_once(self, key, message):
         """같은 경고가 매 프레임 쏟아지지 않도록 한 번만 출력."""
@@ -1121,11 +1002,8 @@ class ParkingNavigator:
                 ...
             ]
         """
-        # 1) 마커 검출 및 호모그래피 갱신
-        markers = self.mapper.detect_markers(frame)
-        self.latest_markers = markers
-        self.mapper.update_homography(markers)
-
+        # 1) 마커 검출은 수동 캘리브레이션으로 대체되었으므로 더 이상 자동 갱신하지 않음.
+        
         results = []
         if not self.mapper.is_ready():
             # 아직 좌표 변환이 불가능한 상태 (마커가 충분히 보이지 않음)

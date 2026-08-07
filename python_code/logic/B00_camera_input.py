@@ -60,7 +60,7 @@ class UndistortedCapture:
         재시작하지 않고 바로 반영하기 위한 것이다. 재시작을 요구하면
         보정 -> 확인 -> 재보정을 반복하기가 번거롭다.
         """
-        from logic.B04_lens_calib import Undistorter
+        from logic.B03_map_setting import Undistorter
         self._undistorter = Undistorter()
         return self._undistorter.is_ready()
 
@@ -77,7 +77,7 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     Args:
         undistort: 렌즈 왜곡 보정을 적용할지. 보정값(config/camera_calib.npz)이
                    없으면 이 값과 무관하게 원본이 나온다.
-                   보정값은 logic/B04_lens_calib.py로 만든다.
+                   보정값은 logic/B03_map_setting.py로 갱신된다.
     """
     if sys.platform == 'win32':
         # 윈도우 환경에서는 일반 웹캠 사용 (GStreamer 미사용)

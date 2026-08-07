@@ -74,85 +74,6 @@ CONFIG = {
 }
 
 
-# 수동 보정 페이지
-# 마커 자동 검출이 잘 안 될 때 기둥을 직접 찍어 좌표계를 확정한다.
-# __STEPS__ 자리에 기둥 목록(JSON)이 채워진다.
-CALIBRATE_HTML = """
-<html><head><meta charset="utf-8"><title>기둥 수동 보정</title>
-<style>
- body{background:#222;color:#eee;font-family:sans-serif;margin:0;padding:12px}
- #wrap{position:relative;display:inline-block}
- #shot{max-width:100%;cursor:crosshair;display:block}
- .dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;
-      border-radius:50%;background:#0f0;border:2px solid #000;pointer-events:none}
- .lbl{position:absolute;margin:-28px 0 0 8px;color:#0f0;font-weight:bold;
-      text-shadow:1px 1px 2px #000;pointer-events:none}
- #now{font-size:20px;color:#ff0;margin:8px 0}
- button{font-size:15px;padding:8px 16px;margin-right:8px;cursor:pointer}
- #msg{margin-top:10px;font-size:15px;white-space:pre-wrap}
-</style></head><body>
-<h2>기둥 수동 보정</h2>
-<p>안내하는 기둥을 화면에서 <b>순서대로</b> 클릭하세요.
-   마커 무늬는 못 읽어도 됩니다. <b>기둥 윗면 중앙</b>을 찍으면 됩니다.<br>
-   최소 4개, 많을수록 정확합니다. 위아래로 골고루 찍어야 합니다.</p>
-<div id="now"></div>
-<div id="wrap"><img id="shot" src="/snapshot"></div>
-<div style="margin-top:10px">
-  <button onclick="undo()">한 개 취소</button>
-  <button onclick="skip()">이 기둥 건너뛰기</button>
-  <button onclick="reload()">사진 다시 찍기</button>
-  <button onclick="save()">저장</button>
-</div>
-<div id="msg"></div>
-<script>
-const STEPS = __STEPS__;
-let i = 0, pts = {};
-const wrap = document.getElementById('wrap'), img = document.getElementById('shot');
-
-function show(){
-  document.getElementById('now').textContent = i < STEPS.length
-    ? `[${i+1}/${STEPS.length}] 마커 ${STEPS[i].id}번 기둥 (격자 ${STEPS[i].row},${STEPS[i].col})을 클릭`
-    : `모두 지정했습니다. 찍은 기둥 ${Object.keys(pts).length}개 - 저장을 누르세요.`;
-}
-img.addEventListener('click', e => {
-  if (i >= STEPS.length) return;
-  const r = img.getBoundingClientRect();
-  // 화면에 축소되어 표시되므로 원본 픽셀 좌표로 되돌린다
-  const sx = img.naturalWidth / r.width, sy = img.naturalHeight / r.height;
-  const id = STEPS[i].id;
-  pts[id] = [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
-  addDot(e.clientX - r.left, e.clientY - r.top, id);
-  i++; show();
-});
-function addDot(x, y, id){
-  const d = document.createElement('div'); d.className='dot'; d.dataset.id=id;
-  d.style.left = x+'px'; d.style.top = y+'px'; wrap.appendChild(d);
-  const l = document.createElement('div'); l.className='lbl'; l.dataset.id=id;
-  l.style.left = x+'px'; l.style.top = y+'px'; l.textContent = id; wrap.appendChild(l);
-}
-function undo(){
-  if (i === 0) return;
-  i--; const id = STEPS[i].id; delete pts[id];
-  document.querySelectorAll(`[data-id="${id}"]`).forEach(e => e.remove());
-  show();
-}
-function skip(){ if (i < STEPS.length) { i++; show(); } }
-function reload(){
-  img.src = '/snapshot?t=' + Date.now();
-  document.querySelectorAll('.dot,.lbl').forEach(e => e.remove());
-  i = 0; pts = {}; show();
-}
-function save(){
-  fetch('/calibrate/save', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({points: pts})})
-   .then(r => r.json())
-   .then(r => { document.getElementById('msg').textContent =
-                  (r.ok ? '성공: ' : '실패: ') + r.message;
-                document.getElementById('msg').style.color = r.ok ? '#0f0' : '#f66'; });
-}
-show();
-</script></body></html>
-"""
 
 
 # 통합 파이프라인 (B + C)
@@ -644,32 +565,9 @@ if __name__ == '__main__':
     # --- 수동 보정 -------------------------------------------------------
     # 마커가 작거나 흐려 자동 검출이 잘 안 될 때, 화면에서 기둥을 직접 찍어
     # 좌표계를 확정한다. 카메라가 고정이면 한 번만 하면 되고 캐시에 저장된다.
-
-    @app.route('/snapshot')
-    def snapshot():
-        """보정 화면에 쓸 정지 프레임 한 장."""
-        ok, frame = pipeline.cap.read()
-        if not ok:
-            return "카메라 프레임을 읽을 수 없습니다.", 503
-        ok, buf = cv2.imencode('.jpg', frame)
-        return Response(buf.tobytes(), mimetype='image/jpeg')
-
-    @app.route('/calibrate')
-    def calibrate():
-        """기둥을 순서대로 클릭해 호모그래피를 만드는 페이지."""
-        from data.map_data import PILL_MARKER_ID
-        # 마커 ID 순서대로 안내한다 (왼쪽 열 -> 중앙 섬 -> 오른쪽 열, 각 열은 위에서 아래)
-        order = sorted(PILL_MARKER_ID.items(), key=lambda kv: kv[1])
-        steps = [{"id": mid, "row": cell[0], "col": cell[1]} for cell, mid in order]
-        return CALIBRATE_HTML.replace("__STEPS__", json.dumps(steps, ensure_ascii=False))
-
-    @app.route('/calibrate/save', methods=['POST'])
-    def calibrate_save():
-        """클릭한 점들로 호모그래피를 계산하고 저장한다."""
-        data = request.get_json(silent=True) or {}
-        points = {int(k): v for k, v in (data.get("points") or {}).items()}
-        ok, message = pipeline.navigator.mapper.set_homography_from_points(points)
-        return {"ok": ok, "message": message}
+    from logic.B03_map_setting import register_map_routes
+    import logic.B00_camera_input as b00_camera_input
+    register_map_routes(app, pipeline, cap_module=b00_camera_input)
 
     print(f"\n[INFO] Flask 웹 서버를 시작합니다. http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     try:

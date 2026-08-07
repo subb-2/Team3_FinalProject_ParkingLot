@@ -166,14 +166,13 @@ def main():
     # 렌즈 보정이 걸려 있는지 알려준다.
     # 이게 없으면 화면 가장자리가 휘어 호모그래피 오차가 커지는데, 평균값만
     # 보면 통과처럼 보여서 알아채기 어렵다. 시작할 때 상태를 못박아 둔다.
-    from logic.B04_lens_calib import load_calibration
+    from logic.B03_map_setting import load_calibration
     lens = load_calibration()
     if lens:
         print(f"  렌즈 왜곡 보정 적용 중 (RMS {lens['rms']:.3f}px, "
               f"기준 {lens['image_size'][0]}x{lens['image_size'][1]})")
     else:
-        print("  [주의] 렌즈 왜곡 보정이 없습니다. 광각 렌즈면 화면 가장자리가 휘어")
-        print("         호모그래피 오차가 커집니다. python logic/B04_lens_calib.py")
+        print("  [주의] 렌즈 왜곡 보정이 없습니다.")
 
     # [3단계] MOT -------------------------------------------------------
     # 검출기(YOLO) 로딩이 가장 오래 걸리는 단계다.
@@ -203,7 +202,10 @@ def main():
     # --- 화면 ---------------------------------------------------------
     @app.route('/')
     def index():
-        """세로 3분할 최종 화면."""
+        """세로 3분할 최종 화면. 맵 보정이 안되어 있으면 보정 페이지로 이동"""
+        if not pipeline.navigator.mapper.is_ready():
+            from flask import redirect
+            return redirect('/calibrate')
         return render_page()
 
     @app.route('/lot_layout')
@@ -273,54 +275,9 @@ def main():
         """추적/내비게이션 상태 JSON. (점검용)"""
         return build_status(pipeline)
 
-    @app.route('/recalibrate')
-    def recalibrate():
-        """카메라를 다시 설치했을 때 호모그래피를 재계산."""
-        pipeline.navigator.mapper.reset()
-        return "호모그래피를 초기화했습니다. 마커가 보이면 자동으로 재계산됩니다."
-
-    # --- 수동 보정 (C_main과 동일) --------------------------------------
-    @app.route('/snapshot')
-    def snapshot():
-        ok, frame = pipeline.cap.read()
-        if not ok:
-            return "카메라 프레임을 읽을 수 없습니다.", 503
-        ok, buf = cv2.imencode('.jpg', frame)
-        return Response(buf.tobytes(), mimetype='image/jpeg')
-
-    @app.route('/calibrate')
-    def calibrate():
-        """기둥을 순서대로 클릭해 호모그래피를 만드는 페이지."""
-        import json
-        from data.map_data import PILL_MARKER_ID
-        order = sorted(PILL_MARKER_ID.items(), key=lambda kv: kv[1])
-        steps = [{"id": mid, "row": cell[0], "col": cell[1]} for cell, mid in order]
-        return CALIBRATE_HTML.replace("__STEPS__", json.dumps(steps, ensure_ascii=False))
-
-    @app.route('/calibrate/save', methods=['POST'])
-    def calibrate_save():
-        data = request.get_json(silent=True) or {}
-        points = {int(k): v for k, v in (data.get("points") or {}).items()}
-        ok, message = pipeline.navigator.mapper.set_homography_from_points(points)
-
-        # 보정에 성공했으면 자리 좌표를 방금 찍은 기둥에 맞춘다.
-        if ok:
-            if hasattr(cap, "reload_undistort"):
-                cap.reload_undistort()
-
-            anchored, moved, shift = pipeline.navigator.anchor_spots_to_observed()
-            if anchored and moved:
-                message += (f"  자리 {moved}개를 찍은 기둥 기준으로 옮겼습니다 "
-                            f"(최대 {shift:.1f}cm).")
-
-        residuals = pipeline.navigator.mapper.marker_residuals
-        return {
-            "ok": ok,
-            "message": message,
-            # 기둥별 오차. 유독 큰 값이 있으면 그 기둥을 잘못 찍은 것이다.
-            "residuals_cm": {str(k): round(v, 2) for k, v in sorted(residuals.items())},
-        }
-
+    from logic.B03_map_setting import register_map_routes
+    import logic.B00_camera_input as b00_camera_input
+    register_map_routes(app, pipeline, cap_module=b00_camera_input)
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     print(f"  좌표계가 안 잡히면 /calibrate 에서 기둥을 직접 찍으세요.")
     print("=" * 46)

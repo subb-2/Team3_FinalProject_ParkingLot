@@ -248,14 +248,15 @@ if __name__ == '__main__':
         """현재 추적/내비게이션 상태를 JSON으로 반환."""
         return build_status(pipeline)
 
-    @app.route('/recalibrate')
-    def recalibrate():
-        """카메라를 다시 설치했을 때 호모그래피를 재계산."""
-        pipeline.navigator.mapper.reset()
-        return "호모그래피를 초기화했습니다. 마커가 보이면 자동으로 재계산됩니다."
+    from logic.B03_map_setting import register_map_routes
+    import logic.B00_camera_input as b00_camera_input
+    register_map_routes(app, pipeline, cap_module=b00_camera_input)
 
     @app.route('/')
     def index():
+        if not pipeline.navigator.mapper.is_ready():
+            from flask import redirect
+            return redirect('/calibrate')
         return f"""
         <html>
             <head><title>Parking Navigation - D_main</title></head>
