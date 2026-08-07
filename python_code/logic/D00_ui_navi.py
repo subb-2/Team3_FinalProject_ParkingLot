@@ -148,20 +148,26 @@ class NavigationView:
         self.width = width or CONFIG['NAV_WIDTH']
         self.height = height or CONFIG['NAV_HEIGHT']
 
-        if spot_world_pos is not None:
-            self.spot_world_pos = dict(spot_world_pos)
-        elif navigator is not None and navigator.spot_world_pos:
-            self.spot_world_pos = dict(navigator.spot_world_pos)
+        self.is_pixel_mode = navigator is not None and getattr(navigator, 'pillar_pixels', None)
+
+        if self.is_pixel_mode:
+            self.spot_world_pos = dict(navigator.spot_pixels)
+            self.gate_world_pos = navigator.gate_pixels[0] if navigator.gate_pixels[0] else GATE1_WORLD_POS
+            self.scale = 1.2
+            self.cell_scale = 8.0
         else:
-            self.spot_world_pos = dict(SPOT_WORLD_POS)
+            if spot_world_pos is not None:
+                self.spot_world_pos = dict(spot_world_pos)
+            elif navigator is not None and getattr(navigator, 'spot_world_pos', None):
+                self.spot_world_pos = dict(navigator.spot_world_pos)
+            else:
+                self.spot_world_pos = dict(SPOT_WORLD_POS)
+            self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE1_WORLD_POS
+            self.scale = CONFIG['NAV_PX_PER_CM']
+            self.cell_scale = 1.0
 
-        self.gate_world_pos = gate_world_pos if gate_world_pos is not None else GATE1_WORLD_POS
-
-        self.scale = CONFIG['NAV_PX_PER_CM']
         self.car_y = int(self.height * CONFIG['NAV_CAR_Y_RATIO'])
         self.banner_h = CONFIG['NAV_BANNER_H']
-
-        # 화면 회전을 부드럽게 만들기 위한 표시용 진행 방향
         self._display_heading = None
 
         self._build_perspective()
@@ -331,12 +337,12 @@ class NavigationView:
     def _draw_ground_spots(self, layer, car_pos, heading, spot_status, nav):
         """주차 구역을 회전된 사각형으로 그린다."""
         ratio = CONFIG['SPOT_FILL_RATIO']
-        hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
+        hw = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * ratio / 2
         target = nav.get("target_spot")
 
         for spot_id, (sx, sy) in self.spot_world_pos.items():
             # 대형 구역은 한 자리가 세로 2칸이므로 그만큼 길게 그린다
-            hh = C02_CONFIG['CELL_H_CM'] * get_spot_cell_count(spot_id) * ratio / 2
+            hh = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * get_spot_cell_count(spot_id) * ratio / 2
             corners = [(sx - hw, sy - hh), (sx + hw, sy - hh),
                        (sx + hw, sy + hh), (sx - hw, sy + hh)]
             pts = np.array([self._world_to_flat(c, car_pos, heading) for c in corners],
@@ -525,9 +531,9 @@ class NavigationView:
 
         target = nav.get("target_spot")
         ratio = CONFIG['SPOT_FILL_RATIO']
-        hw = C02_CONFIG['CELL_W_CM'] * ratio / 2
+        hw = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * ratio / 2
         for spot_id, pos in self.spot_world_pos.items():
-            hh = C02_CONFIG['CELL_H_CM'] * get_spot_cell_count(spot_id) * ratio / 2
+            hh = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * get_spot_cell_count(spot_id) * ratio / 2
             p1 = to_mini((pos[0] - hw, pos[1] - hh))
             p2 = to_mini((pos[0] + hw, pos[1] + hh))
             if spot_id == target:
@@ -635,8 +641,8 @@ class NavigationMapUI:
         실좌표 -> 화면좌표 변환(축척과 원점)을 자동 계산.
         """
         # 격자 바깥 테두리(벽)까지 포함한 범위
-        cell_w = C02_CONFIG['CELL_W_CM']
-        cell_h = C02_CONFIG['CELL_H_CM']
+        cell_w = (C02_CONFIG['CELL_W_CM'] * self.cell_scale)
+        cell_h = (C02_CONFIG['CELL_H_CM'] * self.cell_scale)
         top_left = cell_to_world((0, 0))
         bottom_right = cell_to_world((get_rows() - 1, get_cols() - 1))
 
@@ -749,8 +755,8 @@ class NavigationMapUI:
     def _cell_rect(self, cell, fill_ratio=1.0):
         """map_data 격자 한 칸의 화면 사각형 좌표 (p1, p2)를 계산."""
         cx, cy = cell_to_world(cell)
-        half_w = C02_CONFIG['CELL_W_CM'] * fill_ratio * self.scale / 2
-        half_h = C02_CONFIG['CELL_H_CM'] * fill_ratio * self.scale / 2
+        half_w = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * fill_ratio * self.scale / 2
+        half_h = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * fill_ratio * self.scale / 2
         px, py = self.world_to_map((cx, cy))
         return ((int(px - half_w), int(py - half_h)),
                 (int(px + half_w), int(py + half_h)))
@@ -807,8 +813,8 @@ class NavigationMapUI:
     def _draw_spots(self, canvas, spot_status, target_spots):
         """주차 구역을 점유 상태에 따라 색을 달리하여 그린다."""
         ratio = CONFIG['SPOT_FILL_RATIO']
-        half_w = C02_CONFIG['CELL_W_CM'] * ratio * self.scale / 2
-        half_h = C02_CONFIG['CELL_H_CM'] * ratio * self.scale / 2
+        half_w = (C02_CONFIG['CELL_W_CM'] * self.cell_scale) * ratio * self.scale / 2
+        half_h = (C02_CONFIG['CELL_H_CM'] * self.cell_scale) * ratio * self.scale / 2
 
         for spot_id, world_pt in sorted(self.spot_world_pos.items()):
             cx, cy = self.world_to_map(world_pt)

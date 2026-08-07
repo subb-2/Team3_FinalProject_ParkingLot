@@ -961,11 +961,11 @@ class ParkingNavigator:
             if center is None:
                 return None
             cells = get_spot_cell_count(spot_id) or 1
-            # 픽셀 모드 임시 추정: 1cm = 약 8px (해상도에 따라 다름)
+            # 픽셀 모드: B02_car_mot가 cm 단위로 비교하므로, target_rect도 cm 단위로 반환
             px_per_cm = 8.0 
-            half_w = C02_CONFIG['CELL_W_CM'] / 2.0 * px_per_cm
-            half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0 * px_per_cm
-            return (center[0], center[1], half_w, half_h)
+            half_w = C02_CONFIG['CELL_W_CM'] / 2.0
+            half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0
+            return (center[0] / px_per_cm, center[1] / px_per_cm, half_w, half_h)
             
         center = self.spot_world_pos.get(spot_id)
         if center is None:
@@ -1066,7 +1066,7 @@ class ParkingNavigator:
                 "track_id": trk["track_id"],
                 "car_id": car_id,
                 "image_pos": image_pos,
-                "world_pos": pos if not is_pixel_mode else (0.0, 0.0), # 호환성 유지
+                "world_pos": pos,
                 "heading_deg": heading,
                 "target_spot": target_spot,
                 "target_world": target_pos, # 픽셀 모드면 픽셀 좌표가 들어감
