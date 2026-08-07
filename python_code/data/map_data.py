@@ -45,8 +45,8 @@ SPOT_TYPE_NAME = {
 # 2칸으로 그려져 있지만 실제로는 '1자리'다.
 # 이 표에 따라 같은 열에서 연속된 같은 종류 칸들을 자리 하나로 묶는다.
 #
-# 예) col 12의 row 1, 2가 모두 SPOT3 -> 두 칸을 묶어 대형 1자리
-#     col 0의 row 1, 2가 모두 SPOT1  -> span이 1이므로 각각 별개 자리
+# 예) col 0의 row 4, 5가 모두 SPOT3 -> 두 칸을 묶어 대형 1자리 (A-3)
+#     col 0의 row 1, 2가 모두 SPOT1 -> span이 1이므로 각각 별개 자리 (A-1, A-2)
 #
 # 종류를 추가하면 여기에도 넣을 것. 없으면 1로 취급한다.
 SPOT_CELL_SPAN = {
@@ -60,6 +60,8 @@ SPOT_CELL_SPAN = {
 # 주차장 그리드 맵 (9행 x 13열)
 # 구조:
 #   - 바깥 양쪽 열(col 0 = 왼쪽, col 12 = 오른쪽)에 주차 구역이 늘어서 있다.
+#     왼쪽 열 : 일반 2 + 대형 1(row 4~5를 묶어 1자리) + 장애인 1  = 4자리
+#     오른쪽 열: 전부 일반                                        = 5자리
 #   - 가운데 col 5 / col 7은 중앙 섬 두 개. 각각 기둥 2개 사이에 전기차 구역 2칸.
 #   - 그 사이(col 1~3, 5~6, 8~10)와 맨 아랫줄(row 8)이 전부 도로다.
 #   - 입구(GATE1)는 아래 오른쪽(row 8, col 8), 출구(GATE2)는 아래 왼쪽(row 8, col 3).
@@ -80,11 +82,11 @@ SPOT_CELL_SPAN = {
 grid_map = [
     # col: 0       1       2       3       4       5       6       7       8       9      10      11      12
         [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 0
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 1
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT3],  # row 2
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 1
+        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 2
         [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 3
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 4
-        [SPOT1  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
+        [SPOT3  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 4
+        [SPOT3  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
         [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 6
         [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 7
         [ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD   ,ROAD],  # row 8
@@ -259,14 +261,15 @@ GATE2_POS = _find_cell(GATE2)   # 출구
 # 전부 직선거리 순으로 배정된다. 즉 이 표는 '덮어쓰기'이지 필수가 아니다.
 # 배치를 바꾸면 구역 ID가 밀릴 수 있으므로 아래 검증 경고를 꼭 확인할 것.
 SPOT_PRIORITY = {
-    # 오른쪽 열 아래 -> 위, 그다음 왼쪽 열 아래 -> 위
-    SPOT1: ["D-4", "D-3", "D-2", "A-4", "A-3", "A-2", "A-1"],
+    # 오른쪽 열 아래 -> 위, 그다음 왼쪽 열 아래 -> 위.
+    # 오른쪽 열(col 12)이 통째로 일반 구역이 되어 5자리, 왼쪽 열은 위쪽 2자리만 남았다.
+    SPOT1: ["D-5", "D-4", "D-3", "D-2", "D-1", "A-2", "A-1"],
 
-    # 장애인 구역은 현재 1자리뿐
-    SPOT2: ["A-5"],
+    # 장애인 구역은 현재 1자리뿐 (왼쪽 열 맨 아래)
+    SPOT2: ["A-4"],
 
-    # 대형 구역은 2칸을 묶어 1자리뿐 (오른쪽 열 위쪽)
-    SPOT3: ["D-1"],
+    # 대형 구역은 2칸을 묶어 1자리뿐 (왼쪽 열 가운데, row 4~5)
+    SPOT3: ["A-3"],
 
     # 중앙 섬. 입구에 가까운 아래쪽(row 4) 두 자리를 먼저 쓴다.
     SPOT4: ["C-2", "B-2", "C-1", "B-1"],
