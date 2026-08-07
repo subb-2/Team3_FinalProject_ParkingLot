@@ -2,9 +2,11 @@ module UART_top(
     input  logic        clk,
     input  logic        reset,
     input  logic        i_inf_done,
-    input  logic [16:0] i_inf_data,
+    input  logic [15:0] i_inf_data,
     output logic        o_tx
 );
+
+    logic w_inf_done;
 
     logic w_fifo_push, w_fifo_pop, w_fifo_full, w_fifo_empty;
     logic [7:0] w_push_data, w_pop_data;
@@ -14,10 +16,18 @@ module UART_top(
     assign w_tx_start = (!w_fifo_empty) && w_uart_ready;   // fifo가 비어있지 않고, uart가 동작중이지 않을 때 trans_req 발생 => 보낼 데이터가 있는데 tx가 놀고있을 때
     assign w_fifo_pop = w_tx_start;
 
+    SYNC_2FF #(
+        .WIDTH(1)
+    ) U_SYNC_UART (
+        .clk(clk),
+        .reset(reset),
+        .async_in(i_inf_done),
+        .sync_out(w_inf_done)
+    );
     InfDataController U_InfDataCtrl(
         .clk(clk),
         .reset(reset),
-        .i_inf_done(i_inf_done),
+        .i_inf_done(w_inf_done),
         .i_inf_data(i_inf_data),
         .i_fifo_full(w_fifo_full),
         .o_data(w_push_data),

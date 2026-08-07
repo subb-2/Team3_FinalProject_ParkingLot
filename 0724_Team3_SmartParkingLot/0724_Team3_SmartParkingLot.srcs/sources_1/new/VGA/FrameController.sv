@@ -109,7 +109,7 @@ module FrameRegister(
     logic [27:0] FrameReg;
     logic [4:0]  bitCnt, lineCnt;   // 0 ~ 28
     logic [1:0]  posCnt;            // 0 ~ 3
-    logic        clkCnt;            // 0 ~ 1
+    logic [1:0]  clkCnt;            // 0 ~ 1
 
     // always_ff @(posedge i_pixel_clk, posedge reset) begin
     //     if(reset) begin
@@ -177,7 +177,7 @@ module FrameRegister(
             PIXEL_REG: if(bitCnt == 28)                  n_state = WRITE;
             WRITE:     if(lineCnt == 27 && posCnt == 3)  n_state = VGA_DONE;
                        else                              n_state = PIXEL_REG;
-            VGA_DONE:  if(clkCnt == 1)                   n_state = IDLE;
+            VGA_DONE:  if(clkCnt == 2)                   n_state = IDLE;
             default:                                     n_state = IDLE;
         endcase
     end
@@ -226,12 +226,12 @@ module FrameRegister(
                 end
             end
             VGA_DONE: begin
-                if(clkCnt) begin
+                if(clkCnt == 2) begin
                     o_vga_done <= 1'b0;
                     clkCnt     <= 1'b0;
                 end else begin
                     o_vga_done <= 1'b1;
-                    clkCnt     <= 1'b1;
+                    clkCnt     <= clkCnt + 1;
                 end
             end
             default: begin
