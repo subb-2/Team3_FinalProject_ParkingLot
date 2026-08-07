@@ -188,6 +188,96 @@ class Undistorter:
         return cv2.remap(frame, self._map1, self._map2, cv2.INTER_LINEAR)
 
 
+# 기둥만으로 왜곡 풀기 (체스보드 없이)
+#
+# 체스보드가 필요한 이유는 '평면 위 점들의 실제 간격을 알아야' 하기 때문이다.
+# 그런데 우리는 그걸 이미 안다. 기둥의 실좌표는 격자에서 나온다.
+# 그러면 기둥을 찍는 것만으로 체스보드와 같은 역할을 시킬 수 있다.
+#
+# 미지수와 식의 개수
+#   미지수  호모그래피 8 + 왜곡계수 k1 1  =  9개
+#   식      기둥 10개 x (x, y)            = 20개
+# 풀린다. 기둥이 최소 6개면 (12개 식) 여유가 생긴다.
+#
+# k1이 하나뿐이므로 1차원 탐색으로 충분하다. 후보 k1마다 점을 펴서
+# 호모그래피를 맞춰 보고, 재투영 오차가 가장 작은 k1을 고른다.
+# 최적화 라이브러리가 필요 없어 젯슨에서 의존성 추가 없이 돈다.
+def solve_radial_from_points(image_points, marker_world_pos,
+                             image_size, search=None):
+    """
+    기둥 클릭 위치만으로 렌즈 왜곡 계수(k1)를 추정한다.
+
+    체스보드 없이 쓸 수 있는 대신, 점이 한 평면 위에만 있어서 체스보드
+    캘리브레이션보다 정밀도가 낮다. 목적이 '화면의 휘어짐을 펴는 것'이라면
+    이걸로 충분하다. 초점거리를 정확히 알아야 하는 용도라면 체스보드를 쓸 것.
+
+    Args:
+        image_points:     {마커ID: (x_px, y_px)} 사람이 찍은 기둥 위치
+        marker_world_pos: {마커ID: (x_cm, y_cm)} 기둥 실좌표
+        image_size:       (width, height) 프레임 크기
+        search:           (최소k1, 최대k1, 단계수). None이면 기본값.
+
+    Returns:
+        {"k1", "camera_matrix", "dist_coeffs", "error_before", "error_after",
+         "improved"} 또는 실패 시 None
+    """
+    ids = [int(i) for i in image_points if int(i) in marker_world_pos]
+    if len(ids) < 6:
+        # 8자유도짜리 호모그래피에 미지수를 하나 더 얹는 것이라
+        # 4~5점으로는 왜곡이 아니라 잡음을 따라가 버린다.
+        return None
+
+    img = np.array([image_points[i] if i in image_points else image_points[str(i)]
+                    for i in ids], dtype=np.float64).reshape(-1, 1, 2)
+    world = np.array([marker_world_pos[i] for i in ids], dtype=np.float64)
+
+    w, h = image_size
+    # 주점은 화면 중앙, 초점거리는 화면 크기로 가정한다.
+    # 이 둘이 조금 틀려도 k1이 그만큼 흡수하고, 우리 목적은 '펴는 것'이라
+    # 실제 초점거리 값 자체는 쓰지 않는다.
+    f = float(max(w, h))
+    K = np.array([[f, 0, w / 2.0], [0, f, h / 2.0], [0, 0, 1.0]])
+
+    def fit(k1):
+        """이 k1으로 점을 편 뒤 호모그래피를 맞추고 평균 오차(cm)를 낸다."""
+        dist = np.array([k1, 0.0, 0.0, 0.0, 0.0])
+        und = cv2.undistortPoints(img, K, dist, P=K)
+        H, _ = cv2.findHomography(und.astype(np.float32),
+                                  world.astype(np.float32), 0)
+        if H is None:
+            return float('inf'), None
+        proj = cv2.perspectiveTransform(und.astype(np.float32), H).reshape(-1, 2)
+        return float(np.mean(np.linalg.norm(proj - world, axis=1))), H
+
+    lo, hi, steps = search or (-0.60, 0.30, 61)
+    best = (fit(0.0)[0], 0.0)          # 왜곡 없음을 기준으로 삼는다
+    error_before = best[0]
+
+    # 성기게 훑고 그 주변을 세 번 조인다. 전역 최소를 놓치지 않으면서 빠르다.
+    for _ in range(3):
+        for k1 in np.linspace(lo, hi, steps):
+            err, _ = fit(float(k1))
+            if err < best[0]:
+                best = (err, float(k1))
+        span = (hi - lo) / (steps - 1) * 2
+        lo, hi = best[1] - span, best[1] + span
+
+    error_after, _ = fit(best[1])
+    k1 = best[1]
+
+    return {
+        "k1": k1,
+        "camera_matrix": K,
+        "dist_coeffs": np.array([[k1, 0.0, 0.0, 0.0, 0.0]]),
+        "image_size": image_size,
+        "error_before": error_before,
+        "error_after": error_after,
+        "markers": len(ids),
+        # 왜곡이 실제로 있었는지. 개선이 미미하면 굳이 적용할 이유가 없다.
+        "improved": error_before - error_after,
+    }
+
+
 # 캘리브레이션
 class CameraCalibrator:
     """

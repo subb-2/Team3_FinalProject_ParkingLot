@@ -302,9 +302,35 @@ class MarkerMapper:
 
         error = self._reprojection_error(H, img_pts, world_pts)
         if error > self.max_error:
-            return False, (f"재투영 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
-                           f"기둥 순서를 잘못 찍었거나, C02의 CELL_W_CM/CELL_H_CM이 "
-                           f"실제 목업 치수와 다릅니다.")
+            print(f"[경고] 수동 보정 재투영 오차가 큽니다 ({error:.1f}cm > {self.max_error}cm). "
+                  f"하지만 수동 클릭을 최우선 적용하여 호모그래피를 강제 확정합니다.")
+
+        # 렌즈 왜곡(볼록함) 자동 보정
+        from logic.B04_lens_calib import solve_radial_from_points, save_calibration
+        from logic.B00_camera_input import DEFAULT_WIDTH, DEFAULT_HEIGHT
+        
+        solve_points = {used[i]: img_pts[i] for i in range(len(used))}
+        solve_world = {used[i]: world_pts[i] for i in range(len(used))}
+        
+        lens_res = solve_radial_from_points(
+            solve_points, solve_world, (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        )
+        msg_lens = ""
+        if lens_res and lens_res["improved"] > 0.1:
+            save_calibration(lens_res["camera_matrix"], lens_res["dist_coeffs"], 
+                             lens_res["image_size"], rms=0.0)
+            msg_lens = f"  (렌즈 왜곡 {lens_res['improved']:.1f}cm 추가 보정됨)"
+            
+            # 미래에 들어올 펴진 프레임에 대응하도록 H도 펴진 좌표계로 새로 구한다
+            img_arr = np.array(img_pts, dtype=np.float32).reshape(-1, 1, 2)
+            und = cv2.undistortPoints(img_arr, lens_res["camera_matrix"], 
+                                      lens_res["dist_coeffs"], P=lens_res["camera_matrix"])
+            img_pts = [(float(p[0][0]), float(p[0][1])) for p in und]
+            
+            H, _ = cv2.findHomography(
+                np.array(img_pts, np.float32), np.array(world_pts, np.float32),
+                cv2.RANSAC if len(img_pts) > 4 else 0, self.ransac_thresh_cm)
+            error = self._reprojection_error(H, img_pts, world_pts)
 
         self.H = H
         self.H_inv = np.linalg.inv(H)
@@ -318,7 +344,7 @@ class MarkerMapper:
         self.marker_residuals = {mid: float(e) for mid, e in zip(used, per_point)}
         self._report_residuals()
 
-        msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm"
+        msg = f"수동 보정 완료. 기둥 {len(img_pts)}개 {sorted(used)}, 오차 {error:.2f}cm" + msg_lens
         if len(img_pts) == 4:
             # 4점은 항상 오차 0으로 맞춰진다. 즉 이 숫자로는 옳은지 알 수 없다.
             msg += ("  (주의: 4점은 오차가 항상 0으로 나와 검증이 불가능합니다. "

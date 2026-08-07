@@ -52,6 +52,18 @@ class UndistortedCapture:
             return ok, frame
         return ok, self._undistorter.apply(frame)
 
+    def reload_undistort(self):
+        """
+        보정값 파일을 다시 읽는다.
+
+        기둥 보정(/calibrate)에서 왜곡 계수를 새로 구했을 때, 프로그램을
+        재시작하지 않고 바로 반영하기 위한 것이다. 재시작을 요구하면
+        보정 -> 확인 -> 재보정을 반복하기가 번거롭다.
+        """
+        from logic.B04_lens_calib import Undistorter
+        self._undistorter = Undistorter()
+        return self._undistorter.is_ready()
+
     def __getattr__(self, name):
         # isOpened / release / set / get 등은 원본 객체에 그대로 넘긴다
         return getattr(self._cap, name)

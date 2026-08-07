@@ -304,9 +304,10 @@ def main():
         ok, message = pipeline.navigator.mapper.set_homography_from_points(points)
 
         # 보정에 성공했으면 자리 좌표를 방금 찍은 기둥에 맞춘다.
-        # 등록된 격자의 절대 거리가 실물과 다르면 기둥은 맞는데 자리만
-        # 어긋나는데, 이 단계가 그 차이를 없앤다. (anchor_spots_to_observed)
         if ok:
+            if hasattr(cap, "reload_undistort"):
+                cap.reload_undistort()
+
             anchored, moved, shift = pipeline.navigator.anchor_spots_to_observed()
             if anchored and moved:
                 message += (f"  자리 {moved}개를 찍은 기둥 기준으로 옮겼습니다 "
