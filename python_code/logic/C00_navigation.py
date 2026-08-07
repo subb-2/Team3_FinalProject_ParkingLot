@@ -198,22 +198,28 @@ class MarkerMapper:
         self._warned = set()          # 중복 경고 억제용
 
         # 보정에 실제로 쓴 기둥의 이미지 좌표 {마커ID: (x_px, y_px)}.
-        #
-        # 이걸 들고 있어야 자리 좌표를 '등록된 격자'가 아니라 '실제로 관측된
-        # 기둥'에 붙일 수 있다. anchor_spots_to_observed 참고.
         self.marker_image_pos = {}
         # 기둥별 재투영 오차 {마커ID: cm}.
-        #
-        # 평균만 보면 한 기둥이 크게 틀어져도 묻힌다. 10개 중 하나가 8cm
-        # 어긋나 있어도 평균은 1cm 아래로 나올 수 있다. 화면에서 특정 구역만
-        # 어긋나 보일 때 어느 기둥이 범인인지 이 값으로 찾는다.
         self.marker_residuals = {}
 
-        print(f"[INFO] ArUco 마커 검출기 초기화 완료. ("
+        # --- 픽셀 기반 매핑 데이터 ---
+        # 사용자가 클릭한 기둥 픽셀 좌표 {마커ID: (x_px, y_px)}
+        self.pillar_pixels = {}
+        # 기둥 사이 보간으로 계산된 자리 픽셀 좌표 {구역ID: (x_px, y_px)}
+        self.spot_pixels = {}
+        # 입출구 픽셀 좌표 (gate1_pixel, gate2_pixel)
+        self.gate_pixels = (None, None)
+
+        print(f"[INFO] 마커 매퍼 초기화 완료. ("
               f"등록된 마커 {len(self.marker_world_pos)}개)")
 
-        # 카메라가 고정이면 호모그래피는 상수다. 저장해 둔 것이 있으면 불러 쓴다.
-        if CONFIG['USE_HOMOGRAPHY_CACHE']:
+        # 저장된 기둥 픽셀 좌표가 있으면 불러온다
+        from logic.B03_map_setting import load_pillar_pixels
+        saved = load_pillar_pixels()
+        if saved:
+            self.set_pillar_pixels(saved)
+            print(f"[INFO] 저장된 기둥 픽셀 좌표를 불러왔습니다. ({len(saved)}개)")
+        elif CONFIG['USE_HOMOGRAPHY_CACHE']:
             self.load_homography()
 
     # --- 호모그래피 저장/복원 -----------------------------------------------
@@ -515,6 +521,9 @@ class MarkerMapper:
 
     def is_ready(self):
         """좌표 변환이 가능한 상태인지 확인."""
+        # 픽셀 기반 모드: 기둥 픽셀이 설정되었으면 준비 완료
+        if self.pillar_pixels:
+            return True
         return self.H is not None
 
     def image_to_world(self, point):
@@ -549,6 +558,96 @@ class MarkerMapper:
         dst = cv2.perspectiveTransform(src, self.H_inv)
         return int(dst[0][0][0]), int(dst[0][0][1])
 
+    # --- 픽셀 기반 매핑 (호모그래피 없이 동작) --------------------------------
+    # 기둥 픽셀 좌표만으로 자리 위치를 보간하고 차량 위치를 판단한다.
+    # cm 좌표 변환 없이 이미지 픽셀 거리로 직접 비교한다.
+
+    def set_pillar_pixels(self, pillar_pixels):
+        """
+        사용자가 클릭한 기둥 픽셀 좌표를 설정하고, 자리/입출구 픽셀 좌표를 자동 계산.
+
+        호모그래피를 쓰지 않는다. 기둥 사이의 상대 관계(map_data)만 참고하여
+        자리 픽셀 위치를 보간으로 구한다.
+
+        Args:
+            pillar_pixels: {마커ID: (x_px, y_px)} 사용자가 지정한 기둥 이미지 좌표
+
+        Returns:
+            (성공 여부, 메시지)
+        """
+        from logic.C02_lot_layout import build_spot_pixel_pos, build_gate_pixel_pos
+
+        if len(pillar_pixels) < 4:
+            return False, f"기둥이 {len(pillar_pixels)}개뿐입니다. 최소 4개가 필요합니다."
+
+        self.pillar_pixels = dict(pillar_pixels)
+        self.spot_pixels = build_spot_pixel_pos(pillar_pixels)
+        self.gate_pixels = build_gate_pixel_pos(pillar_pixels)
+
+        # 호모그래피도 함께 계산 (기존 호환용 - cm 단위가 필요한 곳이 있을 수 있음)
+        img_pts, world_pts, used = [], [], []
+        for marker_id, pt in pillar_pixels.items():
+            world_pt = self.marker_world_pos.get(int(marker_id))
+            if world_pt is None:
+                continue
+            img_pts.append((float(pt[0]), float(pt[1])))
+            world_pts.append(world_pt)
+            used.append(int(marker_id))
+
+        if len(img_pts) >= 4:
+            H, _ = cv2.findHomography(
+                np.array(img_pts, np.float32), np.array(world_pts, np.float32),
+                cv2.RANSAC if len(img_pts) > 4 else 0, self.ransac_thresh_cm)
+            if H is not None:
+                self.H = H
+                self.H_inv = np.linalg.inv(H)
+                self.calibrated_with = len(img_pts)
+                self.reproj_error = self._reprojection_error(H, img_pts, world_pts)
+                self.locked = True
+                self.marker_image_pos = {mid: pt for mid, pt in zip(used, img_pts)}
+                if CONFIG['USE_HOMOGRAPHY_CACHE']:
+                    self.save_homography()
+
+        msg = (f"픽셀 기반 보정 완료. 기둥 {len(pillar_pixels)}개, "
+               f"자리 {len(self.spot_pixels)}개 위치 계산됨.")
+        print(f"[INFO] {msg}")
+        return True, msg
+
+    def find_nearest_spot_pixel(self, car_pixel):
+        """
+        차량 bbox 중심 픽셀에서 가장 가까운 주차 구역을 찾는다.
+
+        Args:
+            car_pixel: (x_px, y_px) 차량 bbox 중심
+
+        Returns:
+            가장 가까운 구역 ID. spot_pixels가 없으면 None.
+        """
+        if not self.spot_pixels:
+            return None
+        return min(
+            self.spot_pixels,
+            key=lambda s: math.hypot(
+                car_pixel[0] - self.spot_pixels[s][0],
+                car_pixel[1] - self.spot_pixels[s][1])
+        )
+
+    def pixel_distance_to_spot(self, car_pixel, spot_id):
+        """
+        차량 픽셀과 특정 자리 픽셀 간의 거리.
+
+        Args:
+            car_pixel: (x_px, y_px)
+            spot_id: 구역 ID
+
+        Returns:
+            픽셀 거리. spot이 없으면 float('inf').
+        """
+        sp = self.spot_pixels.get(spot_id)
+        if sp is None:
+            return float('inf')
+        return math.hypot(car_pixel[0] - sp[0], car_pixel[1] - sp[1])
+
     def reset(self, clear_cache=True):
         """
         호모그래피를 초기화. (카메라를 다시 설치했을 때 사용)
@@ -561,6 +660,9 @@ class MarkerMapper:
         self.calibrated_with = 0
         self.reproj_error = float('inf')
         self.locked = False
+        self.pillar_pixels = {}
+        self.spot_pixels = {}
+        self.gate_pixels = (None, None)
         self._warned.clear()
 
         if clear_cache:
@@ -571,8 +673,16 @@ class MarkerMapper:
                     print(f"[INFO] 저장된 호모그래피를 삭제했습니다. {path}")
                 except OSError as e:
                     print(f"[경고] 캐시 파일을 지우지 못했습니다: {e}")
+            # 기둥 픽셀 캐시도 삭제
+            px_path = os.path.join(
+                os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
+            if os.path.exists(px_path):
+                try:
+                    os.remove(px_path)
+                except OSError:
+                    pass
 
-        print("[INFO] 호모그래피를 초기화했습니다. 재계산이 필요합니다.")
+        print("[INFO] 보정을 초기화했습니다. 재보정이 필요합니다.")
 
     # --- 역투영 오버레이 -----------------------------------------------------
 
@@ -608,19 +718,14 @@ class MarkerMapper:
     def draw_layout_overlay(self, frame, show_grid=True, show_spots=True,
                             show_pillars=True, show_gates=True, show_labels=True):
         """
-        등록된 배치(격자/기둥/자리/입출구)를 현재 호모그래피로 화면에 역투영한다.
+        등록된 배치(기둥/자리/입출구)를 화면에 오버레이한다.
 
-        보정이 맞았는지 눈으로 확인하기 위한 것이다. 그려진 격자가 실제 매트의
-        선과 겹쳐 보이면 좌표계가 제대로 잡힌 것이고, 어긋나 보이면 잘못됐다.
-
-        어긋나는 모양으로 원인을 좁힐 수 있다.
-          - 전체가 한쪽으로 밀림      : 기둥 하나를 잘못 찍었다
-          - 전체가 늘어나거나 줄어듦  : C02의 CELL_W_CM / CELL_H_CM이 실제 치수와 다르다
-          - 사다리꼴로 찌그러짐       : 기둥 순서를 잘못 찍었다 (좌우/상하 뒤바뀜)
+        픽셀 기반 모드에서는 기둥/자리 픽셀 좌표를 직접 사용한다.
+        호모그래피 모드에서는 기존처럼 역투영으로 그린다.
 
         Args:
             frame:        그릴 대상 프레임 (원본이 수정됨)
-            show_grid:    도로 격자선과 주차장 외곽
+            show_grid:    (픽셀 모드에서는 무시)
             show_spots:   주차 구역 (종류별 색)
             show_pillars: 기둥
             show_gates:   입출구
@@ -629,26 +734,28 @@ class MarkerMapper:
         Returns:
             frame (입력과 동일 객체)
         """
+        # 픽셀 기반 모드: 기둥과 자리 픽셀 좌표를 직접 사용
+        if self.pillar_pixels:
+            return self._draw_layout_pixel(frame, show_spots, show_pillars,
+                                           show_gates, show_labels)
+
+        # 기존 호모그래피 모드 (fallback)
         if self.H_inv is None:
             return frame
 
         rows, cols = get_rows(), get_cols()
 
-        # 1) 도로 격자선. 배치 전체가 어떻게 투영되는지 한눈에 보여준다.
         if show_grid:
             for row in range(rows):
                 for col in range(cols):
                     poly = self._cells_to_image([(row, col)])
                     if poly is not None:
                         cv2.polylines(frame, [poly], True, COLOR_OVERLAY_EDGE, 1, cv2.LINE_AA)
-
-            # 주차장 외곽은 굵게. 매트 가장자리와 맞는지 보기 위한 기준선.
             outline = self._cells_to_image(
                 [(0, 0), (0, cols - 1), (rows - 1, 0), (rows - 1, cols - 1)])
             if outline is not None:
                 cv2.polylines(frame, [outline], True, COLOR_OVERLAY_BOUND, 2, cv2.LINE_AA)
 
-        # 2) 주차 구역. 종류별로 색을 나눠 그린다. (대형은 2칸이 한 자리)
         if show_spots:
             for spot_id, cells in spot_map.items():
                 poly = self._cells_to_image(cells)
@@ -662,7 +769,6 @@ class MarkerMapper:
                     cv2.putText(frame, spot_id, (cx - 16, cy + 4),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
-        # 3) 기둥. 실제 기둥 윗면과 겹쳐야 한다. 여기가 어긋나면 보정이 틀린 것이다.
         if show_pillars:
             for marker_id, (wx, wy) in self.marker_world_pos.items():
                 pt = cv2.perspectiveTransform(
@@ -675,7 +781,6 @@ class MarkerMapper:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                 COLOR_OVERLAY_PILL, 2, cv2.LINE_AA)
 
-        # 4) 입출구
         if show_gates:
             for pos, label, color in (
                 (GATE1_POS, "IN", COLOR_OVERLAY_GATE1),
@@ -690,6 +795,52 @@ class MarkerMapper:
                 if show_labels:
                     cv2.putText(frame, label,
                                 (int(poly[:, 0].mean()) - 14, int(poly[:, 1].mean()) + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+
+        return frame
+
+    def _draw_layout_pixel(self, frame, show_spots, show_pillars, show_gates, show_labels):
+        """
+        픽셀 기반 오버레이. 기둥/자리 픽셀 좌표를 직접 사용.
+
+        호모그래피 없이 동작하므로 절대 좌표 오차가 없다.
+        기둥 위치가 맞으면 자리 위치도 반드시 맞는다.
+        """
+        # 자리 표시 (원으로 표시 + 자리 ID)
+        if show_spots:
+            for spot_id, (sx, sy) in self.spot_pixels.items():
+                sx, sy = int(sx), int(sy)
+                color = COLOR_OVERLAY_SPOT.get(spot_type.get(spot_id), (200, 200, 200))
+                cv2.circle(frame, (sx, sy), 18, color, 2, cv2.LINE_AA)
+                if show_labels:
+                    cv2.putText(frame, spot_id, (sx - 16, sy + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+        # 기둥 표시 (십자 마커)
+        if show_pillars:
+            for marker_id, (px, py) in self.pillar_pixels.items():
+                cx, cy = int(px), int(py)
+                cv2.drawMarker(frame, (cx, cy), COLOR_OVERLAY_PILL,
+                               cv2.MARKER_CROSS, 16, 2)
+                if show_labels:
+                    cv2.putText(frame, str(marker_id), (cx + 9, cy - 9),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                COLOR_OVERLAY_PILL, 2, cv2.LINE_AA)
+
+        # 입출구 표시
+        if show_gates:
+            gate1_px, gate2_px = self.gate_pixels
+            for gate_px, label, color in (
+                (gate1_px, "IN", COLOR_OVERLAY_GATE1),
+                (gate2_px, "OUT", COLOR_OVERLAY_GATE2),
+            ):
+                if gate_px is None:
+                    continue
+                gx, gy = int(gate_px[0]), int(gate_px[1])
+                cv2.rectangle(frame, (gx - 20, gy - 12), (gx + 20, gy + 12),
+                              color, 2, cv2.LINE_AA)
+                if show_labels:
+                    cv2.putText(frame, label, (gx - 14, gy + 4),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
         return frame
@@ -859,102 +1010,56 @@ class ParkingNavigator:
         print(f"[안내] 차량 '{car_id}' 목표 구역 설정: {spot_id}")
         return True
 
-    def anchor_spots_to_observed(self):
+    def update_spot_pixels(self):
         """
-        자리 좌표를 '실제로 찍은 기둥'에 다시 붙인다.
-
-        왜 필요한가
-          지금까지 자리 좌표는 등록된 격자(C02의 uniform_marker_world_pos)에서
-          계산했다. 격자는 모든 칸이 정확히 CELL_W x CELL_H라고 가정한다.
-          실물이 그 가정과 다르면, 호모그래피는 기둥에 맞춰 최선을 다해도
-          그 차이만큼 오차가 남고, 자리는 '가정된 위치'에 그려진다.
-          기둥은 맞는데 자리만 어긋나 보이는 것이 이 경우다.
-
-          이 메서드는 자리를 가정이 아니라 관측에 붙인다. 격자에서 가져오는
-          것은 '어느 기둥 사이에 어떤 자리가 있는가'라는 배치 정보뿐이고,
-          위치는 찍은 기둥에서 나온다. 절대 거리를 믿지 않는 셈이다.
-
-        왜 이게 더 맞는가
-          차량 위치도 호모그래피를 통해 나온다. 자리도 같은 경로로 만들면
-          둘이 같은 좌표계에 놓인다. 자리는 가정에서, 차량은 관측에서 오면
-          그 차이가 그대로 '주차 완료' 판정 오차가 된다.
-          절대 정확도보다 둘의 일치가 중요하다.
-
-        보간 자체는 실좌표에서 한다. 자리는 지면에서 기둥 사이에 균등하게
-        놓여 있으므로 지면 좌표에서 선형이다. 이미지에서 선형 보간하면
-        원근 때문에 먼 쪽이 밀린다.
-
-        Returns:
-            (성공 여부, 옮겨진 자리 수, 최대 이동 거리 cm)
+        mapper의 픽셀 좌표가 변경되었을 때 네비게이터에도 반영.
+        기존 anchor_spots_to_observed를 대체.
         """
-        observed = self.mapper.observed_marker_world()
-        if not observed:
-            return False, 0, 0.0
-
-        # 관측된 기둥만으로 자리 좌표를 다시 만든다.
-        # build_spot_world_pos는 같은 열 기둥 두 개와 행 비율로 보간하므로,
-        # 넘겨주는 기둥 좌표가 관측값이면 결과도 관측 기준이 된다.
-        new_pos = build_spot_world_pos(observed)
-        if not new_pos:
-            return False, 0, 0.0
-
-        moved, max_shift = 0, 0.0
-        for spot_id, pos in new_pos.items():
-            old = self.spot_world_pos.get(spot_id)
-            if old is not None:
-                shift = math.hypot(pos[0] - old[0], pos[1] - old[1])
-                if shift > 0.05:
-                    moved += 1
-                    max_shift = max(max_shift, shift)
-            self.spot_world_pos[spot_id] = pos
-
-        # 경로는 자리 좌표를 기준으로 계산되어 있으므로 다시 짜야 한다.
+        if not self.mapper.pillar_pixels:
+            return False
+        
+        self.spot_pixels = dict(self.mapper.spot_pixels)
+        # 경로는 더 이상 쓰지 않지만 초기화
         self.routes.clear()
-        self.planner = self._build_default_planner()
-
-        print(f"[보정] 자리 좌표를 관측된 기둥에 맞춰 다시 계산했습니다. "
-              f"({len(new_pos)}자리 중 {moved}개 이동, 최대 {max_shift:.2f}cm)")
-        return True, moved, max_shift
+        print(f"[보정] 내비게이터에 픽셀 자리 좌표 반영 완료. ({len(self.spot_pixels)}개)")
+        return True
 
     def get_target_world(self, car_id):
         """
-        차량의 목표 주차 구역 실좌표를 반환. 목표가 없으면 None.
-
-        B02가 '주차 완료' 판정에 쓴다. (활성 차량이 목표 구역 반경 안에
-        들어왔는지 확인) C_main이 이 메서드를 CarMOT.update의 target_of로 넘긴다.
-
-        Args:
-            car_id: 차량 번호 4자리 문자열
-
-        Returns:
-            (x_cm, y_cm) 목표 구역 실좌표. 목표가 없으면 None.
-        """
-        spot_id = self.targets.get(car_id)
-        return self.spot_world_pos.get(spot_id) if spot_id else None
-
-    def get_target_rect(self, car_id):
-        """
-        차량의 목표 주차 구역을 '사각형'으로 반환. (중심 + 반폭/반높이)
-
-        B02의 주차 완료 판정에 쓴다. 중심까지의 거리로만 판정하면 자리 크기를
-        무시하게 된다. 자리는 10 x 17.5cm(대형은 10 x 35cm)인데 중심에서
-        8cm 반경을 재면, 자리 입구에 제대로 세워도 도착으로 안 잡힌다.
-        사각형까지의 거리로 재면 '자리 안에 들어왔는가'가 자연스럽게 판정된다.
-
-        Args:
-            car_id: 차량 번호 4자리 문자열
-
-        Returns:
-            (x_cm, y_cm, 반폭_cm, 반높이_cm). 목표가 없으면 None.
+        차량의 목표 주차 구역 실좌표(또는 픽셀 좌표)를 반환.
         """
         spot_id = self.targets.get(car_id)
         if not spot_id:
             return None
+            
+        if self.mapper.pillar_pixels:
+            return self.spot_pixels.get(spot_id)
+        return self.spot_world_pos.get(spot_id)
+
+    def get_target_rect(self, car_id):
+        """
+        차량의 목표 주차 구역을 '사각형'으로 반환. (중심 + 반폭/반높이)
+        픽셀 모드에서는 임시로 반폭/반높이를 픽셀로 변환해서 준다.
+        """
+        spot_id = self.targets.get(car_id)
+        if not spot_id:
+            return None
+            
+        if self.mapper.pillar_pixels:
+            center = self.spot_pixels.get(spot_id)
+            if center is None:
+                return None
+            cells = get_spot_cell_count(spot_id) or 1
+            # 픽셀 모드 임시 추정: 1cm = 약 8px (해상도에 따라 다름)
+            px_per_cm = 8.0 
+            half_w = C02_CONFIG['CELL_W_CM'] / 2.0 * px_per_cm
+            half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0 * px_per_cm
+            return (center[0], center[1], half_w, half_h)
+            
         center = self.spot_world_pos.get(spot_id)
         if center is None:
             return None
 
-        # 대형 구역처럼 여러 칸을 차지하는 자리는 그만큼 길다
         cells = get_spot_cell_count(spot_id) or 1
         half_w = C02_CONFIG['CELL_W_CM'] / 2.0
         half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0
@@ -975,58 +1080,41 @@ class ParkingNavigator:
     def update(self, frame, tracks):
         """
         한 프레임 분량의 추적 결과로 각 차량의 위치와 안내 정보를 갱신.
-
-        Args:
-            frame:  OpenCV BGR 이미지 (마커 검출용)
-            tracks: B02_car_mot.CarMOT.update()의 반환 결과 리스트
-
-        Returns:
-            내비게이션 결과 리스트. 각 항목은 딕셔너리:
-            [
-                {
-                    "track_id": 5,
-                    "car_id": "1234",
-                    "image_pos": (cx, cy),          # 이미지 좌표
-                    "world_pos": (x_cm, y_cm),      # 주차장 실좌표
-                    "heading_deg": 92.5,            # 진행 방향 (없으면 None)
-                    "target_spot": "A-1",           # 목표 구역 (없으면 None)
-                    "target_world": (0.0, 0.0),     # 목표 실좌표 (없으면 None)
-                    "distance_cm": 45.2,            # 경로를 따라 남은 거리
-                    "guide": "LEFT",                # 안내 방향 상수
-                    "guide_text": "좌회전",          # 한글 안내
-                    "nearest_spot": "A-2",          # 현재 가장 가까운 구역
-                    "route": [(x, y), ...],         # 목적지까지의 경유점 (없으면 None)
-                    "route_index": 1,               # 현재 향하고 있는 경유점 번호
-                    "next_waypoint": (x, y),        # 다음 경유점 (없으면 None)
-                },
-                ...
-            ]
         """
-        # 1) 마커 검출은 수동 캘리브레이션으로 대체되었으므로 더 이상 자동 갱신하지 않음.
-        
         results = []
         if not self.mapper.is_ready():
-            # 아직 좌표 변환이 불가능한 상태 (마커가 충분히 보이지 않음)
             return results
+
+        is_pixel_mode = bool(self.mapper.pillar_pixels)
 
         for trk in tracks:
             car_id = trk.get("car_id")
             image_pos = trk["center"]
 
-            world_pos = self.mapper.image_to_world(image_pos)
-            if world_pos is None:
-                continue
+            if is_pixel_mode:
+                pos = image_pos
+            else:
+                pos = self.mapper.image_to_world(image_pos)
+                if pos is None:
+                    continue
 
-            # 위치 이력 갱신 (차량번호가 없으면 track_id로 임시 키 사용)
+            # 위치 이력 갱신 (픽셀 모드면 픽셀, 호모그래피 모드면 cm)
             key = car_id if car_id else f"track_{trk['track_id']}"
             history = self.world_history.setdefault(
                 key, deque(maxlen=self.history_maxlen)
             )
-            history.append(world_pos)
+            history.append(pos)
 
             heading = self._compute_heading(history)
             target_spot = self.targets.get(car_id) if car_id else None
-            target_world = self.spot_world_pos.get(target_spot) if target_spot else None
+            
+            if target_spot:
+                if is_pixel_mode:
+                    target_pos = self.spot_pixels.get(target_spot)
+                else:
+                    target_pos = self.spot_world_pos.get(target_spot)
+            else:
+                target_pos = None
 
             distance = None
             guide = GUIDE_UNKNOWN
@@ -1036,35 +1124,42 @@ class ParkingNavigator:
             maneuver = GUIDE_UNKNOWN
             maneuver_distance = None
 
-            if target_spot and target_world is not None:
-                # 경로를 확보하고 통과한 경유점을 넘긴다
-                state = self._ensure_route(car_id, world_pos, target_spot)
-                if state is not None:
-                    route = state["waypoints"]
-                    route_index = state["index"]
-                    next_waypoint = route[route_index] if route_index < len(route) else None
-                    distance = route_length(route, route_index, world_pos)
-                    maneuver, maneuver_distance = self.compute_maneuver(
-                        route, route_index, world_pos)
+            if target_spot and target_pos is not None:
+                if is_pixel_mode:
+                    # 픽셀 모드: 경로 탐색 없이 직선 거리로 안내
+                    distance = self._distance(pos, target_pos)
+                    # cm 단위로 보정해서 넘겨준다 (임시)
+                    distance_cm = distance / 8.0 
+                    guide = self._compute_guide(pos, heading, target_pos, distance)
                 else:
-                    # 경로를 찾지 못한 경우에도 직선 거리는 알려준다
-                    distance = self._distance(world_pos, target_world)
-
-                # 안내는 목적지가 아니라 '다음 경유점' 기준으로 한다.
-                # 목적지 직선 방향으로 안내하면 주차 구역을 가로지르게 된다.
-                aim = next_waypoint if next_waypoint is not None else target_world
-                remaining = self._distance(world_pos, target_world)
-                guide = self._compute_guide(world_pos, heading, aim, remaining)
+                    state = self._ensure_route(car_id, pos, target_spot)
+                    if state is not None:
+                        route = state["waypoints"]
+                        route_index = state["index"]
+                        next_waypoint = route[route_index] if route_index < len(route) else None
+                        distance = route_length(route, route_index, pos)
+                        maneuver, maneuver_distance = self.compute_maneuver(
+                            route, route_index, pos)
+                        distance_cm = distance
+                    else:
+                        distance = self._distance(pos, target_pos)
+                        distance_cm = distance
+                        
+                    aim = next_waypoint if next_waypoint is not None else target_pos
+                    remaining = self._distance(pos, target_pos)
+                    guide = self._compute_guide(pos, heading, aim, remaining)
+            else:
+                distance_cm = None
 
             results.append({
                 "track_id": trk["track_id"],
                 "car_id": car_id,
                 "image_pos": image_pos,
-                "world_pos": world_pos,
+                "world_pos": pos if not is_pixel_mode else (0.0, 0.0), # 호환성 유지
                 "heading_deg": heading,
                 "target_spot": target_spot,
-                "target_world": target_world,
-                "distance_cm": distance,
+                "target_world": target_pos, # 픽셀 모드면 픽셀 좌표가 들어감
+                "distance_cm": distance_cm,
                 "route": route,
                 "route_index": route_index,
                 "next_waypoint": next_waypoint,
@@ -1072,7 +1167,7 @@ class ParkingNavigator:
                 "maneuver_distance_cm": maneuver_distance,
                 "guide": guide,
                 "guide_text": GUIDE_TEXT_KO.get(guide, guide),
-                "nearest_spot": self.find_nearest_spot(world_pos),
+                "nearest_spot": self.mapper.find_nearest_spot_pixel(image_pos) if is_pixel_mode else self.find_nearest_spot(pos),
             })
 
         return results
@@ -1249,29 +1344,27 @@ class ParkingNavigator:
     def draw_navigation(self, frame, nav_results, draw_target_line=True):
         """
         내비게이션 정보를 프레임에 시각화.
-
-        Args:
-            frame:            OpenCV BGR 이미지 (원본이 수정됨)
-            nav_results:      update() 메서드의 반환 결과 리스트
-            draw_target_line: 목표 지점까지 안내선을 그릴지 여부
-
-        Returns:
-            시각화가 적용된 프레임
         """
+        is_pixel_mode = bool(self.mapper.pillar_pixels)
+
         for nav in nav_results:
             cx, cy = int(nav["image_pos"][0]), int(nav["image_pos"][1])
             wx, wy = nav["world_pos"]
 
-            # 실좌표 표시
-            cv2.putText(frame, f"({wx:.0f},{wy:.0f})cm", (cx - 40, cy + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
+            # 좌표 표시
+            if is_pixel_mode:
+                cv2.putText(frame, f"({cx},{cy})px", (cx - 40, cy + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
+            else:
+                cv2.putText(frame, f"({wx:.0f},{wy:.0f})cm", (cx - 40, cy + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
 
             if not draw_target_line or nav["target_world"] is None:
                 continue
 
-            # 경로를 따라 안내선을 그린다. (목적지 직선이 아니라 실제 주행 경로)
+            # 경로를 따라 안내선을 그린다.
             route = nav.get("route")
-            if route:
+            if route and not is_pixel_mode:
                 pts = [self.mapper.world_to_image(p) for p in route]
                 pts = [p for p in pts if p is not None]
                 # 남은 구간만 강조하기 위해 현재 위치에서 이어서 그린다
@@ -1285,17 +1378,23 @@ class ParkingNavigator:
                     cv2.arrowedLine(frame, remaining[-2], remaining[-1],
                                     COLOR_PATH, 2, tipLength=0.15)
 
-            target_img = self.mapper.world_to_image(nav["target_world"])
+            if is_pixel_mode:
+                target_img = (int(nav["target_world"][0]), int(nav["target_world"][1]))
+            else:
+                target_img = self.mapper.world_to_image(nav["target_world"])
+                
             if target_img is not None:
-                if not route:
+                if not route or is_pixel_mode:
                     cv2.arrowedLine(frame, (cx, cy), target_img, COLOR_PATH, 2, tipLength=0.05)
                 cv2.circle(frame, target_img, 8, COLOR_TARGET, 2)
 
-            # 안내 문구 (한글은 OpenCV에서 렌더링되지 않으므로 영문 상수 사용)
+            # 안내 문구
             dist = nav["distance_cm"]
-            label = f"{nav['target_spot']} {nav['guide']} {dist:.0f}cm"
-            cv2.putText(frame, label, (cx - 40, cy + 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TARGET, 2, cv2.LINE_AA)
+            if dist is not None:
+                label = f"{nav['target_spot']} {nav['guide']} {dist:.0f}"
+                label += "px" if is_pixel_mode else "cm"
+                cv2.putText(frame, label, (cx - 40, cy + 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TARGET, 2, cv2.LINE_AA)
 
         return frame
 

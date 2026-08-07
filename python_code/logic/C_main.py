@@ -140,13 +140,32 @@ class ParkingNavigationPipeline:
         #    B02가 그 자리 근처의 트랙을 찾아 차량번호를 묶어주므로,
         #    미리 세워둔 차가 'WAIT'로 뜨거나 안내 대상으로 잡히지 않는다.
         from logic.A01_parking_manager import get_parked_world_positions
-
         mapper = self.navigator.mapper
+        
+        # 픽셀 모드일 때 B02가 기존 cm 단위 판정 기준을 그대로 쓸 수 있도록
+        # 모든 픽셀 좌표를 임의의 비율(1cm = 8px)로 축소해서 넘겨준다 (pseudo-CM).
+        px_per_cm = 8.0
+        
+        if mapper.pillar_pixels:
+            to_world_func = lambda p: (p[0] / px_per_cm, p[1] / px_per_cm)
+            def parked_of_func():
+                from data.car_data import cars_info
+                res = {}
+                for car, info in cars_info.items():
+                    if info.get("parked"):
+                        sp = mapper.spot_pixels.get(info.get("spot_id"))
+                        if sp:
+                            res[car] = (sp[0] / px_per_cm, sp[1] / px_per_cm)
+                return res
+        else:
+            to_world_func = mapper.image_to_world if mapper.is_ready() else None
+            parked_of_func = get_parked_world_positions
+
         tracks = self.mot.update(
             detections,
-            to_world=mapper.image_to_world if mapper.is_ready() else None,
+            to_world=to_world_func,
             target_of=self.navigator.get_target_rect,
-            parked_of=get_parked_world_positions
+            parked_of=parked_of_func
         )
         t_track = time.perf_counter()
 
@@ -190,9 +209,10 @@ class ParkingNavigationPipeline:
         cv2.putText(frame, f"FIFO Waiting: {self.mot.fifo.size()}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # 호모그래피 상태를 품질까지 함께 표시.
-        # 확정(LOCKED) 전에는 아직 좌표를 신뢰할 수 없다는 뜻이므로 구분해서 보여준다.
-        if not ready:
+        # 맵 상태 표시 (픽셀 모드 or 호모그래피 모드)
+        if mapper.pillar_pixels:
+            text, color = f"Map: PIXEL MODE ({len(mapper.pillar_pixels)} pillars)", (0, 255, 0)
+        elif not ready:
             text, color = "Homography: NOT READY (show markers)", (0, 0, 255)
         elif mapper.locked:
             text = f"Homography: LOCKED ({mapper.calibrated_with} markers, {mapper.reproj_error:.1f}cm)"
@@ -201,6 +221,7 @@ class ParkingNavigationPipeline:
             text = (f"Homography: PROVISIONAL ({mapper.calibrated_with}/{mapper.lock_markers} "
                     f"markers, {mapper.reproj_error:.1f}cm)")
             color = (0, 200, 255)
+            
         cv2.putText(frame, text, (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 

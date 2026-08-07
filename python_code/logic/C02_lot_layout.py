@@ -246,6 +246,100 @@ GATE1_WORLD_POS = cell_to_world(GATE1_POS)   # 입구 (경로 시작점)
 GATE2_WORLD_POS = cell_to_world(GATE2_POS)   # 출구
 
 
+def build_spot_pixel_pos(pillar_pixels):
+    """
+    기둥 픽셀 좌표로부터 각 주차 구역의 픽셀 좌표를 계산.
+
+    build_spot_world_pos과 동일한 보간 로직을 사용한다.
+    입력이 cm든 pixel이든 '같은 열 기둥 사이를 행 비율로 보간'하는
+    원리는 바뀌지 않기 때문이다.
+
+    Args:
+        pillar_pixels: {마커ID: (x_px, y_px)} 사용자가 클릭한 기둥 픽셀 좌표
+
+    Returns:
+        {구역ID: (x_px, y_px)}
+    """
+    return build_spot_world_pos(pillar_pixels)
+
+
+def build_gate_pixel_pos(pillar_pixels):
+    """
+    기둥 픽셀 좌표로부터 입출구의 픽셀 좌표를 보간으로 추정.
+
+    입출구는 격자 맨 아래줄(row 8)에 있으므로, 같은 열 또는 가장 가까운
+    기둥들로부터 외삽한다.
+
+    Args:
+        pillar_pixels: {마커ID: (x_px, y_px)} 사용자가 클릭한 기둥 픽셀 좌표
+
+    Returns:
+        (gate1_pixel, gate2_pixel) 튜플. 각각 (x_px, y_px) 또는 None.
+    """
+    from data.map_data import GATE1_POS, GATE2_POS, PILL_MARKER_ID
+
+    def _interpolate_gate(gate_pos):
+        if gate_pos is None:
+            return None
+        gate_row, gate_col = gate_pos
+        # 입출구와 같은 열에 기둥이 없으므로, 가장 가까운 열의 기둥 쌍을 찾아
+        # 열 방향으로도 보간한다.
+        # 모든 기둥의 위치를 열 기준으로 모은다
+        col_pillars = {}  # {col: [(row, marker_id), ...]}
+        for (r, c), mid in PILL_MARKER_ID.items():
+            col_pillars.setdefault(c, []).append((r, mid))
+
+        # 입출구 열에 가장 가까운 양쪽 기둥 열을 찾는다
+        cols = sorted(col_pillars.keys())
+        left_col = max((c for c in cols if c <= gate_col), default=None)
+        right_col = min((c for c in cols if c >= gate_col), default=None)
+
+        if left_col is None or right_col is None:
+            return None
+
+        def _col_gate_y(col):
+            """해당 열의 기둥들로 gate_row에 해당하는 y 픽셀을 외삽."""
+            pillars = sorted(col_pillars[col])  # (row, marker_id) 오름차순
+            if len(pillars) < 2:
+                px = pillar_pixels.get(pillars[0][1])
+                return px[1] if px else None
+            # 가장 아래 기둥 쌍으로 외삽
+            r_a, mid_a = pillars[-2]
+            r_b, mid_b = pillars[-1]
+            px_a = pillar_pixels.get(mid_a)
+            px_b = pillar_pixels.get(mid_b)
+            if px_a is None or px_b is None:
+                return None
+            if r_b == r_a:
+                return px_b[1]
+            t = (gate_row - r_a) / (r_b - r_a)
+            return px_a[1] + t * (px_b[1] - px_a[1])
+
+        def _col_gate_x(col):
+            """해당 열의 기둥들의 평균 x 픽셀."""
+            xs = [pillar_pixels[mid][0] for _, mid in col_pillars[col]
+                  if mid in pillar_pixels]
+            return sum(xs) / len(xs) if xs else None
+
+        if left_col == right_col:
+            x = _col_gate_x(left_col)
+            y = _col_gate_y(left_col)
+        else:
+            x_l, x_r = _col_gate_x(left_col), _col_gate_x(right_col)
+            y_l, y_r = _col_gate_y(left_col), _col_gate_y(right_col)
+            if any(v is None for v in (x_l, x_r, y_l, y_r)):
+                return None
+            t = (gate_col - left_col) / (right_col - left_col)
+            x = x_l + t * (x_r - x_l)
+            y = y_l + t * (y_r - y_l)
+
+        if x is None or y is None:
+            return None
+        return (float(x), float(y))
+
+    return _interpolate_gate(GATE1_POS), _interpolate_gate(GATE2_POS)
+
+
 # =====================================================================
 # 테스트용 메인 (단독 실행 시 격자 -> 실좌표 변환 검증)
 # =====================================================================

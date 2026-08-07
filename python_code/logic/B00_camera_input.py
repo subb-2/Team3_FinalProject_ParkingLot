@@ -106,7 +106,7 @@ def _wrap_undistort(cap):
     조용히 원본을 쓴다. (B04가 만들어 두면 그때부터 자동으로 적용된다)
     """
     try:
-        from logic.B04_lens_calib import Undistorter
+        from logic.B03_map_setting import Undistorter
     except Exception as e:
         print(f"[경고] 렌즈 보정 모듈을 불러오지 못했습니다: {e}")
         return cap

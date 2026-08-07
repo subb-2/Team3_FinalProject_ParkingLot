@@ -39,6 +39,21 @@ def load_calibration(path=None):
 def has_calibration(path=None):
     return load_calibration(path) is not None
 
+def load_pillar_pixels():
+    """저장된 기둥 픽셀 좌표를 불러온다. 없으면 None."""
+    import json as _json
+    path = os.path.join(
+        os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = _json.load(f)
+        return {int(k): tuple(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[경고] 기둥 픽셀 좌표 로드 실패: {e}")
+        return None
+
 class Undistorter:
     def __init__(self, path=None, alpha=None):
         self.alpha = CONFIG['ALPHA'] if alpha is None else alpha
@@ -209,23 +224,29 @@ def register_map_routes(app, pipeline, cap_module=None):
 
     @app.route('/calibrate/save', methods=['POST'])
     def calibrate_save():
+        """클릭한 기둥 픽셀 좌표를 저장하고 자리 위치를 자동 계산한다."""
+        import json as _json
         data = request.get_json(silent=True) or {}
-        points = {int(k): v for k, v in (data.get("points") or {}).items()}
-        ok, message = pipeline.navigator.mapper.set_homography_from_points(points)
+        points = {int(k): (float(v[0]), float(v[1]))
+                  for k, v in (data.get("points") or {}).items()}
 
+        if len(points) < 4:
+            return {"ok": False, "message": f"기둥이 {len(points)}개뿐입니다. 최소 4개가 필요합니다."}
+
+        # 기둥 픽셀 좌표를 파일로 저장
+        save_path = os.path.join(
+            os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        with open(save_path, 'w') as f:
+            _json.dump({str(k): list(v) for k, v in points.items()}, f, indent=2)
+
+        # mapper에 픽셀 좌표 설정
+        ok, message = pipeline.navigator.mapper.set_pillar_pixels(points)
         if ok:
-            if cap_module and hasattr(cap_module, "reload_undistort"):
-                cap_module.reload_undistort()
-            anchored, moved, shift = pipeline.navigator.anchor_spots_to_observed()
-            if anchored and moved:
-                message += f"  자리 {moved}개를 기둥 기준으로 갱신(최대 {shift:.1f}cm)."
-        
-        residuals = pipeline.navigator.mapper.marker_residuals
-        return {
-            "ok": ok,
-            "message": message,
-            "residuals_cm": {str(k): round(v, 2) for k, v in sorted(residuals.items())},
-        }
+            # 자리 좌표가 바뀌었으므로 navigator에도 반영
+            pipeline.navigator.update_spot_pixels()
+
+        return {"ok": ok, "message": message}
 
     @app.route('/snapshot')
     def snapshot():
