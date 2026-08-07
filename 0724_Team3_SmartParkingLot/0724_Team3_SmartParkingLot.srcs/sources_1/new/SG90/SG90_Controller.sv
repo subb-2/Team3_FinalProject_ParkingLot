@@ -10,7 +10,7 @@ module SG90_Controller(
                CLOSE = 1;
     logic state, n_state;
 
-    localparam UNIT = 74_250;
+    localparam UNIT = 12_500;
     localparam PWM = 40;
     logic [$clog2(UNIT)-1:0] unit_cnt; // 0.5ms
     logic [$clog2(PWM)-1:0]  pwm_cnt;  // 20ms

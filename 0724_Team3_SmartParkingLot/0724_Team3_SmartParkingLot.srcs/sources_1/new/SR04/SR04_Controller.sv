@@ -3,7 +3,8 @@ module SR04_Controller (
     input         reset,
     input         echo,
     output        trigger,
-    output [11:0] distance
+    output [11:0] distance,
+    output        distance_val
 );
 
     // tick generator
@@ -15,7 +16,8 @@ module SR04_Controller (
         .tick_1MHz(w_tick_1MHz),
         .echo(echo),
         .trigger(trigger),
-        .distance(distance)
+        .distance(distance),
+        .distance_val(distance_val)
     );
 
     tick_gen_1MHz U_TICK_GEN (
@@ -33,7 +35,8 @@ module SR04_controller (
     input  logic        tick_1MHz,
     input  logic        echo,
     output logic        trigger,
-    output logic [11:0] distance
+    output logic [11:0] distance,
+    output logic        distance_val
 );
 
     localparam [1:0] IDLE = 2'b00, TRIGGER = 2'b01, ECHO = 2'b10;
@@ -60,7 +63,7 @@ module SR04_controller (
             echo_cnt_reg    <= 0;
             echo_reg1       <= 0;
             echo_reg2       <= 0;
-            distance_reg    <= 11'b0;
+            distance_reg    <= 12'b0;
             trigger_reg     <= 0;
         end else begin
             current_st <= next_st;
@@ -78,6 +81,7 @@ module SR04_controller (
     always @(*) begin
         next_st          = current_st;
         distance         = distance_reg;
+        distance_val     = 1'b0;
         trigger_cnt_next = trigger_cnt_reg;
         echo_cnt_next    = echo_cnt_reg;
         trigger          = trigger_reg;
@@ -87,6 +91,7 @@ module SR04_controller (
                 // initialize counter
                 trigger_cnt_next = 0;
                 echo_cnt_next    = 0;
+                distance_val     = 1'b0;
                 next_st = TRIGGER;
             end
             TRIGGER: begin
@@ -106,6 +111,7 @@ module SR04_controller (
                         echo_cnt_next = echo_cnt_next + 1;
                     end else if (echo_cnt_reg > 0 && echo_reg2 == 0) begin
                         distance = (echo_cnt_reg * 25'd1130) >> 16;
+                        distance_val = 1'b1;
                         next_st  = IDLE;
                     end
                 end

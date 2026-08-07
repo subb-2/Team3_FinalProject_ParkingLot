@@ -17,13 +17,14 @@ module FrameController(
 );
 
     // position number
-    logic [3:0]  position;
     logic        valid;
     // Pixel data
     logic [23:0] PXLcrop;
     logic        PXLmono;
 
     FrameCrop U_FrameCrop(
+        .i_pixel_clk(i_pixel_clk),
+        .reset(reset),
         .i_pdata(i_RGB),
         .i_x_pixel(i_x_pixel),
         .i_y_pixel(i_y_pixel),
@@ -48,6 +49,8 @@ endmodule
 
 
 module FrameCrop(
+    input  logic        i_pixel_clk,
+    input  logic        reset,
     input  logic [23:0] i_pdata,
     input  logic [10:0] i_x_pixel,
     input  logic [10:0] i_y_pixel,
@@ -58,23 +61,94 @@ module FrameCrop(
     logic x_en, y_en;
 
     // pixel pass
-    assign y_en = ((i_y_pixel >= 456) && (i_y_pixel < 624) && !((i_y_pixel - 456) % 6));
-    always_comb begin
-             if((i_x_pixel >=  624) && (i_x_pixel <  792)) x_en = (i_x_pixel -  624) % 6 ? 1'b0 : 1'b1;
-        else if((i_x_pixel >=  792) && (i_x_pixel <  960)) x_en = (i_x_pixel -  792) % 6 ? 1'b0 : 1'b1;
-        else if((i_x_pixel >=  960) && (i_x_pixel < 1128)) x_en = (i_x_pixel -  960) % 6 ? 1'b0 : 1'b1;
-        else if((i_x_pixel >= 1128) && (i_x_pixel < 1296)) x_en = (i_x_pixel - 1128) % 6 ? 1'b0 : 1'b1;
-        else x_en = 1'b0;
+    // assign y_en = ((i_y_pixel >= 456) && (i_y_pixel < 624) && !((i_y_pixel - 456) % 6));
+    // always_comb begin
+    //          if((i_x_pixel >=  624) && (i_x_pixel <  792)) x_en = (i_x_pixel -  624) % 6 ? 1'b0 : 1'b1;
+    //     else if((i_x_pixel >=  792) && (i_x_pixel <  960)) x_en = (i_x_pixel -  792) % 6 ? 1'b0 : 1'b1;
+    //     else if((i_x_pixel >=  960) && (i_x_pixel < 1128)) x_en = (i_x_pixel -  960) % 6 ? 1'b0 : 1'b1;
+    //     else if((i_x_pixel >= 1128) && (i_x_pixel < 1296)) x_en = (i_x_pixel - 1128) % 6 ? 1'b0 : 1'b1;
+    //     else x_en = 1'b0;
+    // end
+
+    // // pdata out
+    // always_comb begin
+    //     if(x_en && y_en) begin
+    //         o_pdata = i_pdata;
+    //         o_valid = 1'b1;
+    //     end else begin
+    //         o_pdata = 24'd0;
+    //         o_valid = 1'b0;
+    //     end
+    // end
+
+    assign x_en = ((i_x_pixel >= 208) && (i_x_pixel < 432));
+    assign y_en = ((i_y_pixel >= 212) && (i_y_pixel < 268) && (i_y_pixel[0] == 1'b0));
+
+    localparam WAIT = 0,
+               ENABLE = 1;
+    logic state, n_state;
+
+    logic pxlCnt;
+
+    /********* state update *********/
+    always_ff @(posedge i_pixel_clk, posedge reset) begin
+        if(reset) begin
+            state <= WAIT;
+        end else begin
+            state <= n_state;
+        end
     end
 
-    // pdata out
+    /******* next state logic *******/
     always_comb begin
-        if(x_en && y_en) begin
-            o_pdata = i_pdata;
-            o_valid = 1'b1;
+        n_state = state;
+        case(state)
+            WAIT: if(x_en && y_en) n_state = ENABLE;
+            ENABLE: if(!(x_en && y_en)) n_state = WAIT;
+        endcase
+    end
+
+    /******** output logic ********/
+    always_ff @(posedge i_pixel_clk, posedge reset) begin
+        if(reset) begin
+            o_valid <= 0;
+            pxlCnt  <= 0;
         end else begin
-            o_pdata = 24'd0;
-            o_valid = 1'b0;
+            case(state)
+                WAIT: begin
+                    if(x_en && y_en) begin
+                        o_valid <= 1'b1;
+                        o_pdata <= i_pdata;
+                        pxlCnt  <= 1'b0;
+                    end else begin
+                        o_valid <= 1'b0;
+                        o_pdata <= 24'd0;
+                        pxlCnt  <= 0;
+                    end
+                end
+                ENABLE: begin
+                    if(x_en && y_en) begin
+                        if(pxlCnt == 1) begin
+                            o_valid <= 1'b1;
+                            o_pdata <= i_pdata;
+                            pxlCnt  <= 0;
+                        end else begin
+                            o_valid <= 1'b0;
+                            o_pdata <= 24'd0;
+                            pxlCnt  <= pxlCnt + 1;
+                        end
+                    end else begin
+                        o_valid <= 1'b0;
+                        o_pdata <= 24'd0;
+                        pxlCnt  <= 1'b0;
+                    end
+                end
+                default: begin
+                    o_valid <= 1'b0;
+                    o_pdata <= 24'd0;
+                    pxlCnt  <= 1'b0;
+                end
+            endcase
         end
     end
 endmodule
@@ -224,11 +298,18 @@ module FrameRegister(
                 if(posCnt == 3) begin
                     lineCnt <= lineCnt + 1;
                 end
+                if(i_valid) begin
+                    FrameReg <= {27'd0, i_pdata};
+                    bitCnt   <= 1;
+                end
             end
             VGA_DONE: begin
                 if(clkCnt == 2) begin
                     o_vga_done <= 1'b0;
                     clkCnt     <= 1'b0;
+                    bitCnt     <= 5'd0;
+                    lineCnt    <= 5'd0;
+                    posCnt     <= 2'd0;
                 end else begin
                     o_vga_done <= 1'b1;
                     clkCnt     <= clkCnt + 1;
