@@ -1,21 +1,24 @@
 """
 E00_final_ui : 최종 통합 관제 화면
 
-화면을 세로 3열로 나누고, 왼쪽 열은 다시 위아래로 나눈다.
+화면을 세로 3열로 나누고, 오른쪽 열은 다시 위아래로 반씩 나눈다.
 
     +---------------+-----------------+-----------------+
-    |  1) Zybo 수신  |                 |                 |
-    |     (30%)     |                 |                 |
-    +---------------+  3) 실시간 카메라 |  4) 실시간 안내   |
-    |               |                 |                 |
-    |  2) 주차장 상태 |   차량 검출/추적  |   차량 시점      |
-    |     (70%)     |   오버레이       |   내비게이션      |
-    |               |   (B01/B02)     |   (D00 재사용)   |
-    |  전체 자리 현황 |                 |                 |
-    |  + 배정 자리    |                 |                 |
-    |    깜빡임      |                 |                 |
-    |  + 하단 안내문  |                 |                 |
+    |  1) Zybo 수신  |                 |  2) 주차장 상태  |
+    |               |                 |     (50%)       |
+    |  수신 목록      |  3) 실시간 카메라 |  전체 자리 현황   |
+    |  (전체 높이)    |   차량 검출/추적  |  + 배정 자리     |
+    |               |   오버레이       |    깜빡임        |
+    |               |   (B01/B02)     +-----------------+
+    |               |                 |  4) 실시간 안내   |
+    |               |                 |     (50%)       |
+    |  + 하단 안내문  |                 |  차량 시점       |
+    |    (주차 완료)  |                 |  내비게이션      |
+    |               |                 |  (D00 재사용)    |
     +---------------+-----------------+-----------------+
+
+주차 완료/오주차 안내문은 1번 구간 아래에 붙인다. 수신부터 배정, 주차 완료까지
+한 차량의 흐름이 한 열에서 위에서 아래로 읽힌다.
 
 왜 OpenCV 캔버스가 아니라 HTML인가
   1번과 2번 구간은 한글 안내문이 핵심이다. OpenCV의 putText는 한글을 못 그린다.
@@ -65,6 +68,17 @@ CONFIG = {
     # 수신 목록과 안내문 로그에 남길 최대 개수
     "RX_LOG_MAX": 60,
     "EVENT_LOG_MAX": 40,
+
+    # 2번 구간 격자를 어떤 가로세로비로 그릴지.
+    #
+    #   "grid" : 칸을 정사각형으로 그린다. 열(13)이 행(9)보다 많으므로
+    #            가로가 긴 화면이 된다. 실제 매트가 가로로 긴 형태라
+    #            눈으로 보는 배치와 맞다. (기본값)
+    #   "cm"   : C02의 CELL_W_CM / CELL_H_CM 비율 그대로 그린다.
+    #            세로 칸 크기(CELL_H_CM)를 실측해서 넣었다면 이쪽이 정확하다.
+    #            지금 값(17.5)은 미실측 추정치라 화면이 세로로 길쭉해진다.
+    #   숫자    : 가로/세로 비를 직접 지정 (예: 1.8)
+    "LOT_ASPECT": "grid",
 
     # --- 오주차 판정 ---------------------------------------------------
     # 배정된 자리에서 이만큼 넘게 떨어져 멈추면 '다른 곳에 주차했다'고 본다.
@@ -225,12 +239,21 @@ class ParkingWatcher:
             pipeline: ParkingNavigationPipeline (latest_nav를 읽는다)
         """
         # 1) 보이는 차량의 위치를 갱신해 둔다
+        #
+        #    픽셀 모드에서는 world_pos가 cm가 아니라 이미지 픽셀이다
+        #    (C00_navigation.update의 is_pixel_mode 분기). 아래 판정은 전부
+        #    cm 기준이므로 여기서 한 번 cm로 옮겨 두어야 한다. 그러지 않으면
+        #    배정 자리에 제대로 세운 차도 수백 cm 떨어진 것으로 계산되어
+        #    "운전자가 다른 위치에 주차하였습니다"가 뜬다.
+        mapper = pipeline.navigator.mapper
         for nav in pipeline.latest_nav:
             car_id = nav.get("car_id")
             pos = nav.get("world_pos")
-            if car_id and pos is not None:
-                with self._lock:
-                    self._last_world[car_id] = (pos[0], pos[1])
+            if not car_id or pos is None:
+                continue
+            pos = mapper.pixel_to_cm(pos) or pos
+            with self._lock:
+                self._last_world[car_id] = (pos[0], pos[1])
 
         # 2) parked가 False -> True로 바뀐 차를 찾는다
         for car_id, info in list(cars_info.items()):
@@ -330,6 +353,21 @@ class ParkingWatcher:
 
 
 # 주차장 배치 (브라우저가 격자를 그릴 때 한 번만 가져간다)
+def lot_aspect(rows, cols):
+    """
+    2번 구간 격자의 가로/세로 비를 CONFIG['LOT_ASPECT']에 따라 계산.
+
+    1보다 크면 가로가 긴 화면이다. 자세한 설명은 CONFIG의 주석 참고.
+    """
+    mode = CONFIG['LOT_ASPECT']
+    if isinstance(mode, (int, float)) and not isinstance(mode, bool):
+        return float(mode)
+    if mode == "cm":
+        return ((cols * C02_CONFIG['CELL_W_CM']) /
+                (rows * C02_CONFIG['CELL_H_CM']))
+    return cols / max(rows, 1)
+
+
 def build_lot_layout():
     """
     격자 배치를 브라우저가 그릴 수 있는 형태로 변환.
@@ -364,11 +402,12 @@ def build_lot_layout():
         "rows": rows,
         "cols": cols,
         "cells": cells,
-        # 격자 한 칸의 실제 크기. 브라우저가 이 비율로 전체 격자의 가로세로비를
-        # 잡아 배치가 찌그러지지 않게 한다. 10/17.5를 화면 쪽에 박아두면
-        # C02의 CONFIG를 고쳤을 때 화면만 옛 비율로 남는다.
+        # 격자 한 칸의 실제 크기. 참고용으로 함께 보낸다.
         "cell_w_cm": C02_CONFIG['CELL_W_CM'],
         "cell_h_cm": C02_CONFIG['CELL_H_CM'],
+        # 격자 전체의 가로/세로 비. 계산은 여기서 한다. 화면 쪽에 비율을
+        # 박아두면 CONFIG를 고쳤을 때 화면만 옛 값으로 남는다.
+        "aspect": lot_aspect(rows, cols),
         "legend": [
             {"name": name, "color": SPOT_TYPE_CSS.get(t, "#8a8a8a")}
             for t, name in SPOT_TYPE_NAME.items()
@@ -542,17 +581,17 @@ FINAL_UI_HTML = r"""
  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
       font-family:"Malgun Gothic","맑은 고딕","Noto Sans KR",sans-serif}
 
- /* 3분할. 왼쪽 칸은 다시 위아래로 나뉜다.
+ /* 3분할. 오른쪽 칸은 다시 위아래 반반으로 나뉜다.
     +---------+-----------+-----------+
-    | 1 수신   |           |           |
-    +---------+ 3 카메라   | 4 주차안내 |
-    | 2 주차장 |           |           |
+    | 1 수신   |           | 2 주차장   |
+    |         | 3 카메라   +-----------+
+    | +안내문  |           | 4 주차안내 |
     +---------+-----------+-----------+                        */
- #app{display:grid;grid-template-columns:1fr 1.45fr 1.25fr;
+ #app{display:grid;grid-template-columns:0.9fr 1.5fr 1.5fr;
       gap:10px;padding:10px;height:100vh}
- /* 30 : 70. fr로 주어야 사이의 gap이 비율에서 알아서 빠진다.
-    퍼센트로 주면 30%+70%+gap이 100%를 넘어 아래가 잘린다. */
- #left{display:grid;grid-template-rows:3fr 7fr;gap:10px;min-height:0;min-width:0}
+ /* 50 : 50. fr로 주어야 사이의 gap이 비율에서 알아서 빠진다.
+    퍼센트로 주면 50%+50%+gap이 100%를 넘어 아래가 잘린다. */
+ #right{display:grid;grid-template-rows:1fr 1fr;gap:10px;min-height:0;min-width:0}
  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;
       display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
  .col > h2{margin:0;padding:11px 14px;font-size:15px;font-weight:600;
@@ -670,27 +709,14 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 왼쪽 칸 : 위 30% 수신 / 아래 70% 주차장 -->
-  <div id="left">
-
-    <!-- 1번 구간 : Zybo 수신 -->
-    <div class="col">
-      <h2><span><span class="num">1</span>Zybo 수신</span>
-          <span class="sub" id="rxcount">-</span></h2>
-      <div class="body" id="rxlist">
-        <div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>
-      </div>
+  <!-- 1번 구간 : Zybo 수신 (왼쪽 열 전체). 아래에 주차 완료 안내문이 붙는다 -->
+  <div class="col" id="left">
+    <h2><span><span class="num">1</span>Zybo 수신</span>
+        <span class="sub" id="rxcount">-</span></h2>
+    <div class="body" id="rxlist">
+      <div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>
     </div>
-
-    <!-- 2번 구간 : 주차장 상태 -->
-    <div class="col">
-      <h2><span><span class="num">2</span>주차장 상태</span>
-          <span class="sub" id="lottime">-</span></h2>
-      <div id="lotwrap"><div id="lot"></div></div>
-      <div id="avail"></div>
-      <div id="notice"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
-    </div>
-
+    <div id="notice"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
   </div>
 
   <!-- 3번 구간 : 카메라 실시간 (차량 검출/추적 오버레이) -->
@@ -708,16 +734,29 @@ FINAL_UI_HTML = r"""
     </div>
   </div>
 
-  <!-- 4번 구간 : 실시간 주차 안내 -->
-  <div class="col">
-    <h2><span><span class="num">4</span>실시간 주차 안내</span>
-        <span class="sub" id="navsub">-</span></h2>
-    <div id="navwrap"><img id="navimg" src="/nav_feed"></div>
-    <div id="navinfo">
-      <span id="navguide">대기 중</span>
-      <span><span class="pill" id="navhomo">-</span>
-            <span class="pill" id="navfps">-</span></span>
+  <!-- 오른쪽 열 : 위 2번 주차장 상태 / 아래 4번 실시간 안내 (반반) -->
+  <div id="right">
+
+    <!-- 2번 구간 : 주차장 상태 -->
+    <div class="col">
+      <h2><span><span class="num">2</span>주차장 상태</span>
+          <span class="sub" id="lottime">-</span></h2>
+      <div id="lotwrap"><div id="lot"></div></div>
+      <div id="avail"></div>
     </div>
+
+    <!-- 4번 구간 : 실시간 주차 안내 -->
+    <div class="col">
+      <h2><span><span class="num">4</span>실시간 주차 안내</span>
+          <span class="sub" id="navsub">-</span></h2>
+      <div id="navwrap"><img id="navimg" src="/nav_feed"></div>
+      <div id="navinfo">
+        <span id="navguide">대기 중</span>
+        <span><span class="pill" id="navhomo">-</span>
+              <span class="pill" id="navfps">-</span></span>
+      </div>
+    </div>
+
   </div>
 
 </div>
@@ -729,7 +768,7 @@ let lotObserver = null;  // 아래 fitLot 주석 참고. 참조를 반드시 붙
 const cellEls = {};      // 자리ID -> [칸 엘리먼트, ...]
 
 // 남는 공간에 맞춰 격자 크기를 정한다.
-// 주차장 칸은 세로로 길어(10 x 17.5cm) 격자 전체가 세로로 길쭉하다.
+// 비율(lotAspect)은 서버가 CONFIG['LOT_ASPECT']를 보고 정해서 보낸다.
 // 폭에만 맞추면 아래가 잘리므로 가로/세로 중 좁은 쪽에 맞춘다.
 function fitLot(){
   const wrap = document.getElementById('lotwrap');
@@ -765,9 +804,9 @@ function buildLot(lay){
   const lot = document.getElementById('lot');
   lot.style.gridTemplateColumns = `repeat(${lay.cols}, 1fr)`;
   lot.style.gridTemplateRows    = `repeat(${lay.rows}, 1fr)`;
-  // 칸의 실제 크기(cm)로 전체 비율을 잡는다. 칸마다 aspect-ratio를 걸면
-  // 행 높이가 제각각 계산되어 격자가 컨테이너를 넘는다.
-  lotAspect = (lay.cols * lay.cell_w_cm) / (lay.rows * lay.cell_h_cm);
+  // 전체 비율만 잡는다. 칸마다 aspect-ratio를 걸면 행 높이가 제각각
+  // 계산되어 격자가 컨테이너를 넘는다.
+  lotAspect = lay.aspect > 0 ? lay.aspect : lay.cols / lay.rows;
   lot.innerHTML = '';
 
   for (let r = 0; r < lay.rows; r++){
@@ -881,7 +920,7 @@ function renderLot(st){
 
   document.getElementById('lottime').textContent = st.time;
 
-  // 범례와 안내문을 채운 뒤에 맞춘다. 그 두 칸의 높이가 정해져야 격자에
+  // 범례(#avail)를 채운 뒤에 맞춘다. 그 칸의 높이가 정해져야 격자에
   // 남는 높이가 확정되기 때문이다. 먼저 재면 아래가 컨테이너를 넘친다.
   // 값이 그대로면 같은 값을 다시 쓸 뿐이라 매 폴링마다 불러도 부담이 없다.
   // (#lotwrap 높이는 flex:1로 패널이 정하므로 여기서 되먹임이 생기지 않는다)

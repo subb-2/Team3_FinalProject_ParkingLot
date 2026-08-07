@@ -759,8 +759,7 @@ class NavigationMapUI:
         # cell_to_world로 배치하기 때문이다. 픽셀 모드일 때 들어오는
         # 픽셀 좌표는 _to_world가 cm로 바꿔서 넘긴다.
         self.cell_scale = 1.0
-        self._px_to_cm = None
-        self._px_key = None
+        self._px_to_cm = None       # 픽셀 모드일 때만 채워진다 (MarkerMapper)
 
         # 주차 구역 실좌표 확보 (우선순위: 인자 > navigator > C00 기본값)
         if spot_world_pos is not None:
@@ -830,37 +829,17 @@ class NavigationMapUI:
         픽셀 모드에서는 C00이 차량 위치를 이미지 픽셀로 준다. 그대로 찍으면
         차가 주차장 밖 엉뚱한 곳에 나타난다.
 
-        보정 때 찍은 기둥은 '픽셀 좌표'와 '설계상 cm 좌표'를 둘 다 아는
-        점들이다. 그 대응으로 변환 행렬을 구하면 차량 픽셀을 cm로 옮길 수 있다.
+        변환 자체는 MarkerMapper.pixel_to_cm이 갖고 있다. 보정 때 찍은 기둥이
+        (픽셀, cm) 대응쌍이라 거기서 만들 수 있다. 여기서는 쓸 수 있는지만 본다.
         """
         mapper = getattr(self.navigator, 'mapper', None)
-        pillar_pixels = getattr(mapper, 'pillar_pixels', None)
-        if not pillar_pixels:
-            self._px_to_cm = None
-            self._px_key = None
-            return
-        if getattr(self, '_px_key', None) == pillar_pixels:
-            return      # 이미 같은 보정으로 만들어 둔 것이 있다
-
-        ids = [i for i in pillar_pixels if i in mapper.marker_world_pos]
-        if len(ids) < 4:
-            self._px_to_cm = None
-            self._px_key = dict(pillar_pixels)
-            return
-
-        src = np.array([pillar_pixels[i] for i in ids], dtype=np.float32)
-        dst = np.array([mapper.marker_world_pos[i] for i in ids], dtype=np.float32)
-        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-        self._px_to_cm = H
-        self._px_key = dict(pillar_pixels)
+        self._px_to_cm = mapper if getattr(mapper, 'pillar_pixels', None) else None
 
     def _to_cm(self, pt):
         """픽셀 모드로 들어온 좌표를 cm로 바꾼다. cm 모드면 그대로 돌려준다."""
         if pt is None or self._px_to_cm is None:
             return pt
-        src = np.array([[[float(pt[0]), float(pt[1])]]], dtype=np.float32)
-        dst = cv2.perspectiveTransform(src, self._px_to_cm)
-        return float(dst[0][0][0]), float(dst[0][0][1])
+        return self._px_to_cm.pixel_to_cm(pt) or pt
 
     def _to_cm_results(self, nav_results):
         """nav 결과의 좌표들을 이 화면의 좌표계(cm)로 옮긴 사본을 만든다."""

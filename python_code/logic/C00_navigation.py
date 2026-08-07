@@ -197,6 +197,9 @@ class MarkerMapper:
         self.spot_pixels = {}
         # 입출구 픽셀 좌표 (gate1_pixel, gate2_pixel)
         self.gate_pixels = (None, None)
+        # 픽셀 -> cm 변환 캐시. pixel_to_cm이 채운다.
+        self._px_cm_H = None
+        self._px_cm_key = None
 
         print(f"[INFO] 마커 매퍼 초기화 완료. ("
               f"등록된 마커 {len(self.marker_world_pos)}개)")
@@ -524,6 +527,54 @@ class MarkerMapper:
         print(f"[INFO] {msg}")
         return True, msg
 
+    def pixel_to_cm(self, point):
+        """
+        픽셀 모드에서 이미지 좌표를 설계 cm 좌표로 옮긴다.
+
+        보정 때 찍은 기둥은 '이미지 픽셀'과 '설계 cm'을 둘 다 아는 대응쌍이다.
+        그 대응으로 변환을 만들면, 호모그래피 자동 보정이 안 된 상태에서도
+        화면 좌표를 cm로 이야기할 수 있다.
+
+        이게 필요한 이유는 cm를 전제로 만들어 둔 판정들 때문이다.
+        오주차 거리 비교(E00)나 조감도 배치(D00)는 전부 SPOT_WORLD_POS(cm)를
+        기준으로 하는데, 픽셀 모드의 world_pos는 이미지 픽셀이다. 그대로 비교하면
+        수백 cm 떨어진 것으로 나와 제자리에 세운 차가 오주차로 잡힌다.
+
+        Args:
+            point: (x_px, y_px) 이미지 좌표
+
+        Returns:
+            (x_cm, y_cm). 픽셀 모드가 아니거나 기둥이 4개 미만이면 None.
+        """
+        H = self._pixel_to_cm_matrix()
+        if H is None or point is None:
+            return None
+        src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, H)
+        return float(dst[0][0][0]), float(dst[0][0][1])
+
+    def _pixel_to_cm_matrix(self):
+        """pixel_to_cm이 쓸 변환 행렬. 보정이 바뀌면 다시 만든다."""
+        if not self.pillar_pixels:
+            return None
+        if self._px_cm_key == self.pillar_pixels:
+            return self._px_cm_H
+
+        ids = [i for i in self.pillar_pixels if i in self.marker_world_pos]
+        self._px_cm_key = dict(self.pillar_pixels)
+        if len(ids) < 4:
+            self._px_cm_H = None
+            self._warn_once("px_cm_few",
+                            f"[경고] 기둥이 {len(ids)}개뿐이라 픽셀->cm 변환을 만들 수 없습니다. "
+                            f"오주차 판정이 동작하지 않습니다.")
+            return None
+
+        src = np.array([self.pillar_pixels[i] for i in ids], dtype=np.float32)
+        dst = np.array([self.marker_world_pos[i] for i in ids], dtype=np.float32)
+        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+        self._px_cm_H = H
+        return H
+
     def find_nearest_spot_pixel(self, car_pixel):
         """
         차량 bbox 중심 픽셀에서 가장 가까운 주차 구역을 찾는다.
@@ -574,6 +625,8 @@ class MarkerMapper:
         self.pillar_pixels = {}
         self.spot_pixels = {}
         self.gate_pixels = (None, None)
+        self._px_cm_H = None
+        self._px_cm_key = None
         self._warned.clear()
 
         if clear_cache:
