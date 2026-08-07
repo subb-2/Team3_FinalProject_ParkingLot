@@ -106,6 +106,55 @@ def _recv_exact(conn, size):
     return buf
 
 
+# 수신 이벤트 구독
+# UI가 '방금 무엇을 받았는지'를 알아야 하는데, 지금까지는 print로만 남았다.
+# 화면에 띄우려면 그 사실이 프로그램 안에 남아야 하므로 구독 창구를 둔다.
+#
+# 통신 코드가 UI를 직접 부르지 않게 하려고 콜백 방식으로 만들었다.
+# A00은 '누가 듣는지' 모른 채 사실만 알리고, 듣는 쪽이 알아서 처리한다.
+_rx_listeners = []
+
+
+def add_rx_listener(callback):
+    """
+    패킷을 수신할 때마다 호출될 함수를 등록한다.
+
+    Args:
+        callback: callback(event_dict) 형태. event_dict의 내용은
+                  _notify_rx의 docstring 참고.
+    """
+    _rx_listeners.append(callback)
+    return callback
+
+
+def _notify_rx(role, car_id, byte1, byte2, result=None):
+    """
+    수신 사실을 등록된 리스너 전원에게 알린다.
+
+    리스너에서 예외가 나도 수신 루프를 멈추지 않는다. 화면 갱신이 실패했다고
+    입출차 처리까지 죽으면 안 되기 때문이다.
+
+    전달되는 event_dict:
+        role     : 'entry'(입차) 또는 'exit'(출차)
+        car_id   : 4자리 차량번호 문자열
+        raw_hex  : "0x12 0x34" 형태의 원본 바이트 표기
+        time     : 수신 시각 (datetime)
+        result   : 입차면 handle_car_entry의 결과 dict, 출차면 None
+    """
+    event = {
+        "role": role,
+        "car_id": car_id,
+        "raw_hex": f"0x{byte1:02X} 0x{byte2:02X}",
+        "time": datetime.datetime.now(),
+        "result": result,
+    }
+    for callback in _rx_listeners:
+        try:
+            callback(event)
+        except Exception as e:
+            print(f"[경고] 수신 리스너에서 오류가 발생했습니다: {e}")
+
+
 def _process_packet(role, raw_data):
     """수신한 2바이트를 파싱해서 입차/출차 로직으로 넘긴다."""
     car_id, b1, b2 = parse_car_id(raw_data)
@@ -124,11 +173,16 @@ def _process_packet(role, raw_data):
             enqueue_car_number(car_id)
         else:
             print(f"[입차수신] 안내를 시작하지 않습니다. ({result['reason']})")
+
+        # 배정 결과까지 확정된 뒤에 알린다. UI가 "1234 -> A-1 배정"까지
+        # 한 번에 띄울 수 있어야 하기 때문이다.
+        _notify_rx(role, car_id, b1, b2, result)
     else:
         print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
 
         # 출차 및 요금 계산 호출
         remove_car(car_id)
+        _notify_rx(role, car_id, b1, b2, None)
 
 
 def _serve_role(role, label, host, port, timeout, stop_event):

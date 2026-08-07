@@ -11,8 +11,11 @@ from data.car_data import (
 )
 from data.map_data import (
     spot_type as SPOT_TYPE_OF, SPOT_TYPE_NAME, SPOT_PRIORITY, get_spot_ids_by_type,
+    get_spot_cell_count,
 )
-from logic.C02_lot_layout import SPOT_WORLD_POS, GATE1_WORLD_POS
+from logic.C02_lot_layout import (
+    SPOT_WORLD_POS, GATE1_WORLD_POS, CONFIG as C02_CONFIG,
+)
 from logic.fee_calculator import calculate_fee
 
 # 배정 실패 사유 상수 (나중에 UI가 이 값으로 분기한다)
@@ -228,6 +231,144 @@ def get_availability_by_type():
             "spots": empty_ids,
         }
     return summary
+
+# 실제 주차 위치 파악 (오주차 대응)
+# 안내한 자리와 다른 곳에 세우는 경우가 있다. 그때 기록을 안내대로 남기면
+# 주차장 상태가 실제와 어긋난다. 빈자리로 표시된 곳에 차가 서 있고, 찬 자리로
+# 표시된 곳은 비어 있게 된다. 그래서 실제 위치를 찾아 기록을 실물에 맞춘다.
+def get_spot_rect(spot_id):
+    """
+    구역을 사각형으로 반환. (중심x, 중심y, 반폭, 반높이) 단위 cm.
+
+    C00.get_target_rect와 같은 계산이다. 이쪽은 navigator 없이도 써야 해서
+    (UI가 배정과 무관하게 임의 좌표를 조회한다) 별도로 둔다.
+    """
+    center = SPOT_WORLD_POS.get(spot_id)
+    if center is None:
+        return None
+    cells = get_spot_cell_count(spot_id) or 1
+    return (center[0], center[1],
+            C02_CONFIG['CELL_W_CM'] / 2.0,
+            C02_CONFIG['CELL_H_CM'] * cells / 2.0)
+
+
+def distance_to_spot(world_pos, spot_id):
+    """
+    좌표에서 구역 사각형까지의 거리(cm). 자리 안이면 0.
+
+    중심까지의 직선거리가 아니라 사각형까지의 거리를 재는 이유는
+    B02._distance_to_target의 주석과 같다. 자리 크기를 판정에 반영해야 한다.
+    """
+    rect = get_spot_rect(spot_id)
+    if rect is None:
+        return float('inf')
+    dx = max(abs(world_pos[0] - rect[0]) - rect[2], 0.0)
+    dy = max(abs(world_pos[1] - rect[1]) - rect[3], 0.0)
+    return math.hypot(dx, dy)
+
+
+def find_nearest_spot(world_pos, exclude=None, max_distance_cm=None):
+    """
+    좌표에서 가장 가까운 주차 구역을 찾는다.
+
+    Args:
+        world_pos:       실좌표 (x_cm, y_cm)
+        exclude:         제외할 구역 ID 집합 (예: 방금 비운 원래 배정 자리)
+        max_distance_cm: 이 거리를 넘으면 찾지 못한 것으로 본다.
+                         None이면 제한 없이 가장 가까운 자리를 돌려준다.
+                         차가 통로 한가운데 멈춘 경우까지 억지로 어느 자리에
+                         배정해 버리는 것을 막는 장치다.
+
+    Returns:
+        (spot_id, distance_cm). 찾지 못하면 (None, 거리).
+    """
+    exclude = exclude or set()
+    best_id, best_dist = None, float('inf')
+
+    for spot_id in SPOT_WORLD_POS:
+        if spot_id in exclude:
+            continue
+        dist = distance_to_spot(world_pos, spot_id)
+        if dist < best_dist:
+            best_id, best_dist = spot_id, dist
+
+    if max_distance_cm is not None and best_dist > max_distance_cm:
+        return None, best_dist
+    return best_id, best_dist
+
+
+def relocate_car(car_id, new_spot_id):
+    """
+    차량의 주차 기록을 실제로 세워진 자리로 옮긴다.
+
+    안내한 자리를 비우고 실제 자리를 채운다. 입차 시각과 차량 종류는 그대로
+    두어야 요금 계산이 어긋나지 않는다.
+
+    실제 자리가 이미 다른 차로 차 있으면 옮기지 않는다. 한 자리에 두 대를
+    기록하면 이후 출차와 배정이 모두 엉키기 때문이다. 이 경우는 사람이
+    확인해야 하므로 실패를 돌려주고 UI가 그대로 알린다.
+
+    Args:
+        car_id:      차량 번호 4자리 문자열
+        new_spot_id: 실제로 주차한 구역 ID
+
+    Returns:
+        결과 딕셔너리.
+        {"success": bool, "car_id", "old_spot_id", "new_spot_id",
+         "type_mismatch": bool, "message": str}
+    """
+    def _fail(message, old=None):
+        print(f"[자리 정정 실패] {message}")
+        return {"success": False, "car_id": car_id, "old_spot_id": old,
+                "new_spot_id": new_spot_id, "type_mismatch": False,
+                "message": message}
+
+    info = cars_info.get(car_id)
+    if info is None:
+        return _fail(f"차량 '{car_id}'의 주차 정보가 없습니다.")
+
+    old_spot_id = info.get("spot_id")
+    if old_spot_id == new_spot_id:
+        return {"success": True, "car_id": car_id, "old_spot_id": old_spot_id,
+                "new_spot_id": new_spot_id, "type_mismatch": False,
+                "message": f"차량 '{car_id}'는 이미 {new_spot_id}로 기록되어 있습니다."}
+
+    if new_spot_id not in spot_status:
+        return _fail(f"'{new_spot_id}'는 등록된 주차 구역이 아닙니다.", old_spot_id)
+
+    # 그 자리를 이미 쓰고 있는 다른 차가 있는지 확인
+    occupant = next((cid for cid, i in cars_info.items()
+                     if cid != car_id and i.get("spot_id") == new_spot_id), None)
+    if occupant is not None:
+        return _fail(f"{new_spot_id}는 이미 차량 '{occupant}'로 기록되어 있습니다. "
+                     f"차량 '{car_id}'의 자리를 옮기지 않습니다.", old_spot_id)
+
+    # 원래 자리를 비우고 실제 자리를 채운다
+    if old_spot_id in spot_status:
+        spot_status[old_spot_id] = "empty"
+    spot_status[new_spot_id] = "full"
+    info["spot_id"] = new_spot_id
+    info["parked"] = True
+    # 안내한 자리와 다른 곳에 세웠다는 사실을 기록에 남긴다.
+    # 나중에 통계를 내거나 상황을 되짚을 때 필요하다.
+    info["misparked_from"] = old_spot_id
+
+    # 차량 종류에 맞지 않는 자리인지 확인. (일반차가 장애인 자리에 선 경우 등)
+    # 기록은 실물대로 옮기되, 사실은 알려야 한다.
+    required = get_required_spot_type(car_id)
+    actual_type = SPOT_TYPE_OF.get(new_spot_id)
+    type_mismatch = required is not None and actual_type != required
+
+    kind = SPOT_TYPE_NAME.get(actual_type, "?")
+    message = (f"차량 '{car_id}' 자리 정정: {old_spot_id} -> {new_spot_id}({kind})")
+    if type_mismatch:
+        message += f" [경고: {get_car_type(car_id)} 차량인데 {kind} 구역입니다]"
+    print(f"[자리 정정] {message}")
+
+    return {"success": True, "car_id": car_id, "old_spot_id": old_spot_id,
+            "new_spot_id": new_spot_id, "type_mismatch": type_mismatch,
+            "message": message}
+
 
 # 개별 입차 처리
 def park_car(spot_id, car_id, entry_time=None):
