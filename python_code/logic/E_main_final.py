@@ -37,7 +37,7 @@ from flask import Flask, Response, request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from logic.C_main import (
-    CONFIG as C_CONFIG, CALIBRATE_HTML,
+    CONFIG as C_CONFIG,
     open_camera, build_pipeline, register_car_number, build_status,
 )
 from logic.D_main import PipelineRunner, mjpeg_response
