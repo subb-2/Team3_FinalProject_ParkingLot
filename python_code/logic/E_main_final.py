@@ -170,14 +170,12 @@ def main():
     stage(3, "검출 / 추적 / 위치추정")
     pipeline = build_pipeline(cap)
 
-    # UART가 꺼져 있을 때만 테스트 번호를 넣는다.
-    # 둘 다 넣으면 실제 입차와 테스트 번호가 섞여 FIFO 순서가 어긋난다.
-    if not uart_on:
-        from data.car_data import TEST_PRESET_CAR_NUMBERS
+    from data.car_data import TEST_PRESET_CAR_NUMBERS
+    if TEST_PRESET_CAR_NUMBERS:
         for car_id in TEST_PRESET_CAR_NUMBERS:
             result = register_car_number(car_id)
             rx_feed.push_manual(car_id, result)
-        print(f"  테스트 차량번호 {len(TEST_PRESET_CAR_NUMBERS)}개를 등록했습니다.")
+        print(f"  미리 지정된 테스트 차량번호 {len(TEST_PRESET_CAR_NUMBERS)}개를 등록했습니다.")
 
     runner = PipelineRunner(pipeline)
     runner.start()
