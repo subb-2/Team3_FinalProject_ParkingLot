@@ -201,12 +201,7 @@ class MarkerMapper:
         print(f"[INFO] 마커 매퍼 초기화 완료. ("
               f"등록된 마커 {len(self.marker_world_pos)}개)")
 
-        # 저장된 기둥 픽셀 좌표가 있으면 불러온다
-        from logic.B03_map_setting import load_pillar_pixels
-        saved = load_pillar_pixels()
-        if saved:
-            self.set_pillar_pixels(saved)
-            print(f"[INFO] 저장된 기둥 픽셀 좌표를 불러왔습니다. ({len(saved)}개)")
+
 
 
     # --- 호모그래피 저장/복원 -----------------------------------------------
