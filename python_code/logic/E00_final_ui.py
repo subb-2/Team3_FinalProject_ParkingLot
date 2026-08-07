@@ -376,6 +376,57 @@ def build_lot_layout():
     }
 
 
+# 카메라 구간의 트랙 목록
+# 영상 위 라벨(B02.draw_tracks가 그리는 "ID:5 1234 ACTIVE")과 같은 정보를
+# 글로 뽑는다. 색으로만 구분되는 상태를 한글로 풀어 준다.
+TRACK_STATE = {
+    "active":  ("안내중",   "active"),   # 지금 목적지로 안내하는 차 (영상에서 노랑)
+    "parked":  ("주차완료", "parked"),   # 배정 자리에 세운 차       (영상에서 초록)
+    "guided":  ("배정됨",   "guided"),   # 번호는 붙었지만 안내 대상은 아님
+    "waiting": ("번호대기", "waiting"),  # 검출은 됐는데 번호 미매칭 (영상에서 주황)
+}
+
+
+def _build_track_items(pipeline):
+    """
+    현재 추적 중인 차량 목록. 화면 표시용.
+
+    Returns:
+        [{"track_id", "car_id", "state", "state_label", "conf", "spot_id"}, ...]
+        안내 중인 차를 맨 위로, 그다음 번호가 붙은 차, 미매칭 순으로 정렬한다.
+        관제하는 사람이 가장 먼저 볼 것이 지금 움직이는 차이기 때문이다.
+    """
+    active_car = getattr(pipeline.mot, "active_car_id", None)
+    items = []
+
+    for trk in pipeline.latest_tracks:
+        car_id = trk.get("car_id")
+        info = cars_info.get(car_id) if car_id else None
+
+        if car_id and car_id == active_car:
+            state = "active"
+        elif info and info.get("parked"):
+            state = "parked"
+        elif car_id:
+            state = "guided"
+        else:
+            state = "waiting"
+
+        label, css = TRACK_STATE[state]
+        items.append({
+            "track_id": trk.get("track_id"),
+            "car_id": car_id,
+            "state": css,
+            "state_label": label,
+            "conf": round(trk.get("confidence") or 0.0, 2),
+            "spot_id": info.get("spot_id") if info else None,
+        })
+
+    order = {"active": 0, "guided": 1, "parked": 2, "waiting": 3}
+    items.sort(key=lambda t: (order.get(t["state"], 9), t["track_id"] or 0))
+    return items
+
+
 # 화면 상태 (0.5초마다 브라우저가 가져간다)
 def build_ui_state(pipeline, rx_feed, watcher):
     """
@@ -464,6 +515,9 @@ def build_ui_state(pipeline, rx_feed, watcher):
         "tracks": {
             "total": len(pipeline.latest_tracks),
             "matched": sum(1 for t in pipeline.latest_tracks if t.get("car_id")),
+            # 영상에 그려진 박스 라벨과 같은 내용을 글로도 준다.
+            # 라벨은 화면에 작게 박혀 있어 관제 화면에서 읽기 어렵다.
+            "items": _build_track_items(pipeline),
         },
         "stage_ms": pipeline.stage_ms,
         "fps": round(pipeline.fps, 1),
@@ -580,10 +634,30 @@ FINAL_UI_HTML = r"""
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
     min-height:0이 없으면 flex 자식이 콘텐츠 크기만큼 밀어내 패널이 넘친다. */
  #camwrap{flex:1;display:flex;align-items:center;justify-content:center;
-          background:#0e0e10;min-height:0;min-width:0;padding:6px}
+          background:#0e0e10;min-height:0;min-width:0;padding:6px;position:relative}
  #camimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
  #caminfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
           color:var(--dim);display:flex;justify-content:space-between;gap:10px}
+
+ /* 트랙 목록. 영상 위에 겹친다.
+    영상에도 박스와 라벨이 그려지지만 화면에서 작아 읽기 어렵다.
+    같은 내용을 읽을 수 있는 크기로 다시 보여주는 것이다. */
+ #tracks{position:absolute;top:12px;left:12px;display:flex;flex-direction:column;
+         gap:4px;pointer-events:none;max-height:calc(100% - 24px);overflow:hidden}
+ .trk{display:flex;align-items:center;gap:7px;padding:4px 9px;border-radius:6px;
+      background:rgba(14,14,16,.82);border:1px solid #33333b;
+      font-size:12px;white-space:nowrap;backdrop-filter:blur(2px)}
+ .trk .tid{color:var(--dim);font-variant-numeric:tabular-nums}
+ .trk .car{font-weight:700;letter-spacing:1px;font-variant-numeric:tabular-nums}
+ .trk .st{font-size:10px;padding:1px 6px;border-radius:4px}
+ /* 영상 위 박스 색과 맞춘다. B02의 COLOR_* 와 같은 구분이라
+    영상에서 노란 박스를 찾으면 여기 '안내중'과 짝이 맞는다. */
+ .trk.active  {border-color:#c8c800}
+ .trk.active  .st{background:#4a4a00;color:#ffff64}   /* 영상: 노랑 */
+ .trk.parked  .st{background:#0e3a17;color:#4ccf6a}   /* 영상: 초록 */
+ .trk.guided  .st{background:#0e2e3a;color:#5cc8ff}
+ .trk.waiting .st{background:#3d2a0a;color:#ffa53c}   /* 영상: 주황 */
+ .trk .sp{color:var(--dim);font-size:11px}
 
  /* ---- 4번 구간 : 실시간 안내 ---- */
  #navwrap{flex:1;display:flex;align-items:center;justify-content:center;
@@ -623,7 +697,10 @@ FINAL_UI_HTML = r"""
   <div class="col">
     <h2><span><span class="num">3</span>실시간 카메라 (차량 검출)</span>
         <span class="sub" id="camsub">-</span></h2>
-    <div id="camwrap"><img id="camimg" src="/video_feed"></div>
+    <div id="camwrap">
+      <img id="camimg" src="/video_feed">
+      <div id="tracks"></div>
+    </div>
     <div id="caminfo">
       <span id="camdet">검출 대기 중</span>
       <span><span class="pill" id="cammark">-</span>
@@ -851,6 +928,15 @@ function renderCam(st){
   const d = st.stage_ms || {};
   document.getElementById('camfps').textContent =
     d.detect != null ? `검출 ${d.detect}ms` : `${st.fps} FPS`;
+
+  // 영상 위에 겹치는 트랙 목록
+  document.getElementById('tracks').innerHTML = (t.items || []).map(it => `
+    <div class="trk ${it.state}">
+      <span class="tid">#${it.track_id}</span>
+      <span class="car">${esc(it.car_id) || '번호 미상'}</span>
+      <span class="st">${esc(it.state_label)}</span>
+      ${it.spot_id ? `<span class="sp">→ ${esc(it.spot_id)}</span>` : ''}
+    </div>`).join('');
 }
 
 // ---- 4번 구간 ----

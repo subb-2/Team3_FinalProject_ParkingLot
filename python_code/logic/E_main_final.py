@@ -232,6 +232,24 @@ def main():
             "message": result["message"],
         }
 
+    @app.route('/overlay')
+    @app.route('/overlay/<state>')
+    def overlay(state=None):
+        """
+        3번 구간(카메라)에 격자 배치를 겹쳐 그릴지 켜고 끈다.
+
+        보정이 맞는지 확인할 때는 켜 두는 것이 좋지만, 시연 중에는 격자가
+        차량 위에 겹쳐 검출 박스를 가린다. 그때 꺼서 화면을 정리한다.
+        (/overlay/on, /overlay/off, /overlay 로 토글)
+        """
+        if state == 'on':
+            C_CONFIG['DRAW_LAYOUT_OVERLAY'] = True
+        elif state == 'off':
+            C_CONFIG['DRAW_LAYOUT_OVERLAY'] = False
+        else:
+            C_CONFIG['DRAW_LAYOUT_OVERLAY'] = not C_CONFIG['DRAW_LAYOUT_OVERLAY']
+        return f"배치 오버레이: {'ON' if C_CONFIG['DRAW_LAYOUT_OVERLAY'] else 'OFF'}"
+
     @app.route('/follow/<car_id>')
     def follow(car_id):
         """3번 구간에 띄울 차량을 지정. 'auto'면 자동 선택."""
