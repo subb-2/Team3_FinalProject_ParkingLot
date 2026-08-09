@@ -28,8 +28,7 @@ module PreProcess(
     // SR04 -> SG90
     logic w_close, w_gate;
     // SR04 -> VGA
-    logic w_capture;
-    logic w_vga_done;
+    logic w_vga_start, w_vga_done;
     assign vga_done = w_vga_done;
 
     /********* Sensor *********/
@@ -38,10 +37,10 @@ module PreProcess(
         .pclk(pclk),
         .reset(reset),
         .o_echo(echo),
-        .i_cnn_done(cnn_done),
-        .i_vga_done(w_vga_done),
         .o_trigger(trigger),
-        .o_capture(w_capture),
+        .i_cnn_done(cnn_done),
+        .o_vga_start(w_vga_start),
+        .i_vga_done(w_vga_done),
         .o_close(w_close)
     );
     SG90_Controller U_SG90(
@@ -61,7 +60,7 @@ module PreProcess(
         .i_y_pixel(y_pixel),
         .i_pixel_addr(pixel_addr),
         .o_pixel_data(pixel_data),
-        .i_capture(w_capture),
+        .i_vga_start(w_vga_start),
         .o_vga_done(w_vga_done)
     );
 
