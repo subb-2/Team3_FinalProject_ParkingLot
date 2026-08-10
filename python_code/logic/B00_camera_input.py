@@ -8,20 +8,39 @@ app = Flask(__name__)
 
 # 기본 해상도.
 #
-# 4:3인 이유는 YOLO 학습 데이터가 4:3이기 때문이다. 자세한 근거는
-# C_main의 CAM_WIDTH 주석에 적어 두었다. 요약하면, YOLO는 입력을 비율을
-# 지킨 채 정사각으로 레터박스하므로 카메라와 학습 데이터의 '비율'이
-# 맞아야 모델이 배운 것과 같은 모양의 입력을 받는다.
+# 두 가지가 서로 당긴다.
 #
-# 화각도 비율을 따라간다. 4:3과 16:9는 담기는 범위가 다르고, 카메라에
-# 따라서는 해상도마다 센서를 잘라 쓰기도 한다.
+#   1) 주차장 전체가 화면에 들어와야 한다. (반드시)
+#      안 들어오면 기둥을 못 찍어 보정 자체가 안 된다.
+#   2) 학습 데이터와 가로세로비가 같아야 좋다. (권장)
+#      YOLO는 입력을 비율 그대로 정사각에 레터박스하므로, 비율이 다르면
+#      모델이 배운 것과 다른 모양이 들어간다. 학습 데이터는 4:3이다.
+#      자세한 근거는 C_main의 CAM_WIDTH 주석 참고.
+#
+# 실측: 이 목업에서 4:3(640x480)으로 내리니 주차장 좌우가 잘렸다.
+# 카메라가 4:3에서 센서를 잘라 쓰기 때문이다. 그래서 1)이 이긴다.
+# 4:3보다 넓으면서 4:3에 가장 가까운 비율부터 차례로 시도한다.
+#
+#   16:10 (1.60) -> 16:9 (1.78) -> 4:3 (1.33)
 #
 # 차량 검출/추적도 같은 프레임을 쓰므로 이 값 하나로 함께 결정된다.
 # YOLO의 추론 해상도(B01의 IMGSZ)와는 별개다. 그쪽은 엔진이 640으로 고정이라
 # 입력이 얼마든 내부에서 리사이즈한다.
-DEFAULT_WIDTH = 640
-DEFAULT_HEIGHT = 480
+DEFAULT_WIDTH = 1280
+DEFAULT_HEIGHT = 800
 DEFAULT_FPS = 30
+
+# 위 해상도를 카메라가 받아주지 않을 때 대신 시도할 목록.
+#
+# 젯슨의 v4l2src는 해상도를 caps로 못 박기 때문에, 지원하지 않는 값을 주면
+# 파이프라인이 아예 열리지 않는다. 예전에는 그대로 죽어서 '카메라 없음'으로만
+# 보였다. 카메라가 실제로 내주는 모드는 아래로 확인할 수 있다.
+#   v4l2-ctl --list-formats-ext -d /dev/video0
+FALLBACK_SIZES = [
+    (1280, 800),    # 16:10 - 학습(4:3)에 가장 가까우면서 4:3보다 넓다
+    (1280, 720),    # 16:9  - 이 목업에서 주차장이 들어오는 것이 확인된 값
+    (640, 480),     # 4:3   - 비율은 학습과 같지만 좌우가 잘린다
+]
 
 # MJPEG 전송 품질. OpenCV 기본값은 95라 1280x720 한 장이 200KB를 넘는다.
 # 초당 20장이면 4MB/s로, 인코딩 비용도 네트워크도 이게 병목이 된다.
@@ -155,35 +174,93 @@ def get_gstreamer_pipeline(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIG
     )
 
 
-def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
-               framerate=DEFAULT_FPS, latest_only=True):
+def _try_open(sensor_id, width, height, framerate):
     """
-    카메라 객체를 생성하여 반환합니다.
+    한 해상도로 카메라를 열어 본다.
 
-    latest_only=True면 LatestFrameCamera로 감싸서 돌려준다. 드라이버 큐에
-    프레임이 쌓여 화면이 밀리는 것을 막는다. (기본값)
+    '열렸다'로 끝내지 않고 한 장을 실제로 읽어 확인한다. 윈도우 쪽
+    VideoCapture.set은 지원하지 않는 해상도를 조용히 무시하고 다른 크기를
+    내주기 때문에, 읽어 봐야 실제로 무엇이 오는지 알 수 있다.
+
+    Returns:
+        (cap, 실제_가로, 실제_세로). 실패하면 None.
     """
     if sys.platform == 'win32':
-        # 윈도우 환경에서는 일반 웹캠 사용 (GStreamer 미사용)
-        print(f"[INFO] 윈도우 환경 감지됨: 웹캠(장치 {sensor_id}) 연결 시도...")
         cap = cv2.VideoCapture(sensor_id, cv2.CAP_DSHOW)
         if not cap.isOpened():
-            cap = cv2.VideoCapture(sensor_id) # DSHOW 실패시 기본 백엔드
+            cap = cv2.VideoCapture(sensor_id)   # DSHOW 실패시 기본 백엔드
+        if not cap.isOpened():
+            return None
 
         # 해상도보다 먼저 코덱을 정한다.
         # 대부분의 USB 웹캠은 무압축(YUY2)으로는 1280x720에서 10fps밖에 못 낸다.
         # USB 2.0 대역폭이 모자라기 때문이다. MJPG로 받으면 같은 해상도에서
         # 30fps가 나온다. 순서가 중요하다. 해상도를 먼저 잡으면 무시되기도 한다.
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        # 해상도 설정
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, framerate)
     else:
-        # Jetson / Linux 환경 (GStreamer 파이프라인 사용)
-        print(f"[INFO] Linux 환경 감지됨: GStreamer 파이프라인 연결 시도...")
+        # Jetson / Linux (GStreamer). v4l2src는 해상도를 caps로 못 박으므로
+        # 지원하지 않는 값이면 여기서 아예 열리지 않는다.
         pipeline = get_gstreamer_pipeline(sensor_id, width, height, framerate)
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            return None
+
+    ok, frame = cap.read()
+    if not ok or frame is None:
+        cap.release()
+        return None
+    return cap, frame.shape[1], frame.shape[0]
+
+
+def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
+               framerate=DEFAULT_FPS, latest_only=True):
+    """
+    카메라 객체를 생성하여 반환합니다.
+
+    요청한 해상도를 카메라가 받아주지 않으면 FALLBACK_SIZES를 차례로
+    시도한다. 예전에는 첫 시도가 실패하면 그대로 '카메라 없음'이 되어,
+    카메라는 멀쩡한데 해상도만 안 맞는 경우를 구별할 수 없었다.
+
+    실제로 잡힌 해상도와 가로세로비를 반드시 출력한다. 요청과 다른 값이
+    잡히면 화각이 달라져 보정과 검출이 함께 어긋나므로, 조용히 넘어가면
+    나중에 원인을 찾기 어렵다.
+
+    latest_only=True면 LatestFrameCamera로 감싸서 돌려준다. 드라이버 큐에
+    프레임이 쌓여 화면이 밀리는 것을 막는다. (기본값)
+    """
+    env = "윈도우 웹캠" if sys.platform == 'win32' else "Linux GStreamer"
+    print(f"[INFO] 카메라 연결 시도... ({env}, 장치 {sensor_id})")
+
+    # 요청값을 맨 앞에 두고, 중복 없이 후보를 잇는다
+    candidates = [(width, height)]
+    candidates += [wh for wh in FALLBACK_SIZES if wh != (width, height)]
+
+    opened = None
+    for cand_w, cand_h in candidates:
+        opened = _try_open(sensor_id, cand_w, cand_h, framerate)
+        if opened is not None:
+            if (cand_w, cand_h) != (width, height):
+                print(f"[경고] {width}x{height}를 카메라가 받아주지 않아 "
+                      f"{cand_w}x{cand_h}로 열었습니다.")
+            break
+        print(f"       {cand_w}x{cand_h} 실패, 다음 후보로 넘어갑니다.")
+
+    if opened is None:
+        print(f"[오류] 카메라를 열지 못했습니다. 지원 해상도를 확인하세요.")
+        print(f"       v4l2-ctl --list-formats-ext -d /dev/video{sensor_id}")
+        return cv2.VideoCapture()       # isOpened() == False
+
+    cap, real_w, real_h = opened
+    ratio = real_w / max(real_h, 1)
+    name = {1.333: "4:3", 1.5: "3:2", 1.6: "16:10", 1.778: "16:9"}.get(
+        round(ratio, 3), f"{ratio:.2f}:1")
+    print(f"[INFO] 카메라 열림. 실제 {real_w}x{real_h} ({name}, {ratio:.3f})")
+    if (real_w, real_h) != (width, height):
+        print(f"[경고] 요청한 {width}x{height}와 다릅니다. "
+              f"화각이 달라지므로 기둥 보정을 다시 해야 합니다.")
 
     # 드라이버 큐를 최소로. 백엔드가 지원하지 않으면 무시된다.
     # (그래서 LatestFrameCamera가 따로 필요하다)
@@ -192,7 +269,7 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     except Exception:
         pass
 
-    if latest_only and cap.isOpened():
+    if latest_only:
         return LatestFrameCamera(cap)
     return cap
 
