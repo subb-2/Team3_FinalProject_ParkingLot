@@ -195,6 +195,17 @@ class ParkingNavigationPipeline:
 
         # 3) C00 : 배정된 목표 구역 동기화 후 위치 추정 및 경로 안내
         self.navigator.sync_targets_from_parking_manager()
+
+        # 안내 중이던 차가 출차했으면 활성 상태를 푼다.
+        # A01.remove_car가 cars_info에서 지우기만 하므로, 이걸 안 하면
+        # 이미 나간 차가 활성으로 남아 다음 차가 15초(STUCK_RELEASE_SEC)를
+        # 기다려야 번호를 받는다.
+        active = self.mot.active_car_id
+        if active is not None:
+            from data.car_data import cars_info
+            if active not in cars_info:
+                self.mot.release_car(active)
+
         nav_results = self.navigator.update(frame, tracks)
         t_nav = time.perf_counter()
 

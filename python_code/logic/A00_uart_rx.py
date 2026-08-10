@@ -168,9 +168,18 @@ def _process_packet(role, raw_data):
     else:
         print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
 
-        # 출차 및 요금 계산 호출
-        remove_car(car_id)
-        _notify_rx(role, car_id, b1, b2, None)
+        # 출차 및 요금 계산 호출.
+        # 반환값을 화면까지 실어 보낸다. 예전에는 여기서 버려서 요금과
+        # 주차 시간이 터미널에만 찍히고 관제 화면에는 '출차 처리'로만 떴다.
+        removed = remove_car(car_id)
+        if removed is None:
+            result = {"success": False, "message": "입차 기록이 없습니다"}
+        else:
+            spot_id, fee, minutes = removed
+            result = {"success": True, "spot_id": spot_id,
+                      "fee": fee, "minutes": minutes}
+
+        _notify_rx(role, car_id, b1, b2, result)
 
 
 def _serve_role(role, label, host, port, timeout, stop_event):

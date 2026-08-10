@@ -155,6 +155,9 @@ class RxFeed:
             "spot_id": result.get("spot_id"),
             "ok": result.get("success", True),
             "message": result.get("message", ""),
+            # 출차일 때만 채워진다 (A01.remove_car의 계산 결과)
+            "fee": result.get("fee"),
+            "minutes": result.get("minutes"),
             "source": event.get("source", "wifi"),
         }
 
@@ -993,7 +996,11 @@ function renderRx(rx){
     const cls = !it.ok ? 'fail' : (it.role === 'exit' ? 'exit' : '');
     let detail;
     if (it.role === 'exit'){
-      detail = '출차 처리';
+      // 출차는 '어느 자리에서 나갔고, 얼마나 있었고, 얼마인지'가 전부다.
+      detail = it.ok
+        ? `<span class="rx-spot">${esc(it.spot_id)} 출차</span> · ` +
+          `${it.minutes}분 · <b>${(it.fee || 0).toLocaleString()}원</b>`
+        : `<span class="rx-fail">${esc(it.message) || '출차 실패'}</span>`;
     } else if (it.ok && it.spot_id){
       detail = `${esc(it.car_type)} · <span class="rx-spot">${esc(it.spot_id)} 배정</span>`;
     } else {

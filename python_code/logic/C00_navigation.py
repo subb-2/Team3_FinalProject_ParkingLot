@@ -575,6 +575,18 @@ class ParkingNavigator:
             if spot_id and self.targets.get(car_id) != spot_id:
                 self.set_target(car_id, spot_id)
 
+        # 출차한 차의 목표를 지운다.
+        #
+        # 위 루프는 cars_info를 도는데, 출차하면 그 항목이 지워지므로 나간 차는
+        # 아예 들어오지 않는다. 그래서 목표가 그대로 남아 있었다. 남으면
+        #   - 이미 나간 차가 아직 그 자리로 가는 중인 것으로 보이고
+        #   - 4번 구간이 '목적지가 있는 차'를 우선 고르므로 그 차를 비추며
+        #   - 비워 둔 자리를 다른 차에게 배정했을 때 목표가 겹친다.
+        for car_id in list(self.targets):
+            if car_id not in cars_info:
+                self.clear_target(car_id)
+                self.world_history.pop(car_id, None)
+
     def update(self, frame, tracks):
         """
         한 프레임 분량의 추적 결과로 각 차량의 위치와 안내 정보를 갱신.

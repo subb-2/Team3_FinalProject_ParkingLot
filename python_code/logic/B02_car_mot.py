@@ -961,6 +961,39 @@ class CarMOT:
         if car_id is not None and self.on_parked is not None:
             self.on_parked(car_id)
 
+    def release_car(self, car_id):
+        """
+        차량번호를 시스템에서 놓아준다. (출차했을 때)
+
+        안내 중이던 차가 나가면 활성 상태를 풀어야 다음 차가 번호를 받는다.
+        풀지 않으면 그 차는 이미 없는데 활성으로 남아, 다음 차가
+        STUCK_RELEASE_SEC(15초)이 지날 때까지 안내를 시작하지 못한다.
+
+        유령도 함께 버린다. 나간 차의 유령이 남아 있으면 나중에 들어온
+        다른 차가 그 자리에서 옛 번호를 승계할 수 있다.
+
+        트랙 결합(track_to_car)은 남겨 둔다. 차가 출구로 빠져나가는 동안은
+        화면에 번호가 보이는 편이 낫고, 화면에서 사라지면 _cleanup_lost가
+        정리한다.
+
+        Returns:
+            무언가 풀렸으면 True.
+        """
+        released = False
+        if self.active_car_id == car_id:
+            print(f"[활성] 차량번호 '{car_id}' 출차로 안내 해제")
+            self.active_car_id = None
+            self._arrived_since = None
+            self._active_moved_at = None
+            released = True
+
+        for tid, ghost in list(self.ghosts.items()):
+            if ghost.get("car_id") == car_id:
+                del self.ghosts[tid]
+                released = True
+
+        return released
+
     def _try_rebind(self, track_id, alive_ids, now):
         """
         새로 생긴 트랙을 사라진 트랙의 유령과 대조해 차량번호를 승계한다.
