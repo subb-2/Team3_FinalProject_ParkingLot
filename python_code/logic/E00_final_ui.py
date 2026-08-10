@@ -486,7 +486,7 @@ def _build_cars_on_map(pipeline):
     2번 구간 격자 위에 찍을 차량 점 목록.
 
     픽셀 모드의 world_pos는 이미지 픽셀이므로 cm로 옮긴 뒤 격자 좌표로 바꾼다.
-    (MarkerMapper.pixel_to_cm. 호모그래피 모드면 이미 cm라 그대로 쓴다)
+    (PillarMapper.pixel_to_cm)
 
     Returns:
         [{"key", "car_id", "row", "col", "parked", "target_spot"}, ...]
@@ -560,16 +560,13 @@ def build_ui_state(pipeline, rx_feed, watcher):
             "type_name": SPOT_TYPE_NAME.get(SPOT_TYPE_OF.get(spot_id), "?"),
         }
 
+    # 보정 상태. 기둥을 찍었으면 좌표계가 선 것이다.
     mapper = pipeline.navigator.mapper
-    if not mapper.is_ready():
-        homography = {"state": "not_ready", "text": "마커 대기 중"}
-    elif mapper.locked:
+    if mapper.is_ready():
         homography = {"state": "locked",
-                      "text": f"확정 {mapper.calibrated_with}점 "
-                              f"오차 {mapper.reproj_error:.1f}cm"}
+                      "text": f"기둥 {len(mapper.pillar_pixels)}개"}
     else:
-        homography = {"state": "provisional",
-                      "text": f"임시 {mapper.calibrated_with}/{mapper.lock_markers}점"}
+        homography = {"state": "not_ready", "text": "보정 필요"}
 
     return {
         # --- 1번 구간 ---
@@ -613,7 +610,6 @@ def build_ui_state(pipeline, rx_feed, watcher):
         "stage_ms": pipeline.stage_ms,
         "fps": round(pipeline.fps, 1),
         "homography": homography,
-        "markers": len(pipeline.navigator.latest_markers),
         "time": datetime.now().strftime("%H:%M:%S"),
     }
 

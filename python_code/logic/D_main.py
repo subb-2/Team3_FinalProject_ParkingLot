@@ -273,17 +273,12 @@ if __name__ == '__main__':
     my_car = {"id": CONFIG['MY_CAR_ID']}
 
     def extra_info():
-        """호모그래피 / 마커 / FIFO 상태를 화면 하단에 표시할 문자열."""
+        """보정 / FIFO 상태를 화면 하단에 표시할 문자열."""
         mapper = pipeline.navigator.mapper
-        if not mapper.is_ready():
-            state = "NOT READY (show markers)"
-        elif mapper.locked:
-            state = f"LOCKED {mapper.calibrated_with}pt {mapper.reproj_error:.1f}cm"
-        else:
-            state = f"PROVISIONAL {mapper.calibrated_with}/{mapper.lock_markers}pt"
+        state = (f"{len(mapper.pillar_pixels)} pillars" if mapper.is_ready()
+                 else "NOT CALIBRATED")
         return [
-            f"homography: {state}",
-            f"markers: {len(pipeline.navigator.latest_markers)}",
+            f"map: {state}",
             f"fifo: {car_number_fifo.size()} waiting",
         ]
 

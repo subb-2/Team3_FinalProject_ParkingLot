@@ -233,6 +233,20 @@ class CarNumberFIFO:
             print(f"[FIFO] 차량번호 '{car_id}' 출고 (잔여 {len(self._queue)}대)")
             return car_id
 
+    def push_front(self, car_id):
+        """
+        잘못 꺼낸 번호를 큐의 '앞'으로 되돌린다.
+
+        뒤에 붙이면 안 된다. 이 번호는 원래 다음 차례였으므로, 뒤로 보내면
+        나중에 들어온 차가 먼저 안내를 받는다. 입구 통과 순서와 안내 순서가
+        어긋나면 FIFO를 쓰는 의미가 없어진다.
+        """
+        with self._lock:
+            if car_id in self._queue:
+                return
+            self._queue.appendleft(car_id)
+            print(f"[FIFO] 차량번호 '{car_id}' 반납 (대기 {len(self._queue)}대)")
+
 
     def size(self):
         """큐에 대기 중인 차량 번호 개수."""
@@ -447,6 +461,17 @@ class CarMOT:
         # Track ID -> 실좌표 궤적 deque([(x_cm, y_cm, t), ...])
         # 이동량을 cm로 재기 위한 것. to_world가 주어질 때만 쌓인다.
         self.world_trajectories = {}
+        # Track ID -> 그 트랙의 '첫' 실좌표.
+        # 궤적(world_trajectories)은 maxlen이 있어 오래된 점이 밀려 나가므로,
+        # '처음 잡힌 자리에서 얼마나 벗어났는지'는 따로 붙들어야 한다.
+        # 이미 세워둔 차인지(제자리에서 떨린 것뿐인지) 가리는 데 쓴다.
+        self.first_world = {}
+
+        # 이번 프레임에 좌표계를 쓸 수 있는가.
+        # 보정(/calibrate) 전에는 to_world가 좌표를 못 주므로 False다.
+        self._world_ready = False
+        # 호출자가 '이미 세워둔 차' 목록을 넘겨주는가. (parked_of 제공 여부)
+        self._parked_known = False
 
         print(f"[INFO] 추적기 초기화 완료. "
               f"(Tracker: {self.tracker_type}, use_byte: {self.use_byte}, "
@@ -472,7 +497,7 @@ class CarMOT:
             detections: B01_car_detection.CarDetector.detect()의 반환 결과 리스트
                         [{"class_id":.., "class_name":.., "bbox":[..], "confidence":..}, ...]
             to_world:   (x, y) 이미지 좌표 -> (x_cm, y_cm) 실좌표 변환 함수.
-                        C00 MarkerMapper.image_to_world를 넘기면 된다.
+                        C_main이 보정 좌표계에 맞춰 만들어 넘긴다.
                         주면 이동량/거리 판정이 픽셀 대신 cm 기준이 되어 정확해진다.
                         (픽셀 거리는 원근 때문에 화면 위치마다 실제 거리가 다르다)
                         None이거나 호모그래피가 없으면 픽셀 기준으로 자동 대체.
@@ -543,6 +568,14 @@ class CarMOT:
                 "confidence": conf
             })
 
+        # 좌표계가 준비됐는지 확인한다. 보정 전에는 to_world가 좌표를 주지
+        # 못하므로 어느 트랙에도 world가 없다. 이 상태에서는 '자리에 서 있는
+        # 차'와 '움직이는 차'를 구별할 방법이 없다. (아래 3) 주석 참고)
+        self._parked_known = parked_of is not None
+        self._world_ready = any(
+            self.last_states.get(trk["track_id"], {}).get("world") is not None
+            for trk in tracks)
+
         # 2) 이미 주차된 차를 그 자리의 트랙에 묶는다.
         #    활성 차량 결합보다 먼저 해야, 주차된 차가 검출 흔들림 때문에
         #    '움직이는 차'로 오인되어 안내 대상이 되는 것을 막을 수 있다.
@@ -574,6 +607,10 @@ class CarMOT:
             # 번호는 '움직이는 차'에게만 나가야 하고 그 판단은 2)가 담당한다.
             # 여기서도 꺼내면 주차장에 서 있던 차나 오검출이 번호를 채간다.
             if self.single_enable:
+                continue
+
+            # 좌표계가 없으면 세워둔 차를 가려낼 수 없다. (3)의 주석 참고)
+            if self._parked_known and not self._world_ready:
                 continue
 
             if hits >= self.min_hits:
@@ -612,12 +649,13 @@ class CarMOT:
 
         for trk in tracks:
             track_id = trk["track_id"]
-            if track_id in self.track_to_car:
-                continue
+            held = self.track_to_car.get(track_id)
+            if held is not None and held in parked_positions:
+                continue        # 이미 제 번호로 묶여 있다
 
             world = self.last_states.get(track_id, {}).get("world")
             if world is None:
-                continue        # 호모그래피가 아직 없으면 판단 불가
+                continue        # 좌표계가 아직 없으면 판단 불가
 
             # 반경 안에서 가장 가까운 '아직 안 묶인' 주차 차량
             best_car, best_dist = None, None
@@ -633,11 +671,57 @@ class CarMOT:
             if best_car is None:
                 continue
 
+            # 이미 다른 번호를 달고 있는 트랙이라면, 그 번호가 잘못 나간 것이다.
+            #
+            # 이런 일이 생기는 순서는 이렇다. 프로그램이 뜨면 검출이 먼저 돌기
+            # 시작하는데, 그때는 아직 /calibrate 전이라 좌표계가 없다. 자리
+            # 위치를 모르니 아래 주차 결합을 할 수 없고, 그 사이 세워둔 차의
+            # 검출 상자가 몇 픽셀 흔들린 것을 '움직이는 차'로 보고 FIFO의
+            # 다음 번호를 내준다. 보정을 마쳐도 그 트랙은 이미 번호를 달고
+            # 있어서 여기까지 오지 못했다.
+            #
+            # 그래서 '처음 잡힌 자리에서 한 번도 벗어난 적 없는' 트랙에 한해
+            # 바로잡는다. 안내를 받고 들어와 주차한 차는 주차장을 가로질러
+            # 왔으므로 이 조건에 걸리지 않는다. 옆자리에 세우려고 잠깐 멈춘
+            # 차를 빼앗지 않기 위한 구분이다.
+            if held is not None:
+                if not self._stayed_in_place(track_id, radius):
+                    continue
+                self.fifo.push_front(held)
+                if self.active_car_id == held:
+                    self.active_car_id = None
+                    self._arrived_since = None
+                print(f"[정정] Track ID {track_id}는 처음부터 자리에 서 있던 차입니다. "
+                      f"'{held}' -> '{best_car}' (번호는 FIFO로 돌려줌)")
+
             self.track_to_car[track_id] = best_car
             self.rebound_at[track_id] = now
+            taken.discard(held)
             taken.add(best_car)
             print(f"[주차 결합] Track ID {track_id} <- 차량번호 '{best_car}' "
                   f"(자리에서 {best_dist:.1f}cm)")
+
+    def _stayed_in_place(self, track_id, radius):
+        """
+        트랙이 처음 잡힌 자리를 벗어난 적이 없는지.
+
+        검출 상자는 제자리에서도 늘 조금씩 흔들리므로 '한 프레임 이동량'으로는
+        서 있는 차와 기어가는 차를 가를 수 없다. 대신 처음 위치에서의 총
+        벗어남을 본다. 세워둔 차는 떨림 범위를 넘지 않고, 주차장을 가로질러 온
+        차는 훨씬 크게 벗어난다.
+
+        Returns:
+            벗어난 적이 없으면 True. 판단할 좌표가 없으면 False. (모르면 건드리지 않는다)
+        """
+        start = self.first_world.get(track_id)
+        world = self.last_states.get(track_id, {}).get("world")
+        if start is None or world is None:
+            return False
+
+        traj = self.world_trajectories.get(track_id) or ()
+        points = [(x, y) for x, y, _ in traj] + [(world[0], world[1])]
+        return all(math.hypot(x - start[0], y - start[1]) <= radius
+                   for x, y in points)
 
     def _update_state(self, track_id, center, bbox, to_world, now):
         """
@@ -652,6 +736,7 @@ class CarMOT:
             world = to_world(center)
             if world is not None:      # 호모그래피가 아직 준비 안 됐으면 None
                 state["world"] = world
+                self.first_world.setdefault(track_id, (world[0], world[1]))
                 wtraj = self.world_trajectories.setdefault(
                     track_id, deque(maxlen=self.trajectory_maxlen)
                 )
@@ -672,6 +757,17 @@ class CarMOT:
         if bound is not None and bound in alive_ids:
             # 이미 붙어 있다. 주차를 마쳤는지만 확인한다.
             self._check_parked(bound, now, target_of)
+            return
+
+        # 좌표계가 아직 없으면 번호를 내주지 않는다.
+        #
+        # 보정(/calibrate) 전에는 자리가 화면 어디인지 모르므로 위의
+        # _bind_parked_cars가 동작하지 못한다. 그 상태에서 이동 판정은 픽셀
+        # 기준으로 떨어지는데(MOVE_MIN_PX), 세워둔 차도 검출 상자가 그만큼은
+        # 흔들린다. 그래서 가만히 서 있는 차가 '움직이는 차'로 잡혀 FIFO의
+        # 다음 번호를 채갔다. 어차피 보정 전에는 목표 좌표도 경로도 없어
+        # 안내를 시작할 수 없으니, 좌표계가 설 때까지 기다린다.
+        if self._parked_known and not self._world_ready:
             return
 
         # 결합이 없다(아직 시작 전이거나 트랙이 끊겼다). 움직이는 트랙을 찾는다.
@@ -1042,6 +1138,7 @@ class CarMOT:
             self.lost_counts.pop(track_id, None)
             self.trajectories.pop(track_id, None)
             self.world_trajectories.pop(track_id, None)
+            self.first_world.pop(track_id, None)
             self.last_states.pop(track_id, None)
             self.rebound_at.pop(track_id, None)
 

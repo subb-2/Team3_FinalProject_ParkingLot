@@ -1202,7 +1202,7 @@ class NavigationMapUI:
         # cell_to_world로 배치하기 때문이다. 픽셀 모드일 때 들어오는
         # 픽셀 좌표는 _to_world가 cm로 바꿔서 넘긴다.
         self.cell_scale = 1.0
-        self._px_to_cm = None       # 픽셀 모드일 때만 채워진다 (MarkerMapper)
+        self._px_to_cm = None       # 픽셀 모드일 때만 채워진다 (PillarMapper)
 
         # 주차 구역 실좌표 확보 (우선순위: 인자 > navigator > C00 기본값)
         if spot_world_pos is not None:
@@ -1272,7 +1272,7 @@ class NavigationMapUI:
         픽셀 모드에서는 C00이 차량 위치를 이미지 픽셀로 준다. 그대로 찍으면
         차가 주차장 밖 엉뚱한 곳에 나타난다.
 
-        변환 자체는 MarkerMapper.pixel_to_cm이 갖고 있다. 보정 때 찍은 기둥이
+        변환 자체는 PillarMapper.pixel_to_cm이 갖고 있다. 보정 때 찍은 기둥이
         (픽셀, cm) 대응쌍이라 거기서 만들 수 있다. 여기서는 쓸 수 있는지만 본다.
         """
         mapper = getattr(self.navigator, 'mapper', None)

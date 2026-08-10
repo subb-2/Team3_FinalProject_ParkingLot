@@ -72,7 +72,7 @@ def uniform_marker_world_pos(cell_w=None, cell_h=None, origin_cell=None):
     기둥이 격자대로 반듯하게 놓여 있다고 가정하고 마커 실좌표를 생성.
 
     실측 없이 시작할 때 쓰는 초기값이다. 이 값으로 호모그래피를 계산했을 때
-    재투영 오차가 기준(C00의 MAX_REPROJ_ERROR_CM) 안에 들어오면 그대로 쓰면 되고,
+    기둥 보정으로 만든 격자가 실물과 겹쳐 보이면 그대로 쓰면 되고,
     넘으면 실제 배치가 격자와 다르다는 뜻이므로 실측값으로 교체해야 한다.
 
     Returns:

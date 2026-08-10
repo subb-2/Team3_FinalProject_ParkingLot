@@ -18,7 +18,7 @@ from logic.B02_car_mot import (
     car_number_fifo, enqueue_car_number
 )
 from logic.C00_navigation import (
-    MarkerMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE1_WORLD_POS
+    PillarMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE1_WORLD_POS
 )
 from logic.C01_path_planner import (
     ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
@@ -38,18 +38,28 @@ CONFIG = {
     "CAM_SENSOR_ID": 0,             # 카메라 장치 번호
     # 카메라 해상도.
     #
-    # !! 중요 !! ArUco 마커 검출이 이 값에 직접 걸린다.
-    # 5x5 비트 마커는 테두리 포함 7x7 칸이고, OpenCV가 칸마다 4픽셀을
-    # 샘플링하므로 한 변이 최소 28px은 되어야 비트를 읽는다.
-    # 640x480에서는 이 목업의 마커가 20px 안팎이라 블러가 조금만 껴도
-    # 하나도 검출되지 않는다. (실측: 640x480 0개 -> 1280x720 10개)
+    # 가로세로비를 학습 데이터에 맞춘다. 이게 핵심이다.
     #
-    # YOLO는 영향받지 않는다. 엔진이 imgsz=640으로 고정이라 내부에서
-    # 리사이즈한다. 대신 캡처/ArUco/JPEG 인코딩 비용이 늘어 FPS는 떨어진다.
-    # 마커가 충분히 크게 보이면 640x480으로 되돌려도 된다.
-    # 확인 방법: python logic/C03_marker_calib.py --sweep
-    "CAM_WIDTH": 1280,              # 카메라 가로 해상도
-    "CAM_HEIGHT": 720,              # 카메라 세로 해상도
+    # YOLO는 입력을 정사각(imgsz=640)으로 바꿔서 추론하는데, 늘리지 않고
+    # 비율을 지킨 채 축소한 뒤 남는 곳을 회색으로 채운다(레터박스).
+    # 그래서 학습 이미지와 카메라의 '비율'이 다르면 모델이 배운 것과 다른
+    # 모양의 입력을 받는다.
+    #
+    # 지금 학습 데이터(yolo_dataset)는 640x640 안에 내용이 640x482로 들어
+    # 있는 4:3 이미지다. 위아래 띠가 79px씩이다.
+    #   4:3  (640x480)  -> 내용 640x480, 띠 80px  : 학습과 거의 같다
+    #   16:9 (1280x720) -> 내용 640x360, 띠 140px : 어긋난다
+    #
+    # 해상도 자체는 검출 성능과 거의 무관하다. 어떤 해상도든 프레임 가로가
+    # 텐서 640px로 매핑되므로, 화각이 같으면 텐서에서 보이는 차 크기는
+    # 똑같다. 그래서 4:3 중에서는 가장 가벼운 640x480을 쓴다.
+    # 차를 더 크게 보이게 하려면 해상도가 아니라 B01의 IMGSZ를 올려야 한다.
+    # (그때는 엔진도 그 크기로 다시 export할 것)
+    #
+    # !! 주의 !! 이 값을 바꾸면 기둥 보정을 다시 해야 한다.
+    # config/pillar_pixels.json에 저장된 좌표가 이미지 픽셀이기 때문이다.
+    "CAM_WIDTH": 640,               # 카메라 가로 해상도
+    "CAM_HEIGHT": 480,              # 카메라 세로 해상도
     "CAM_FPS": 30,                  # 카메라 프레임레이트
 
     # 웹 스트리밍 서버 설정
@@ -63,7 +73,6 @@ CONFIG = {
 
     # 내비게이션 연동 설정
     "AUTO_ASSIGN_SPOT": True,       # 차량번호 등록 시 A01_parking_manager로 빈자리를 자동 배정
-    "DRAW_MARKERS": True,           # 검출된 ArUco 마커를 화면에 표시
 
     # 등록된 배치(격자/기둥/자리/입출구)를 화면에 역투영해 겹쳐 그린다.
     # 수동 보정이 제대로 됐는지 눈으로 확인하는 용도.
@@ -125,29 +134,32 @@ class ParkingNavigationPipeline:
         t_det = time.perf_counter()
 
         # 2) B02 : MOT 추적 + 차량번호 매칭
-        #    호모그래피가 준비되어 있으면 image_to_world를 넘겨 이동량/거리 판정을
-        #    cm 단위로 돌린다. 픽셀 거리는 원근 때문에 화면 위치마다 실제 거리가
-        #    달라 임계값을 하나로 정할 수 없다.
+        #    B02의 판정 기준(이동량, 도착 반경, 주차 결합 반경)은 전부 cm를
+        #    전제로 잡혀 있다. 픽셀 거리를 그대로 넘기면 화면 위치마다 실제
+        #    거리가 달라 임계값을 하나로 정할 수 없다.
+        #    그래서 픽셀 좌표를 임의의 비율(1cm = 8px)로 줄여서 넘긴다.
+        #    실제 cm는 아니지만 화면 전체에서 같은 축척이라 비교는 성립한다.
         #
         #    target_of는 '주차 완료' 판정용이다. B02가 활성 차량의 위치와 목표
         #    구역 좌표를 비교해 SINGLE_ACTIVE['ARRIVAL_RADIUS_CM'] 이내로
         #    들어오면 안내를 종료하고 다음 차로 넘어간다.
         #
-        #    이 시점의 호모그래피/목표는 직전 프레임에서 갱신된 것이다. 카메라가
-        #    고정 설치되어 있고 LOCK_HOMOGRAPHY=True이므로 실질적으로 동일하다.
         #    parked_of는 '이미 그 자리에 세워져 있는 차'의 목록이다.
         #    INITIAL_PARKED로 미리 세워둔 차와 안내를 마친 차가 여기 들어간다.
         #    B02가 그 자리 근처의 트랙을 찾아 차량번호를 묶어주므로,
         #    미리 세워둔 차가 'WAIT'로 뜨거나 안내 대상으로 잡히지 않는다.
-        from logic.A01_parking_manager import get_parked_world_positions
+        #
+        #    보정 전에는 자리가 화면 어디인지 모르므로 빈 목록을 넘긴다.
+        #    None이 아니라 빈 목록인 것이 중요하다. B02는 parked_of를 받았는지
+        #    여부로 '이 호출자는 세워둔 차를 안다'를 판단하고, 좌표계가 설
+        #    때까지 FIFO에서 번호를 꺼내지 않는다. None을 넘기면 그 판단이
+        #    꺼져서, 세워둔 차가 흔들리는 것을 보고 번호를 채간다.
         mapper = self.navigator.mapper
-        
-        # 픽셀 모드일 때 B02가 기존 cm 단위 판정 기준을 그대로 쓸 수 있도록
-        # 모든 픽셀 좌표를 임의의 비율(1cm = 8px)로 축소해서 넘겨준다 (pseudo-CM).
         px_per_cm = 8.0
-        
+
         if mapper.pillar_pixels:
             to_world_func = lambda p: (p[0] / px_per_cm, p[1] / px_per_cm)
+
             def parked_of_func():
                 from data.car_data import cars_info
                 res = {}
@@ -158,8 +170,8 @@ class ParkingNavigationPipeline:
                             res[car] = (sp[0] / px_per_cm, sp[1] / px_per_cm)
                 return res
         else:
-            to_world_func = mapper.image_to_world if mapper.is_ready() else None
-            parked_of_func = get_parked_world_positions
+            to_world_func = None
+            parked_of_func = dict      # 보정 전 : 빈 목록
 
         tracks = self.mot.update(
             detections,
@@ -178,8 +190,6 @@ class ParkingNavigationPipeline:
         #    배치 오버레이를 가장 먼저 그린다. 차량 박스나 경로선에 가리지 않게.
         if CONFIG['DRAW_LAYOUT_OVERLAY']:
             self.navigator.mapper.draw_layout_overlay(frame)
-        if CONFIG['DRAW_MARKERS']:
-            self.navigator.mapper.draw_markers(frame, self.navigator.latest_markers)
         self.mot.draw_tracks(frame, tracks)
         if CONFIG['DRAW_NAVIGATION']:
             self.navigator.draw_navigation(frame, nav_results)
@@ -216,19 +226,14 @@ class ParkingNavigationPipeline:
         cv2.putText(frame, f"FIFO Waiting: {self.mot.fifo.size()}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # 맵 상태 표시 (픽셀 모드 or 호모그래피 모드)
+        # 보정 상태 표시
         if mapper.pillar_pixels:
-            text, color = f"Map: PIXEL MODE ({len(mapper.pillar_pixels)} pillars)", (0, 255, 0)
-        elif not ready:
-            text, color = "Homography: NOT READY (show markers)", (0, 0, 255)
-        elif mapper.locked:
-            text = f"Homography: LOCKED ({mapper.calibrated_with} markers, {mapper.reproj_error:.1f}cm)"
+            text = f"Map: CALIBRATED ({len(mapper.pillar_pixels)} pillars)"
             color = (0, 255, 0)
         else:
-            text = (f"Homography: PROVISIONAL ({mapper.calibrated_with}/{mapper.lock_markers} "
-                    f"markers, {mapper.reproj_error:.1f}cm)")
-            color = (0, 200, 255)
-            
+            text = "Map: NOT CALIBRATED (open /calibrate)"
+            color = (0, 0, 255)
+
         cv2.putText(frame, text, (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
@@ -413,14 +418,7 @@ def build_pipeline(cap):
     )
 
     # C00 : ArUco 마커 매퍼 + 내비게이터
-    mapper = MarkerMapper(
-        min_markers=C00_CONFIG['MIN_MARKERS_FOR_HOMOGRAPHY'],
-        lock_homography=C00_CONFIG['LOCK_HOMOGRAPHY'],
-        lock_markers=C00_CONFIG['MARKERS_FOR_LOCK'],
-        max_error=C00_CONFIG['MAX_REPROJ_ERROR_CM'],
-        min_spread=C00_CONFIG['MIN_MARKER_SPREAD'],
-        ransac_thresh_cm=C00_CONFIG['RANSAC_THRESH_CM']
-    )
+    mapper = PillarMapper()
     navigator = ParkingNavigator(
         mapper=mapper,
         arrival_threshold=C00_CONFIG['ARRIVAL_THRESHOLD_CM'],
@@ -479,12 +477,8 @@ def build_status(pipeline):
             info["name"]: f"{info['empty']}/{info['total']}"
             for info in pm.get_availability_by_type().values()
         },
-        "homography_ready": mapper.is_ready(),
-        "homography_locked": mapper.locked,
-        "homography_markers": mapper.calibrated_with,
-        "homography_error_cm": (round(mapper.reproj_error, 2)
-                                if mapper.is_ready() else None),
-        "markers_detected": sorted(pipeline.navigator.latest_markers.keys()),
+        "calibrated": mapper.is_ready(),
+        "pillars": len(mapper.pillar_pixels),
         "fifo_waiting": car_number_fifo.snapshot(),
         "vehicles": [
             {

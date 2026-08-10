@@ -52,3 +52,11 @@ __pycache__/
 python_code/config/homography.npz
 python_code/marker_frame.jpg
 python_code/marker_debug.jpg
+
+# 모델 가중치.
+# 용량이 크고(.onnx 하나가 40MB대) .engine은 젯슨의 GPU/TensorRT 버전에
+# 묶여 있어 다른 기기에서 열리지 않는다. 저장소에 두면 클론만 무거워진다.
+# .pt(원본 가중치)는 따로 백업할 것. imgsz를 바꾸면 여기서 다시 export한다.
+*.engine
+*.onnx
+*.pt
