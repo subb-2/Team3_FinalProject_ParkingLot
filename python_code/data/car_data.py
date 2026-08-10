@@ -176,7 +176,7 @@ INITIAL_PARKED = {
 #       등록하지 않으면 전부 DEFAULT_CAR_TYPE(일반)으로 처리되어
 #       대형/전기차 자리로 가는 시나리오를 확인할 수 없다.
 #       (등록되지 않은 번호가 있으면 아래에서 경고를 출력한다)
-TEST_PRESET_CAR_NUMBERS = ["1234", "1998", "1111", "2222", "3333", "4444"]
+TEST_PRESET_CAR_NUMBERS = ["3333"]
 
 def _initial_parked_car_ids():
     """INITIAL_PARKED에 적힌 차량번호 집합. (("9999", 45) 형태도 처리)"""
