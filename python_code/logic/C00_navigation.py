@@ -658,6 +658,17 @@ class ParkingNavigator:
             else:
                 distance_cm = None
 
+            # 이 차가 이미 주차를 마쳤는지. 안내 대상이 아니므로 target_spot은
+            # 비어 있지만, 화면은 '어느 자리에 세워진 차'인지 보여줘야 한다.
+            # 그게 없으면 4번 구간이 주차된 차를 비출 때 목적지가 '없음'으로만
+            # 떠서, 안내를 못 하는 것인지 이미 끝난 것인지 구별할 수 없다.
+            parked_spot = None
+            if car_id:
+                from data.car_data import cars_info
+                info = cars_info.get(car_id)
+                if info and info.get("parked"):
+                    parked_spot = info.get("spot_id")
+
             results.append({
                 "track_id": trk["track_id"],
                 "car_id": car_id,
@@ -665,6 +676,7 @@ class ParkingNavigator:
                 "world_pos": pos,
                 "heading_deg": heading,
                 "target_spot": target_spot,
+                "parked_spot": parked_spot,
                 "target_world": target_pos, # 픽셀 모드면 픽셀 좌표가 들어감
                 "distance_cm": distance_cm,
                 "route": route,

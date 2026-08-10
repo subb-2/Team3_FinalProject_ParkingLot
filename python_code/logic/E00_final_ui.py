@@ -53,7 +53,7 @@ from data.map_data import (
 )
 from data.car_data import cars_info, get_car_type
 from logic.B02_car_mot import CONFIG as B02_CONFIG
-from logic.C02_lot_layout import CONFIG as C02_CONFIG
+from logic.C02_lot_layout import CONFIG as C02_CONFIG, SPOT_WORLD_POS
 
 
 # 설정 (Configuration)
@@ -461,6 +461,25 @@ def _build_track_items(pipeline):
             "spot_id": info.get("spot_id") if info else None,
         })
 
+    # 추적이 끊긴 주차 차량도 목록에 남긴다.
+    #
+    # 세워둔 차가 잠깐 안 잡혔다고 목록에서 사라지면, 차가 없어진 것인지
+    # 검출만 놓친 것인지 알 수 없다. 자리에 있다는 것은 배정 기록이 알고
+    # 있으므로 그대로 두고, 추적이 없다는 사실만 track_id를 비워 표시한다.
+    seen = {t["car_id"] for t in items if t["car_id"]}
+    for car_id, info in cars_info.items():
+        if car_id in seen or not info.get("parked"):
+            continue
+        label, css = TRACK_STATE["parked"]
+        items.append({
+            "track_id": None,           # 지금 추적 중이 아니다
+            "car_id": car_id,
+            "state": css,
+            "state_label": label,
+            "conf": 0.0,
+            "spot_id": info.get("spot_id"),
+        })
+
     order = {"active": 0, "guided": 1, "parked": 2, "waiting": 3}
     items.sort(key=lambda t: (order.get(t["state"], 9), t["track_id"] or 0))
     return items
@@ -501,6 +520,13 @@ def _build_cars_on_map(pipeline):
         world = mapper.pixel_to_cm(pos) or pos
         row, col = world_to_cell(world)
 
+        # 격자 밖에 찍히는 점은 버린다.
+        # 바닥에 비친 그림자나 삼각대 같은 오검출이 주차장 바깥에서 잡히면
+        # 격자를 벗어난 자리에 점이 찍혀 화면만 어지럽다. 한 칸 정도는
+        # 넘어가도 봐준다. 입출구가 격자 맨 아랫줄에 걸쳐 있기 때문이다.
+        if not (-1 <= row <= get_rows() and -1 <= col <= get_cols()):
+            continue
+
         car_id = nav.get("car_id")
         info = cars_info.get(car_id) if car_id else None
         cars.append({
@@ -512,6 +538,31 @@ def _build_cars_on_map(pipeline):
             "col": round(col, 3),
             "parked": bool(info and info.get("parked")),
             "target_spot": nav.get("target_spot"),
+            "tracked": True,
+        })
+
+    # 주차를 마친 차는 추적이 끊겨도 점을 유지한다.
+    #
+    # 세워둔 차의 위치는 추적이 아니라 배정 기록이 정한다. 이미 그 자리에
+    # 있다는 것을 아는데 굳이 매 프레임 다시 찾아낼 이유가 없다. 검출이
+    # 한 번 흔들릴 때마다 점이 사라지면 화면만 깜빡인다.
+    # (자리를 뜨면 감시 스레드가 parked를 풀어 주므로 점도 같이 사라진다)
+    seen = {c["car_id"] for c in cars if c["car_id"]}
+    for car_id, info in cars_info.items():
+        if car_id in seen or not info.get("parked"):
+            continue
+        spot_pos = SPOT_WORLD_POS.get(info.get("spot_id"))
+        if spot_pos is None:
+            continue
+        row, col = world_to_cell(spot_pos)
+        cars.append({
+            "key": car_id,
+            "car_id": car_id,
+            "row": round(row, 3),
+            "col": round(col, 3),
+            "parked": True,
+            "target_spot": None,
+            "tracked": False,       # 배정 기록에서 온 점
         })
     return cars
 
@@ -601,6 +652,9 @@ def build_ui_state(pipeline, rx_feed, watcher):
         # nav_results는 실좌표가 나온 차만 들어 있어, 호모그래피가 없으면
         # 화면에 박스가 보이는데도 0으로 나온다.
         "tracks": {
+            # detected = YOLO가 찾은 수, total = 그중 추적 중인 수.
+            # 둘이 다르면 추적기가 트랙을 못 만들고 있다는 뜻이다.
+            "detected": getattr(pipeline, "latest_detections", None),
             "total": len(pipeline.latest_tracks),
             "matched": sum(1 for t in pipeline.latest_tracks if t.get("car_id")),
             # 영상에 그려진 박스 라벨과 같은 내용을 글로도 준다.
@@ -1069,10 +1123,12 @@ function renderNotice(ev){
 function renderCam(st){
   const t = st.tracks;
   document.getElementById('camsub').textContent =
-    t.total ? `검출 ${t.total}대` : '검출 없음';
+    t.total ? `추적 ${t.total}대` : '추적 없음';
+  const det = t.detected;
+  const gap = (det != null && det !== t.total) ? ` (검출 ${det})` : '';
   document.getElementById('camdet').textContent = t.total
-    ? `검출 ${t.total}대 · 번호 매칭 ${t.matched}대`
-    : '검출 대기 중';
+    ? `추적 ${t.total}대${gap} · 번호 매칭 ${t.matched}대`
+    : (det ? `검출 ${det}대 · 추적 0대` : '검출 대기 중');
 
   // 카메라가 주는 fps와 처리 fps의 차이. 벌어져 있으면 프레임을 버리는 중이다.
   const m = document.getElementById('cammark');

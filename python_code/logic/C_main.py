@@ -112,6 +112,7 @@ class ParkingNavigationPipeline:
         # 최근 처리 결과 (다른 모듈/모니터링에서 조회 가능)
         self.latest_tracks = []
         self.latest_nav = []
+        self.latest_detections = 0      # 이번 프레임에 YOLO가 찾은 개수
         self.fps = 0.0
         # 단계별 처리 시간(ms). FPS 원인 추적용. (/status의 stage_ms)
         self.stage_ms = {}
@@ -136,6 +137,12 @@ class ParkingNavigationPipeline:
 
         # 1) B01 : 차량 검출
         detections = self.detector.detect(frame)
+        # 검출 수를 따로 남긴다. 화면의 '검출 N대'는 사실 추적 수여서,
+        # 차가 안 보일 때 YOLO가 못 찾은 것인지 추적기가 트랙을 못 만든
+        # 것인지 구별할 수 없었다. 둘은 손봐야 할 곳이 다르다.
+        #   검출 > 추적 : 추적기 문제 (ocsort.yaml의 new_track_thresh 등)
+        #   검출 = 추적 : 검출 문제 (모델/조명/가림)
+        self.latest_detections = len(detections)
         t_det = time.perf_counter()
 
         # 2) B02 : MOT 추적 + 차량번호 매칭

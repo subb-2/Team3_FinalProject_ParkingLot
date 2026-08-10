@@ -922,6 +922,14 @@ class NavigationView:
         if dist is None:
             dist = remain
 
+        # 이미 주차를 마친 차를 비추는 중이면 '안내'가 아니라 '완료'다.
+        # 안내 대상이 아니라 목표가 없을 뿐인데, 그대로 두면 SEARCHING /
+        # NOT ASSIGNED로 떠서 안내가 고장난 것처럼 보인다.
+        parked_spot = nav.get("parked_spot")
+        if parked_spot:
+            maneuver = GUIDE_ARRIVED
+            dist = remain = None
+
         arrived = maneuver == GUIDE_ARRIVED
         accent = COLOR_ARRIVED if arrived else COLOR_NAV_ACCENT
 
@@ -937,16 +945,18 @@ class NavigationView:
             num = f"{dist:.0f}"
             tw, _ = _text(canvas, num, (tx, 62), 1.7, accent, 4)
             _text(canvas, "cm", (tx + tw + 9, 62), 0.75, accent, 2)
-        _text(canvas, MANEUVER_LABEL.get(maneuver, maneuver), (tx, 96),
-              0.82, COLOR_TEXT, 2)
+        label = "PARKED" if parked_spot else MANEUVER_LABEL.get(maneuver, maneuver)
+        _text(canvas, label, (tx, 96), 0.82, COLOR_TEXT, 2)
 
-        # 오른쪽 : 목적지와 남은 총 거리
+        # 오른쪽 : 목적지(또는 세워진 자리)와 남은 총 거리
         rx = w - 20
-        spot = nav.get("target_spot")
-        _text(canvas, "DESTINATION", (rx, 36), 0.42, (128, 124, 120), 1, anchor="r")
+        spot = nav.get("target_spot") or parked_spot
+        head = "PARKED AT" if parked_spot else "DESTINATION"
+        _text(canvas, head, (rx, 36), 0.42, (128, 124, 120), 1, anchor="r")
         _text(canvas, str(spot) if spot else "NOT ASSIGNED", (rx, 74),
               1.1 if spot else 0.6,
-              COLOR_SPOT_TARGET if spot else (110, 106, 102), 2, anchor="r")
+              (COLOR_ARRIVED if parked_spot else COLOR_SPOT_TARGET) if spot
+              else (110, 106, 102), 2, anchor="r")
         # 남은 거리는 배너 왼쪽 숫자와 다를 때만 적는다.
         # 같은 값을 두 번 적으면 어느 쪽이 무엇인지 헷갈린다.
         if remain is not None and (dist is None or abs(remain - dist) >= 1.0):
