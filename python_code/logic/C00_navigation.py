@@ -547,14 +547,30 @@ class ParkingNavigator:
         half_h = C02_CONFIG['CELL_H_CM'] * cells / 2.0
         return (center[0], center[1], half_w, half_h)
 
+    def clear_target(self, car_id):
+        """목표 구역 지정을 지운다. 안내가 끝난 차를 대상에서 뺄 때 쓴다."""
+        if self.targets.pop(car_id, None) is None:
+            return False
+        self.routes.pop(car_id, None)
+        return True
+
     def sync_targets_from_parking_manager(self):
         """
         A01_parking_manager가 관리하는 입차 정보(cars_info)를 읽어
         각 차량의 목표 구역을 자동으로 동기화.
+
+        이미 주차를 마친 차는 목표에서 뺀다. 도착한 차는 목적지까지 남은
+        거리가 늘 0에 가까운데, 안내 화면은 '목적지가 가장 가까운 차'를
+        골라 띄운다. 그래서 세워둔 차가 안내 중인 차를 계속 밀어내고,
+        4번 구간이 갓 들어온 차 대신 이미 주차된 차를 비췄다.
+        주차를 마친 차는 갈 곳이 없으므로 목표도 없는 것이 맞다.
         """
         from data.car_data import cars_info
 
         for car_id, info in cars_info.items():
+            if info.get("parked"):
+                self.clear_target(car_id)
+                continue
             spot_id = info.get("spot_id")
             if spot_id and self.targets.get(car_id) != spot_id:
                 self.set_target(car_id, spot_id)

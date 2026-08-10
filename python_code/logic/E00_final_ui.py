@@ -609,6 +609,12 @@ def build_ui_state(pipeline, rx_feed, watcher):
         },
         "stage_ms": pipeline.stage_ms,
         "fps": round(pipeline.fps, 1),
+        # 카메라가 주는 fps와 처리가 못 따라가 버린 프레임 수.
+        # 예전에는 여기에 검출된 마커 수를 넣었는데 마커 검출을 걷어내면서
+        # 늘 비어 있게 됐다. 대신 실제로 봐야 하는 값을 넣는다.
+        # camera_fps가 fps보다 크면 그 차이만큼 프레임을 버리고 있다는 뜻이다.
+        "camera_fps": round(getattr(pipeline.cap, "capture_fps", 0.0), 1),
+        "dropped_frames": getattr(pipeline.cap, "dropped", 0),
         "homography": homography,
         "time": datetime.now().strftime("%H:%M:%S"),
     }
@@ -1068,10 +1074,12 @@ function renderCam(st){
     ? `검출 ${t.total}대 · 번호 매칭 ${t.matched}대`
     : '검출 대기 중';
 
+  // 카메라가 주는 fps와 처리 fps의 차이. 벌어져 있으면 프레임을 버리는 중이다.
   const m = document.getElementById('cammark');
-  m.textContent = `마커 ${st.markers}개`;
-  // 호모그래피는 마커 4개부터 만들어진다. 그 아래면 좌표가 안 나온다.
-  m.className = 'pill ' + (st.markers >= 4 ? 'ok' : 'bad');
+  const cam = st.camera_fps || 0, drop = st.dropped_frames || 0;
+  m.textContent = cam ? `카메라 ${cam} / 처리 ${st.fps} · 버림 ${drop}`
+                      : `처리 ${st.fps} FPS`;
+  m.className = 'pill ' + (cam && cam - st.fps > cam * 0.3 ? 'warn' : '');
 
   const d = st.stage_ms || {};
   document.getElementById('camfps').textContent =

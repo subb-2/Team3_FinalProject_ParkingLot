@@ -1160,10 +1160,20 @@ def pick_my_vehicle(nav_results, car_id=None, sticky=True):
             if key_of(n) == _LAST_PICK and n.get("target_spot"):
                 return n
 
-    # 목표 구역이 배정된 차량을 우선, 그중 목적지가 가장 가까운 차량
+    # 고르는 순서
+    #   1) 안내 중인 차 (목표 구역이 있다). 그중 목적지가 가장 가까운 차.
+    #   2) 번호가 붙은 차. 안내는 끝났어도 어느 차인지는 알 수 있다.
+    #   3) 그 외. 번호도 목표도 없는 트랙이라 오검출일 수 있다.
+    #
+    # 2)와 3)을 나눈 이유는, 안내할 차가 없을 때 화면이 엉뚱한 오검출을
+    # 따라가지 않게 하기 위해서다. 바닥에 비친 그림자 같은 것이 잡히면
+    # 안내 화면이 주차장 밖을 비추게 된다.
     with_target = [n for n in nav_results if n.get("target_spot")]
-    picked = (min(with_target, key=lambda n: n.get("distance_cm") or float('inf'))
-              if with_target else nav_results[0])
+    if with_target:
+        picked = min(with_target, key=lambda n: n.get("distance_cm") or float('inf'))
+    else:
+        known = [n for n in nav_results if n.get("car_id")]
+        picked = known[0] if known else nav_results[0]
     _LAST_PICK = key_of(picked)
     return picked
 

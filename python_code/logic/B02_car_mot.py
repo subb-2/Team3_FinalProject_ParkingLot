@@ -645,7 +645,15 @@ class CarMOT:
             return
 
         radius = self.single['PARKED_BIND_RADIUS_CM']
-        taken = set(self.track_to_car.values())
+
+        # '이미 임자가 있는 번호'는 이번 프레임에 살아 있는 트랙이 쥔 것만
+        # 센다. 죽은 트랙까지 세면, 추적이 끊겨 ID가 새로 발급됐을 때 옛
+        # 트랙이 번호를 물고 있어서 새 트랙이 그 번호를 받지 못한다.
+        # 옛 트랙은 lost_ttl(기본 60프레임)이 지나야 정리되므로, 그동안
+        # 멀쩡히 세워져 있는 차가 'WAIT'로 뜬다. 주차를 마친 차의 번호가
+        # 자꾸 떨어져 보이던 원인이 이것이다.
+        alive = {trk["track_id"] for trk in tracks}
+        taken = {car for tid, car in self.track_to_car.items() if tid in alive}
 
         for trk in tracks:
             track_id = trk["track_id"]
