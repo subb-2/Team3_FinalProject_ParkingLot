@@ -88,7 +88,7 @@ grid_map = [
         [SPOT3  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT4  ,ROAD   ,SPOT4  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 4
         [SPOT3  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
         [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 6
-        [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 7
+        [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD ],  # row 7
         [ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD   ,ROAD],  # row 8
 ]
 
@@ -264,8 +264,9 @@ GATE2_POS = _find_cell(GATE2)   # 출구
 # 배치를 바꾸면 구역 ID가 밀릴 수 있으므로 아래 검증 경고를 꼭 확인할 것.
 SPOT_PRIORITY = {
     # 오른쪽 열 아래 -> 위, 그다음 왼쪽 열 아래 -> 위.
-    # 오른쪽 열(col 12)이 통째로 일반 구역이 되어 5자리, 왼쪽 열은 위쪽 2자리만 남았다.
-    SPOT1: ["D-5", "D-4", "D-3", "D-2", "D-1", "A-2", "A-1"],
+    # 오른쪽 열(col 12)에 4자리, 왼쪽 열은 위쪽 2자리만 남았다.
+    # (row 7의 오른쪽 자리는 실물에서 없어져 통로로 되돌렸다)
+    SPOT1: ["D-4", "D-3", "D-2", "D-1", "A-2", "A-1"],
 
     # 장애인 구역은 현재 1자리뿐 (왼쪽 열 맨 아래)
     SPOT2: ["A-4"],
