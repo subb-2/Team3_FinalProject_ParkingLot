@@ -2,17 +2,52 @@ import cv2
 import os
 import json
 
-def load_pillar_pixels():
-    """저장된 기둥 픽셀 좌표를 불러온다. 없으면 None."""
+PILLAR_FILE = os.path.join(
+    os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
+
+
+def save_pillar_pixels(points, frame_size=None):
+    """
+    기둥 픽셀 좌표를 '찍을 때의 해상도'와 함께 저장한다.
+
+    해상도를 같이 적는 것이 중요하다. 좌표가 이미지 픽셀이라 해상도가
+    달라지면 전부 어긋나는데, 기록이 없으면 다음 실행에서 그 사실을 알
+    방법이 없어 틀린 좌표를 그대로 불러 쓰게 된다.
+    """
     import json as _json
-    path = os.path.join(
-        os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
-    if not os.path.exists(path):
+    os.makedirs(os.path.dirname(os.path.abspath(PILLAR_FILE)), exist_ok=True)
+    data = {"points": {str(k): list(v) for k, v in points.items()}}
+    if frame_size:
+        data["width"], data["height"] = int(frame_size[0]), int(frame_size[1])
+    with open(PILLAR_FILE, 'w') as f:
+        _json.dump(data, f, indent=2)
+
+
+def load_pillar_pixels():
+    """
+    저장된 기둥 픽셀 좌표를 불러온다.
+
+    Returns:
+        {"points": {번호: (x, y)}, "width": int|None, "height": int|None}
+        파일이 없거나 읽을 수 없으면 None.
+
+    해상도를 적기 전에 저장된 옛 파일은 width/height가 None이다.
+    그 좌표가 지금 해상도에서 찍힌 것인지 알 수 없으므로, 부르는 쪽이
+    쓰지 않고 재보정을 요구해야 한다.
+    """
+    import json as _json
+    if not os.path.exists(PILLAR_FILE):
         return None
     try:
-        with open(path) as f:
+        with open(PILLAR_FILE) as f:
             data = _json.load(f)
-        return {int(k): tuple(v) for k, v in data.items()}
+        if "points" in data:
+            raw = data["points"]
+            width, height = data.get("width"), data.get("height")
+        else:
+            raw, width, height = data, None, None   # 해상도 없던 옛 형식
+        return {"points": {int(k): tuple(v) for k, v in raw.items()},
+                "width": width, "height": height}
     except Exception as e:
         print(f"[경고] 기둥 픽셀 좌표 로드 실패: {e}")
         return None
@@ -116,7 +151,6 @@ def register_map_routes(app, pipeline, cap_module=None):
     @app.route('/calibrate/save', methods=['POST'])
     def calibrate_save():
         """클릭한 기둥 픽셀 좌표를 저장하고 자리 위치를 자동 계산한다."""
-        import json as _json
         data = request.get_json(silent=True) or {}
         points = {int(k): (float(v[0]), float(v[1]))
                   for k, v in (data.get("points") or {}).items()}
@@ -124,12 +158,8 @@ def register_map_routes(app, pipeline, cap_module=None):
         if len(points) < 4:
             return {"ok": False, "message": f"기둥이 {len(points)}개뿐입니다. 최소 4개가 필요합니다."}
 
-        # 기둥 픽셀 좌표를 파일로 저장
-        save_path = os.path.join(
-            os.path.dirname(__file__), '..', 'config', 'pillar_pixels.json')
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        with open(save_path, 'w') as f:
-            _json.dump({str(k): list(v) for k, v in points.items()}, f, indent=2)
+        # 기둥 픽셀 좌표를 지금 해상도와 함께 저장한다.
+        save_pillar_pixels(points, getattr(pipeline.cap, "frame_size", None))
 
         # mapper에 픽셀 좌표 설정
         ok, message = pipeline.navigator.mapper.set_pillar_pixels(points)

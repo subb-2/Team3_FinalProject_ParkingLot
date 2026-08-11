@@ -464,22 +464,61 @@ def build_pipeline(cap):
     #
     # /calibrate가 config/pillar_pixels.json에 저장은 하고 있었는데 아무도
     # 읽지 않아서, 실행할 때마다 기둥 10개를 다시 찍어야 했다.
-    # 카메라를 옮기거나 해상도를 바꾸면 좌표가 어긋나므로 그때는 다시 찍어야
-    # 한다. /recalibrate로 지우고 /calibrate에서 다시 찍으면 된다.
-    # (C_main과 E_main_final 양쪽에 그 경로가 있다)
-    from logic.B03_map_setting import load_pillar_pixels
-    saved = load_pillar_pixels()
-    if saved:
-        ok, msg = navigator.mapper.set_pillar_pixels(saved)
-        if ok:
-            navigator.update_spot_pixels()
-            print(f"[INFO] 저장된 기둥 보정을 불러왔습니다. (기둥 {len(saved)}개)")
-        else:
-            print(f"[경고] 저장된 기둥 보정을 쓸 수 없습니다: {msg}")
-    else:
-        print("[INFO] 저장된 기둥 보정이 없습니다. /calibrate에서 기둥을 찍어주세요.")
+    #
+    # 단, 찍을 때의 해상도가 지금과 같을 때만 쓴다. 좌표가 이미지 픽셀이라
+    # 해상도가 달라지면 전부 어긋나는데, 그대로 불러 쓰면 화면은 멀쩡해
+    # 보이면서 자리 위치만 조용히 틀어진다. 그럴 바에는 다시 찍는 게 낫다.
+    # 다시 찍으려면 /calibrate, 저장된 것을 지우려면 /recalibrate.
+    _load_saved_calibration(navigator, getattr(cap, "frame_size", None))
 
     return ParkingNavigationPipeline(cap, detector, mot, navigator)
+
+
+def _load_saved_calibration(navigator, frame_size):
+    """
+    저장된 기둥 보정을 검사해서 쓸 수 있으면 적용한다.
+
+    Args:
+        navigator:  ParkingNavigator
+        frame_size: 지금 카메라가 실제로 주는 (가로, 세로). 모르면 None.
+
+    Returns:
+        적용했으면 True.
+    """
+    from logic.B03_map_setting import load_pillar_pixels
+
+    saved = load_pillar_pixels()
+    if not saved:
+        print("[INFO] 저장된 기둥 보정이 없습니다. "
+              "/calibrate 에서 기둥을 찍어주세요.")
+        return False
+
+    points = saved["points"]
+    saved_size = (saved["width"], saved["height"])
+
+    if saved_size == (None, None):
+        print("[경고] 저장된 기둥 보정에 해상도 기록이 없습니다. "
+              "(해상도를 적기 전에 저장된 파일)")
+        print("       지금 화면과 맞는지 알 수 없어 쓰지 않습니다. "
+              "/calibrate 에서 다시 찍어주세요.")
+        return False
+
+    if frame_size is not None and tuple(saved_size) != tuple(frame_size):
+        print(f"[경고] 저장된 기둥 보정은 {saved_size[0]}x{saved_size[1]}에서 "
+              f"찍은 것인데 지금 카메라는 {frame_size[0]}x{frame_size[1]}입니다.")
+        print("       좌표가 이미지 픽셀이라 그대로 쓰면 자리가 전부 어긋납니다. "
+              "/calibrate 에서 다시 찍어주세요.")
+        return False
+
+    ok, msg = navigator.mapper.set_pillar_pixels(points)
+    if not ok:
+        print(f"[경고] 저장된 기둥 보정을 쓸 수 없습니다: {msg}")
+        return False
+
+    navigator.update_spot_pixels()
+    print(f"[INFO] 저장된 기둥 보정을 불러왔습니다. "
+          f"(기둥 {len(points)}개, {saved_size[0]}x{saved_size[1]})")
+    return True
 
 
 def open_camera():

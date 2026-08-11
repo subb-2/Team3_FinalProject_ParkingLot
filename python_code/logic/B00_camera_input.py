@@ -269,9 +269,12 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     except Exception:
         pass
 
-    if latest_only:
-        return LatestFrameCamera(cap)
-    return cap
+    # 실제로 잡힌 크기를 카메라 객체에 붙여 둔다.
+    # 저장된 기둥 보정이 이 해상도에서 찍힌 것인지 확인할 때 쓴다.
+    # (좌표가 이미지 픽셀이라 해상도가 다르면 전부 어긋난다)
+    cam = LatestFrameCamera(cap) if latest_only else cap
+    cam.frame_size = (real_w, real_h)
+    return cam
 
 # 카메라 객체
 cap = None
