@@ -465,7 +465,8 @@ def build_pipeline(cap):
     # /calibrate가 config/pillar_pixels.json에 저장은 하고 있었는데 아무도
     # 읽지 않아서, 실행할 때마다 기둥 10개를 다시 찍어야 했다.
     # 카메라를 옮기거나 해상도를 바꾸면 좌표가 어긋나므로 그때는 다시 찍어야
-    # 한다. 그 경우 /recalibrate로 지우면 된다.
+    # 한다. /recalibrate로 지우고 /calibrate에서 다시 찍으면 된다.
+    # (C_main과 E_main_final 양쪽에 그 경로가 있다)
     from logic.B03_map_setting import load_pillar_pixels
     saved = load_pillar_pixels()
     if saved:

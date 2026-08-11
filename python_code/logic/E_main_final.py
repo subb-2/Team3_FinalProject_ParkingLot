@@ -263,11 +263,28 @@ def main():
         """추적/내비게이션 상태 JSON. (점검용)"""
         return build_status(pipeline)
 
+    @app.route('/recalibrate')
+    def recalibrate():
+        """
+        저장해 둔 기둥 보정을 지우고 처음부터 다시 찍는다.
+
+        보정은 config/pillar_pixels.json에 저장되고 다음 실행부터 자동으로
+        불러온다. 그래서 첫 화면이 더 이상 /calibrate로 넘어가지 않는다.
+        카메라를 옮겼거나 해상도를 바꿨으면 저장된 좌표가 어긋나므로
+        여기로 지우고 다시 찍어야 한다.
+        """
+        pipeline.navigator.mapper.reset()
+        from flask import redirect
+        return redirect('/calibrate')
+
     from logic.B03_map_setting import register_map_routes
     import logic.B00_camera_input as b00_camera_input
     register_map_routes(app, pipeline, cap_module=b00_camera_input)
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
-    print(f"  좌표계가 안 잡히면 /calibrate 에서 기둥을 직접 찍으세요.")
+    if pipeline.navigator.mapper.is_ready():
+        print(f"  보정을 다시 하려면 /recalibrate (저장된 좌표를 지우고 다시 찍습니다)")
+    else:
+        print(f"  좌표계가 아직 없습니다. /calibrate 에서 기둥을 직접 찍으세요.")
     print("=" * 46)
 
     try:
