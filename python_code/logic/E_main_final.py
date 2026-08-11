@@ -30,8 +30,7 @@ import os
 import time
 import threading
 
-import cv2
-from flask import Flask, Response, request
+from flask import Flask
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

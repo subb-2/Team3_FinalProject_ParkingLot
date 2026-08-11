@@ -1,7 +1,6 @@
 import cv2
 import os
 import json
-import numpy as np
 
 def load_pillar_pixels():
     """저장된 기둥 픽셀 좌표를 불러온다. 없으면 None."""

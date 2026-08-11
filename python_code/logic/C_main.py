@@ -7,7 +7,7 @@ import threading
 import traceback
 import numpy as np
 from datetime import datetime
-from flask import Flask, Response, request
+from flask import Flask, Response
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -31,7 +31,7 @@ from logic.C01_path_planner import (
 #   - 추적       : B02_car_mot.py        (추적기 선택, FIFO 매칭 등)
 #                  실제 추적기는 config/*.yaml의 tracker_type이 결정한다.
 #                  현재 기본값: OC-SORT + ByteTrack 저신뢰 2차 연관 (config/ocsort.yaml)
-#   - 내비게이션 : C00_navigation.py     (ArUco 마커, 호모그래피, 안내 기준)
+#   - 내비게이션 : C00_navigation.py     (기둥 보정, 좌표 변환, 안내 기준)
 # 여기서는 통합 실행에 필요한 설정만 관리.
 CONFIG = {
     # 카메라 설정
@@ -100,7 +100,7 @@ class ParkingNavigationPipeline:
       - B00_camera_input : 프레임 획득
       - B01_car_detection: YOLO 차량 검출 (모델은 여기 한 곳에서만 로드)
       - B02_car_mot      : MOT 추적(OC-SORT) + FIFO 차량번호 매칭
-      - C00_navigation   : ArUco 마커 기반 실좌표 변환 + 경로 안내
+      - C00_navigation   : 기둥 기반 좌표 변환 + 경로 안내 (C01 경로 계획 사용)
     """
 
     def __init__(self, cap, detector, mot, navigator):
@@ -127,9 +127,8 @@ class ParkingNavigationPipeline:
         Returns:
             (tracks, nav_results) 튜플
 
-        참고: 시각화 전에 내비게이션을 먼저 수행한다.
-              draw_tracks가 프레임에 박스를 그리고 나면 ArUco 마커 검출이
-              방해받을 수 있기 때문이다.
+        참고: 시각화 전에 내비게이션을 먼저 수행한다. 그려 넣은 박스가
+              다음 단계의 판단에 섞이지 않게 하기 위해서다.
         """
         # 각 단계에 걸리는 시간을 잰다. FPS가 떨어졌을 때 어디가 원인인지
         # 추측하지 않고 바로 알 수 있어야 한다. (/status의 stage_ms)
@@ -440,7 +439,7 @@ def build_pipeline(cap):
         on_parked=mark_parked
     )
 
-    # C00 : ArUco 마커 매퍼 + 내비게이터
+    # C00 : 기둥 매퍼 + 내비게이터
     mapper = PillarMapper()
     navigator = ParkingNavigator(
         mapper=mapper,
@@ -460,6 +459,24 @@ def build_pipeline(cap):
         clearance=C01_CONFIG['VEHICLE_CLEARANCE_CM'],
     )
     navigator.planner = RoutePlanner(lot_map, simplify=C01_CONFIG['SIMPLIFY_PATH'])
+
+    # 저장해 둔 기둥 보정을 불러온다.
+    #
+    # /calibrate가 config/pillar_pixels.json에 저장은 하고 있었는데 아무도
+    # 읽지 않아서, 실행할 때마다 기둥 10개를 다시 찍어야 했다.
+    # 카메라를 옮기거나 해상도를 바꾸면 좌표가 어긋나므로 그때는 다시 찍어야
+    # 한다. 그 경우 /recalibrate로 지우면 된다.
+    from logic.B03_map_setting import load_pillar_pixels
+    saved = load_pillar_pixels()
+    if saved:
+        ok, msg = navigator.mapper.set_pillar_pixels(saved)
+        if ok:
+            navigator.update_spot_pixels()
+            print(f"[INFO] 저장된 기둥 보정을 불러왔습니다. (기둥 {len(saved)}개)")
+        else:
+            print(f"[경고] 저장된 기둥 보정을 쓸 수 없습니다: {msg}")
+    else:
+        print("[INFO] 저장된 기둥 보정이 없습니다. /calibrate에서 기둥을 찍어주세요.")
 
     return ParkingNavigationPipeline(cap, detector, mot, navigator)
 

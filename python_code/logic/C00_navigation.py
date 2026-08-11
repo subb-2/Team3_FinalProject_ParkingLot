@@ -207,6 +207,30 @@ class PillarMapper:
         dst = cv2.perspectiveTransform(src, H)
         return float(dst[0][0][0]), float(dst[0][0][1])
 
+    def cm_to_pixel(self, point):
+        """
+        설계 cm 좌표를 이미지 픽셀로 되돌린다. pixel_to_cm의 역변환이다.
+
+        경로 계획(C01)은 cm에서 이뤄지는데 화면은 픽셀로 그린다. 계산한
+        경유점을 화면에 얹으려면 이 변환이 필요하다.
+
+        Args:
+            point: (x_cm, y_cm)
+
+        Returns:
+            (x_px, y_px). 변환을 만들 수 없으면 None.
+        """
+        H = self._pixel_to_cm_matrix()
+        if H is None or point is None:
+            return None
+        try:
+            H_inv = np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            return None
+        src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
+        dst = cv2.perspectiveTransform(src, H_inv.astype(np.float32))
+        return float(dst[0][0][0]), float(dst[0][0][1])
+
     def _pixel_to_cm_matrix(self):
         """pixel_to_cm이 쓸 변환 행렬. 보정이 바뀌면 다시 만든다."""
         if not self.pillar_pixels:
@@ -595,80 +619,79 @@ class ParkingNavigator:
         if not self.mapper.is_ready():
             return results
 
-        # 보정을 마쳤다면 좌표계는 언제나 '이미지 픽셀'이다.
-        # 예전에는 마커 자동 검출로 호모그래피를 잡아 cm로 바로 옮기는 길이
-        # 하나 더 있었지만, 검출을 걷어내면서 그 길은 사라졌다.
-        # cm가 필요한 곳(오주차 판정, 조감도)은 mapper.pixel_to_cm을 쓴다.
+        # 좌표계가 둘이다. 섞으면 안 된다.
         #
-        # 아래 is_pixel_mode 분기가 아직 남아 있는 이유는 경로 계획(C01)
-        # 때문이다. 그쪽은 cm 좌표를 전제로 짜여 있어 지금은 타지 않는다.
-        # 자세한 것은 target_pos 아래 주석 참고.
-        is_pixel_mode = True
+        #   이미지 픽셀 : 화면에 그릴 때 쓴다. (world_pos, target_world, route)
+        #   설계 cm     : 거리와 각도를 잴 때, 그리고 경로를 계획할 때 쓴다.
+        #
+        # 픽셀 공간은 카메라가 비스듬히 보는 만큼 눌려 있다. 이 목업에서는
+        # 가로 6.8px/cm, 세로 3.1px/cm 정도라 세로가 절반 이하로 찌그러진다.
+        # 거기서 잰 각도는 실제 각도가 아니어서 좌회전/우회전 판정이 어긋나고,
+        # 거리도 화면 위치마다 뜻이 달라진다.
+        #
+        # 그래서 계산은 전부 cm로 하고, 그린 결과만 픽셀로 되돌린다.
+        # 기둥이 4개 미만이라 변환을 만들 수 없으면 예전처럼 픽셀로 어림한다.
+        to_cm = self.mapper.pixel_to_cm
+        to_px = self.mapper.cm_to_pixel
+        use_cm = to_cm((0.0, 0.0)) is not None
 
         for trk in tracks:
             car_id = trk.get("car_id")
             image_pos = trk["center"]
-            pos = image_pos
+            pos = image_pos                       # 픽셀 (화면 출력용)
+            pos_cm = to_cm(pos) if use_cm else None
 
-            # 위치 이력 갱신 (보정 좌표계 = 이미지 픽셀)
+            # 위치 이력은 픽셀로 쌓는다. 궤적을 그리는 쪽(D00)이 픽셀을
+            # 전제하고 있어서다. 각도를 잴 때만 cm로 옮긴다.
             key = car_id if car_id else f"track_{trk['track_id']}"
             history = self.world_history.setdefault(
                 key, deque(maxlen=self.history_maxlen)
             )
             history.append(pos)
 
-            heading = self._compute_heading(history)
+            heading = self._compute_heading(history, to_cm if use_cm else None)
             target_spot = self.targets.get(car_id) if car_id else None
-            
-            if target_spot:
-                if is_pixel_mode:
-                    target_pos = self._spot_pixel(target_spot)
-                else:
-                    target_pos = self.spot_world_pos.get(target_spot)
-            else:
-                target_pos = None
 
-            distance = None
+            target_pos = self._spot_pixel(target_spot) if target_spot else None
+            target_cm = self.spot_world_pos.get(target_spot) if target_spot else None
+
             guide = GUIDE_UNKNOWN
             route = None
             route_index = 0
             next_waypoint = None
             maneuver = GUIDE_UNKNOWN
             maneuver_distance = None
+            distance_cm = None
 
             if target_spot and target_pos is not None:
-                if is_pixel_mode:
-                    # 경로 탐색 없이 목적지까지 직선 거리로 안내한다.
-                    #
-                    # !! 남은 일 !! 아래 else가 C01_path_planner를 써서 통로를
-                    # 따라가는 경로를 만드는 쪽인데, cm 좌표를 전제로 짜여 있어
-                    # 지금은 타지 않는다. 살리려면 mapper.pixel_to_cm으로 옮긴
-                    # 뒤 계획하고 결과를 다시 픽셀로 돌려놓아야 한다.
-                    # 그때까지 안내 화면(D00)은 목적지까지 직선을 그린다.
+                if use_cm and pos_cm is not None and target_cm is not None:
+                    # cm에서 통로를 따라가는 경로를 세우고, 그린 결과만 픽셀로.
+                    state = self._ensure_route(car_id, pos_cm, target_spot)
+                    next_cm = None
+                    if state is not None:
+                        route_cm = state["waypoints"]
+                        route_index = state["index"]
+                        if route_index < len(route_cm):
+                            next_cm = route_cm[route_index]
+                        distance_cm = route_length(route_cm, route_index, pos_cm)
+                        maneuver, maneuver_distance = self.compute_maneuver(
+                            route_cm, route_index, pos_cm)
+                        # 화면이 쓸 수 있게 픽셀로 돌려놓는다
+                        route = [to_px(p) or p for p in route_cm]
+                        next_waypoint = to_px(next_cm) if next_cm else None
+                    else:
+                        # 경로를 못 찾았다. 목적지까지 직선 거리로라도 안내한다.
+                        distance_cm = self._distance(pos_cm, target_cm)
+
+                    aim_cm = next_cm if next_cm is not None else target_cm
+                    remaining = self._distance(pos_cm, target_cm)
+                    guide = self._compute_guide(pos_cm, heading, aim_cm, remaining)
+                else:
+                    # 기둥이 모자라 cm 변환이 없다. 픽셀 거리로 어림한다.
+                    # 이때의 '남은 거리'는 실제 cm가 아니다.
                     distance = self._distance(pos, target_pos)
-                    # 픽셀 거리를 cm처럼 보이게 나눠서 넘긴다. 임시 값이라
-                    # 화면에 뜨는 '남은 거리'는 실제 cm가 아니다.
                     distance_cm = distance / 8.0
                     guide = self._compute_guide(pos, heading, target_pos, distance)
-                else:
-                    state = self._ensure_route(car_id, pos, target_spot)
-                    if state is not None:
-                        route = state["waypoints"]
-                        route_index = state["index"]
-                        next_waypoint = route[route_index] if route_index < len(route) else None
-                        distance = route_length(route, route_index, pos)
-                        maneuver, maneuver_distance = self.compute_maneuver(
-                            route, route_index, pos)
-                        distance_cm = distance
-                    else:
-                        distance = self._distance(pos, target_pos)
-                        distance_cm = distance
-                        
-                    aim = next_waypoint if next_waypoint is not None else target_pos
-                    remaining = self._distance(pos, target_pos)
-                    guide = self._compute_guide(pos, heading, aim, remaining)
-            else:
-                distance_cm = None
 
             # 이 차가 이미 주차를 마쳤는지. 안내 대상이 아니므로 target_spot은
             # 비어 있지만, 화면은 '어느 자리에 세워진 차'인지 보여줘야 한다.
@@ -698,7 +721,9 @@ class ParkingNavigator:
                 "maneuver_distance_cm": maneuver_distance,
                 "guide": guide,
                 "guide_text": GUIDE_TEXT_KO.get(guide, guide),
-                "nearest_spot": self.mapper.find_nearest_spot_pixel(image_pos) if is_pixel_mode else self.find_nearest_spot(pos),
+                # 가장 가까운 자리는 픽셀 공간에서 찾는다. 자리의 픽셀 좌표는
+                # 보정에서 바로 나온 값이라 변환을 한 번 덜 거친다.
+                "nearest_spot": self.mapper.find_nearest_spot_pixel(image_pos),
             })
 
         return results
@@ -790,12 +815,21 @@ class ParkingNavigator:
             return GUIDE_STRAIGHT, dist
         return (GUIDE_RIGHT if diff > 0 else GUIDE_LEFT), dist
 
-    def _compute_heading(self, history):
+    def _compute_heading(self, history, to_cm=None):
         """
         최근 위치 이력으로 차량의 진행 방향(도)을 계산.
 
         좌표계가 y축 아래 방향(+)이므로, 각도는 시계 방향으로 증가한다.
         (0도 = 오른쪽, 90도 = 아래쪽)
+
+        Args:
+            history: 위치 이력 deque (이미지 픽셀)
+            to_cm:   픽셀 -> cm 변환 함수. 주면 cm에서 각도를 잰다.
+
+        각도는 반드시 cm에서 재야 한다. 픽셀 공간은 카메라 각도만큼 눌려
+        있어서 같은 90도 회전이 화면에서는 60도로도 120도로도 보인다.
+        그대로 쓰면 좌회전/우회전 판정이 어긋난다. 이동량 임계값
+        (MIN_MOVE_CM_FOR_HEADING)도 cm 기준이라 픽셀에 대면 뜻이 없다.
 
         Returns:
             진행 방향 각도. 이동량이 너무 적으면 None.
@@ -805,6 +839,10 @@ class ParkingNavigator:
 
         recent = list(history)[-self.heading_window:]
         start, end = recent[0], recent[-1]
+        if to_cm is not None:
+            start = to_cm(start) or start
+            end = to_cm(end) or end
+
         dx, dy = end[0] - start[0], end[1] - start[1]
 
         # 정지 상태에서는 방향을 신뢰할 수 없음

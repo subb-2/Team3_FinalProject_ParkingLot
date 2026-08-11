@@ -40,7 +40,7 @@ CONFIG = {
 
     # 맵에 격자 배경(벽/도로/기둥)을 그릴지 여부
     "SHOW_LAYOUT": True,
-    "SHOW_PILLAR_ID": True,     # 기둥에 ArUco 마커 ID 표시
+    "SHOW_PILLAR_ID": True,     # 기둥에 번호 표시 (보정에서 클릭하는 순서)
 
     # 표시 옵션
     "SHOW_GRID": True,          # 배경 격자 표시
@@ -108,7 +108,7 @@ COLOR_SPOT_BY_TYPE = {
     SPOT4: (120, 220, 120),   # 전기차 - 초록
 }
 COLOR_ROAD        = (44, 44, 46)     # 도로 (통로)
-COLOR_PILL        = (74, 80, 92)     # 기둥 (ArUco 마커 위치) - 콘크리트 느낌
+COLOR_PILL        = (74, 80, 92)     # 기둥 - 콘크리트 느낌
 COLOR_PILL_EDGE   = (105, 118, 138)  # 기둥 테두리
 COLOR_PILL_TEXT   = (150, 175, 205)  # 기둥의 마커 ID
 COLOR_VEHICLE     = (0, 230, 0)      # 차량 (번호 매칭됨)
