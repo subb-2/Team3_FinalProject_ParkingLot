@@ -124,15 +124,27 @@ CONFIG = {
 }
 
 
-# A*가 쓰는 8방향 이동과 그 비용 (dc, dr, 한 칸 비용).
+# A*가 쓰는 이동 방향과 그 비용 (dc, dr, 한 칸 비용).
 # dc가 +x(오른쪽), dr이 +y(아래쪽)이다.
 # 일방통행 방향장(OneWayField)이 이 목록 그대로 판정표를 구워두므로,
 # 여기를 고치면 그쪽도 자동으로 따라간다.
+#
+# 대각선을 뺐다. 4방향만 쓴다.
+#
+# 대각선을 넣으면 통로를 비스듬히 가로지르는 경로가 나온다. 계산상으로는
+# 그쪽이 짧지만, 실제 주차장에서 사람이 그렇게 몰지 않고 화면에 그려지는
+# 선도 '어디서 꺾으라는 것인지' 읽히지 않는다. 4방향이면 가로/세로 구간만
+# 남아서 "직진 후 좌회전" 형태로 떨어진다.
+#
+# 대각선을 다시 넣으려면 아래 두 곳이 함께 따라와야 한다.
+#   - RoutePlanner._astar의 휴리스틱 (지금은 맨해튼 거리)
+#   - RoutePlanner._can_shortcut의 가로/세로 검사
 MOVES = [
     (1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
-    (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)),
-    (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2)),
 ]
+
+# 위 목록에 대각선이 들어 있는가. 휴리스틱과 경로 단순화가 이 값을 본다.
+HAS_DIAGONAL = any(dc and dr for dc, dr, _ in MOVES)
 
 
 def bresenham_cells(cell_a, cell_b):
@@ -610,8 +622,15 @@ class RoutePlanner:
 
     def _astar(self, start, goal):
         """A*로 격자 경로를 탐색. 경로가 없으면 None."""
-        def h(c):
-            return math.hypot(c[0] - goal[0], c[1] - goal[1])
+        if HAS_DIAGONAL:
+            def h(c):
+                return math.hypot(c[0] - goal[0], c[1] - goal[1])
+        else:
+            # 4방향만 쓰면 맨해튼 거리가 정확한 하한이다. 직선거리를 쓰면
+            # 하한이 느슨해져 A*가 훨씬 넓게 탐색한다. (계획 시간이 몇 배)
+            # 차선 비용은 늘 0 이상이라 이 하한은 그대로 유효하다.
+            def h(c):
+                return abs(c[0] - goal[0]) + abs(c[1] - goal[1])
 
         open_heap = [(h(start), 0.0, start)]
         came_from = {start: None}
@@ -637,7 +656,8 @@ class RoutePlanner:
                 if not self.lot_map.is_free(nxt):
                     continue
 
-                # 대각선 이동 시 모서리를 뚫고 지나가지 않도록 확인
+                # 대각선 이동 시 모서리를 뚫고 지나가지 않도록 확인.
+                # (지금 MOVES는 4방향이라 걸리지 않는다. 대각선을 되살릴 때 필요)
                 if dc and dr:
                     if not (self.lot_map.is_free((current[0] + dc, current[1]))
                             and self.lot_map.is_free((current[0], current[1] + dr))):
@@ -767,11 +787,17 @@ class RoutePlanner:
         마지막 구간처럼 원래도 차선 밖이던 곳은 값이 비슷하므로 그대로 펴진다.
         """
         cell_a, cell_b = cells[i], cells[j]
-        if self.one_way is None:
-            return self.lot_map.line_of_sight(cell_a, cell_b)
-
         dc = cell_b[0] - cell_a[0]
         dr = cell_b[1] - cell_a[1]
+
+        # 4방향으로 계획했으면 지름길도 가로/세로여야 한다.
+        # 이걸 빼면 계단 모양을 편다면서 대각선 구간을 만들어, 대각선을
+        # 없앤 의미가 사라진다. (MOVES 주석 참고)
+        if not HAS_DIAGONAL and dc and dr:
+            return False
+
+        if self.one_way is None:
+            return self.lot_map.line_of_sight(cell_a, cell_b)
 
         line = []
         for cell in bresenham_cells(cell_a, cell_b):
