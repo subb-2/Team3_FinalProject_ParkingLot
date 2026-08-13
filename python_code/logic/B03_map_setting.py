@@ -8,15 +8,22 @@ PILLAR_FILE = os.path.join(
 
 def save_pillar_pixels(points, frame_size=None):
     """
-    기둥 픽셀 좌표를 '찍을 때의 해상도'와 함께 저장한다.
+    기둥 픽셀 좌표를 '찍을 때의 해상도와 화면 방향'과 함께 저장한다.
 
     해상도를 같이 적는 것이 중요하다. 좌표가 이미지 픽셀이라 해상도가
     달라지면 전부 어긋나는데, 기록이 없으면 다음 실행에서 그 사실을 알
     방법이 없어 틀린 좌표를 그대로 불러 쓰게 된다.
+
+    화면 방향(B00.FRAME_ORIENTATION)도 같은 이유로 적는다. 이쪽이 더
+    위험하다. 방향만 바꾸면 해상도는 그대로라 위 검사에 걸리지 않고,
+    화면은 멀쩡해 보이는데 자리 좌표만 180도 뒤집힌 채로 돈다.
     """
     import json as _json
+    from logic.B00_camera_input import FRAME_ORIENTATION
+
     os.makedirs(os.path.dirname(os.path.abspath(PILLAR_FILE)), exist_ok=True)
-    data = {"points": {str(k): list(v) for k, v in points.items()}}
+    data = {"points": {str(k): list(v) for k, v in points.items()},
+            "orientation": FRAME_ORIENTATION}
     if frame_size:
         data["width"], data["height"] = int(frame_size[0]), int(frame_size[1])
     with open(PILLAR_FILE, 'w') as f:
@@ -28,11 +35,12 @@ def load_pillar_pixels():
     저장된 기둥 픽셀 좌표를 불러온다.
 
     Returns:
-        {"points": {번호: (x, y)}, "width": int|None, "height": int|None}
+        {"points": {번호: (x, y)}, "width": int|None, "height": int|None,
+         "orientation": str|None}
         파일이 없거나 읽을 수 없으면 None.
 
-    해상도를 적기 전에 저장된 옛 파일은 width/height가 None이다.
-    그 좌표가 지금 해상도에서 찍힌 것인지 알 수 없으므로, 부르는 쪽이
+    해상도/방향을 적기 전에 저장된 옛 파일은 그 값이 None이다.
+    그 좌표가 지금 화면에서 찍힌 것인지 알 수 없으므로, 부르는 쪽이
     쓰지 않고 재보정을 요구해야 한다.
     """
     import json as _json
@@ -44,10 +52,12 @@ def load_pillar_pixels():
         if "points" in data:
             raw = data["points"]
             width, height = data.get("width"), data.get("height")
+            orientation = data.get("orientation")
         else:
-            raw, width, height = data, None, None   # 해상도 없던 옛 형식
+            # 해상도/방향을 적기 전의 옛 형식
+            raw, width, height, orientation = data, None, None, None
         return {"points": {int(k): tuple(v) for k, v in raw.items()},
-                "width": width, "height": height}
+                "width": width, "height": height, "orientation": orientation}
     except Exception as e:
         print(f"[경고] 기둥 픽셀 좌표 로드 실패: {e}")
         return None

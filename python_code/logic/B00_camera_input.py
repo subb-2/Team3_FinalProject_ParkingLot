@@ -49,6 +49,66 @@ JPEG_QUALITY = 75
 JPEG_PARAMS = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
 
 
+# 카메라가 거꾸로 달려 있을 때 프레임을 돌린다.
+#
+#   None    : 그대로
+#   "180"   : 180도 회전 (위아래 + 좌우가 함께 뒤집힌다)
+#   "v"     : 위아래만 뒤집기 (거울상이 된다)
+#   "h"     : 좌우만 뒤집기 (거울상이 된다)
+#
+# 지금은 "180"이다. 카메라가 주차장을 입출구 반대편에서 보고 있어서, 화면에
+# 입구가 위쪽에 오고 좌우도 설계 배치와 반대로 잡혔다. 그래서 3번 격자와
+# 4번 안내 화면(둘 다 설계 좌표계다)을 볼 때마다 머릿속에서 뒤집어야 했다.
+#
+# 왜 "v"가 아니라 "180"인가: 위아래만 뒤집으면 거울상이 되어 글자와 바닥
+# 화살표가 반대로 보인다. 카메라를 반대편으로 옮겨 단 것과 같은 결과를
+# 내려면 180도 회전이 맞다. 그래야 좌우도 설계와 같아진다.
+#
+# 주의: 이 값을 바꾸면 픽셀 좌표가 전부 달라진다. 저장된 기둥 보정은
+#       쓸 수 없으므로 다시 찍어야 한다. (보정 파일에 이 값을 함께 적어두고
+#       C_main._load_saved_calibration이 다르면 거부한다)
+FRAME_ORIENTATION = "180"
+
+_ORIENT_OPS = {
+    "180": lambda f: cv2.rotate(f, cv2.ROTATE_180),
+    "v":   lambda f: cv2.flip(f, 0),
+    "h":   lambda f: cv2.flip(f, 1),
+}
+
+
+def orient_frame(frame, mode=None):
+    """
+    설정에 맞춰 프레임을 돌린다. 모르는 값이면 그대로 둔다.
+
+    카메라에서 읽자마자 한 곳에서만 적용한다. 검출/추적/보정/화면이 전부
+    같은 프레임을 봐야 좌표가 어긋나지 않기 때문이다. 화면에 그릴 때만
+    돌리면 보정에서 찍은 좌표와 검출 좌표가 서로 뒤집힌 상태가 된다.
+    """
+    op = _ORIENT_OPS.get(FRAME_ORIENTATION if mode is None else mode)
+    return frame if op is None else op(frame)
+
+
+class _OrientedCapture:
+    """
+    VideoCapture를 그대로 감싸되 read()에만 방향 보정을 끼운다.
+
+    LatestFrameCamera를 쓰지 않는 경로(latest_only=False)를 위한 것이다.
+    나머지 메서드는 원본에 그대로 넘긴다.
+    """
+
+    def __init__(self, cap):
+        self._cap = cap
+
+    def read(self, *args, **kwargs):
+        ok, frame = self._cap.read(*args, **kwargs)
+        if not ok or frame is None:
+            return ok, frame
+        return ok, orient_frame(frame)
+
+    def __getattr__(self, name):
+        return getattr(self._cap, name)
+
+
 class LatestFrameCamera:
     """
     VideoCapture를 전담 스레드로 계속 비워서 '가장 최신 프레임'만 들고 있는 래퍼.
@@ -98,6 +158,11 @@ class LatestFrameCamera:
                     self._alive = False
                     self._cond.notify_all()
                 break
+
+            # 방향 보정은 여기 한 곳에서만 한다. 아래로 내려가는 모든 곳
+            # (검출/추적/보정 클릭/화면)이 같은 프레임을 봐야 한다.
+            frame = orient_frame(frame)
+
             with self._cond:
                 # 아직 아무도 안 가져간 프레임 위에 덮어쓰면 그건 버려진 것이다.
                 # 이 수가 크면 처리 속도가 카메라를 못 따라가고 있다는 뜻.
@@ -285,7 +350,10 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     # 실제로 잡힌 크기를 카메라 객체에 붙여 둔다.
     # 저장된 기둥 보정이 이 해상도에서 찍힌 것인지 확인할 때 쓴다.
     # (좌표가 이미지 픽셀이라 해상도가 다르면 전부 어긋난다)
-    cam = LatestFrameCamera(cap) if latest_only else cap
+    # latest_only=False로 받아 가는 쪽도 방향 보정은 똑같이 받아야 한다.
+    # 여기서 갈라지면 그 경로만 뒤집히지 않은 프레임을 보게 되고, 보정 좌표와
+    # 검출 좌표가 서로 뒤집힌 상태가 되어 원인을 찾기 어렵다.
+    cam = LatestFrameCamera(cap) if latest_only else _OrientedCapture(cap)
     cam.frame_size = (real_w, real_h)
     return cam
 

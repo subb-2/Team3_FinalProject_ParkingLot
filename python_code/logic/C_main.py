@@ -579,6 +579,17 @@ def _load_saved_calibration(navigator, frame_size):
               "/calibrate 에서 다시 찍어주세요.")
         return False
 
+    # 화면 방향이 바뀌었으면 해상도는 그대로라 위 검사에 걸리지 않는다.
+    # 그대로 쓰면 화면은 멀쩡한데 자리 좌표만 통째로 뒤집힌 채 돈다.
+    from logic.B00_camera_input import FRAME_ORIENTATION
+    if saved.get("orientation") != FRAME_ORIENTATION:
+        print(f"[경고] 저장된 기둥 보정은 화면 방향 "
+              f"'{saved.get('orientation')}'에서 찍은 것인데 "
+              f"지금 설정은 '{FRAME_ORIENTATION}'입니다.")
+        print("       해상도는 같아도 좌표가 전부 어긋납니다. "
+              "/calibrate 에서 다시 찍어주세요.")
+        return False
+
     ok, msg = navigator.mapper.set_pillar_pixels(points)
     if not ok:
         print(f"[경고] 저장된 기둥 보정을 쓸 수 없습니다: {msg}")
