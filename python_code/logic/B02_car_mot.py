@@ -110,6 +110,23 @@ CONFIG = {
         # 0으로 두면 비활성화되고 오로지 도착 판정으로만 해제된다.
         "STUCK_RELEASE_SEC": 15.0,
 
+        # 위 시간만으로 해제하면 안 된다. '멈춰 있다'와 '주차했다'는 다르다.
+        #
+        # 예전에는 시간만 보고 해제해서, 통로 한복판에 세워둔 차도 곧바로
+        # '다른 곳에 주차 완료'로 처리됐다. 그러면 그 차의 안내가 끝나고
+        # 다음 차가 들어오는데, 정작 통로는 막혀 있다. 관제 화면에는
+        # '주차 자리를 파악하지 못했습니다'만 뜨고 무엇을 해야 하는지는
+        # 아무도 모른다.
+        #
+        # 그래서 조건을 하나 더 건다. 멈춘 자리가 '차를 댈 수 있는 빈 구역'
+        # 근처일 때만 주차로 인정한다. 그 밖에서 멈춘 것은 길에 선 것이므로
+        # 안내를 유지한 채 계속 기다린다.
+        #
+        # 값은 자리 중심에서의 거리(cm)다. E00의 오주차 자리 판정
+        # (MISPARK_MAX_DIST_CM)이 이 값을 그대로 쓴다. 둘이 다르면 B02는
+        # 주차로 인정했는데 E00은 어느 자리인지 모르는 회색지대가 생긴다.
+        "STUCK_SPOT_RADIUS_CM": 10.0,
+
         # 이미 주차된 차를 그 자리의 트랙에 묶을 때 쓰는 반경(cm).
         #
         # INITIAL_PARKED로 미리 세워둔 차나 안내를 마친 차는 cars_info에만
@@ -501,6 +518,12 @@ class CarMOT:
         self.parked_lock = {}
         self._parked_cars = set()
 
+        # 이번 프레임 기준 '차를 댈 수 있는 빈 구역' {구역ID: (x, y)}.
+        # 정지한 차를 주차로 인정할지 가리는 데 쓴다. (_check_stuck)
+        self._free_spots = {}
+        # 길에 멈춰 있다고 이미 알린 차량번호. 같은 줄을 매 프레임 찍지 않는다.
+        self._stuck_warned = set()
+
         # 지금 안내 중인 차량번호. 주차를 마치면 None으로 돌아간다.
         self.active_car_id = None
         # 목표 반경 안에 처음 들어온 시각 (ARRIVAL_HOLD_SEC 판정용)
@@ -532,7 +555,8 @@ class CarMOT:
                   f"주차 판정 반경 {self.single['ARRIVAL_RADIUS_CM']}cm / "
                   f"{self.single['ARRIVAL_HOLD_SEC']}초 유지")
 
-    def update(self, detections, to_world=None, target_of=None, parked_of=None):
+    def update(self, detections, to_world=None, target_of=None, parked_of=None,
+               free_spots_of=None):
         """
         검출 결과를 추적하고, 트랙에 차량 번호를 매칭.
 
@@ -555,6 +579,12 @@ class CarMOT:
                         targets/spot_world_pos를 엮어서 넘긴다.
                         None이면 도착 판정을 할 수 없으므로 STUCK_RELEASE_SEC
                         (정지 시간) 기준으로만 활성 차량이 해제된다.
+            free_spots_of: {구역ID: (x_cm, y_cm)}를 돌려주는 함수.
+                        '차가 서 있지 않은 주차구역' 목록이다. 좌표계는
+                        to_world와 같아야 한다.
+                        안내 중인 차가 오래 멈췄을 때 그 자리가 주차구역인지
+                        가리는 데 쓴다. 주지 않으면 예전처럼 시간만으로
+                        해제한다. (_check_stuck 참고)
             parked_of:  {차량번호: (x_cm, y_cm)}를 돌려주는 함수.
                         '이미 그 자리에 세워져 있는 차'의 목록이다.
                         그 자리 근처에 서 있는 트랙을 찾아 차량번호를 묶는다.
@@ -638,6 +668,7 @@ class CarMOT:
 
         # 3) 활성 차량(움직이는 차) 결합 및 주차 완료 판정.
         #    이 규칙이 가장 강하므로 재바인딩/FIFO보다 먼저 처리한다.
+        self._free_spots = free_spots_of() if free_spots_of is not None else {}
         if self.single_enable:
             self._update_active_binding(tracks, alive_ids, now, target_of)
 
@@ -1049,13 +1080,13 @@ class CarMOT:
             # 호모그래피가 아직 없거나 목표 구역이 배정되지 않았다.
             # 도착 판정을 할 수 없으므로 안전장치에 맡긴다.
             self._arrived_since = None
-            self._check_stuck(now)
+            self._check_stuck(track_id, now)
             return
 
         distance = self._distance_to_target(world, target)
         if distance > self.single['ARRIVAL_RADIUS_CM']:
             self._arrived_since = None      # 반경을 벗어났으면 처음부터 다시
-            self._check_stuck(now)
+            self._check_stuck(track_id, now)
             return
 
         if self._arrived_since is None:
@@ -1063,7 +1094,7 @@ class CarMOT:
         elif now - self._arrived_since >= self.single['ARRIVAL_HOLD_SEC']:
             self._release_active(f"목표 구역 {distance:.1f}cm 이내 도착")
 
-    def _check_stuck(self, now):
+    def _check_stuck(self, track_id, now):
         """
         도착 판정이 되지 않는 채로 오래 정지해 있으면 강제로 해제한다.
 
@@ -1071,13 +1102,60 @@ class CarMOT:
         않으면, 이 장치가 없을 때 활성 차량이 영영 해제되지 않아 다음 차가
         번호를 받지 못한다. SINGLE_ACTIVE['STUCK_RELEASE_SEC']를 0으로 두면
         비활성화되고 오로지 도착 판정으로만 해제된다.
+
+        단, 시간만으로 해제하지 않는다. '멈춰 있다'와 '주차했다'는 다르다.
+        멈춘 자리가 빈 주차구역 근처(STUCK_SPOT_RADIUS_CM)일 때만 주차로
+        인정하고, 통로 한복판에서 멈춘 것은 길에 선 것으로 보아 안내를
+        유지한 채 계속 기다린다.
+
+        빈 구역 목록을 받지 못했으면(단독 실행 등) 예전처럼 시간만으로 해제한다.
+        판단할 재료가 없는데 영영 안 풀리게 두면 다음 차가 막힌다.
         """
         limit = self.single.get('STUCK_RELEASE_SEC', 0)
         if not limit or self._active_moved_at is None:
             return
+
         stopped_for = now - self._active_moved_at
-        if stopped_for >= limit:
+        if stopped_for < limit:
+            return
+
+        if not self._free_spots:
             self._release_active(f"{stopped_for:.0f}초간 정지 (도착 판정 실패)")
+            return
+
+        spot_id, dist = self._nearest_free_spot(track_id)
+        if spot_id is None:
+            # 길에 멈춰 있다. 주차로 처리하면 통로가 막힌 채로 다음 차가 들어온다.
+            if self.active_car_id not in self._stuck_warned:
+                self._stuck_warned.add(self.active_car_id)
+                print(f"[활성] 차량번호 '{self.active_car_id}'가 "
+                      f"{stopped_for:.0f}초간 멈춰 있지만 주차구역이 아닙니다. "
+                      f"안내를 유지합니다.")
+            return
+
+        self._release_active(
+            f"{stopped_for:.0f}초간 정지, {spot_id}에서 {dist:.1f}cm (다른 자리에 주차)")
+
+    def _nearest_free_spot(self, track_id):
+        """
+        차가 지금 서 있는 곳에서 가장 가까운 빈 주차구역.
+
+        Returns:
+            (구역ID, 거리cm). 반경(STUCK_SPOT_RADIUS_CM) 안에 없으면 (None, None).
+        """
+        world = self.last_states.get(track_id, {}).get("world")
+        if world is None:
+            return None, None
+
+        radius = self.single.get('STUCK_SPOT_RADIUS_CM', 10.0)
+        best_id, best_dist = None, None
+        for spot_id, pos in self._free_spots.items():
+            dist = math.hypot(world[0] - pos[0], world[1] - pos[1])
+            if dist > radius:
+                continue
+            if best_dist is None or dist < best_dist:
+                best_id, best_dist = spot_id, dist
+        return best_id, best_dist
 
     def _release_active(self, reason):
         """
@@ -1096,6 +1174,7 @@ class CarMOT:
         self.active_car_id = None
         self._arrived_since = None
         self._active_moved_at = None
+        self._stuck_warned.discard(car_id)
 
         if car_id is not None and self.on_parked is not None:
             self.on_parked(car_id)

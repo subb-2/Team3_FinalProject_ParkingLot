@@ -211,15 +211,33 @@ class ParkingNavigationPipeline:
                         if sp:
                             res[car] = (sp[0] / px_per_cm, sp[1] / px_per_cm)
                 return res
+
+            def free_spots_func():
+                """
+                차가 서 있지 않은 주차구역.
+
+                B02가 '오래 멈춘 차를 주차로 볼 것인가'를 가릴 때 쓴다.
+                주차를 마친 차가 차지한 자리만 뺀다. 배정만 되고 아직 오는 중인
+                자리는 남겨야 한다. 그 자리는 실제로 비어 있고, 안내받던 차가
+                제 자리에 늦게 도착한 경우도 여기서 걸러져야 하기 때문이다.
+                """
+                from data.car_data import cars_info
+                taken = {info.get("spot_id") for info in cars_info.values()
+                         if info.get("parked")}
+                return {spot_id: (sp[0] / px_per_cm, sp[1] / px_per_cm)
+                        for spot_id, sp in mapper.spot_pixels.items()
+                        if spot_id not in taken}
         else:
             to_world_func = None
             parked_of_func = dict      # 보정 전 : 빈 목록
+            free_spots_func = dict
 
         tracks = self.mot.update(
             detections,
             to_world=to_world_func,
             target_of=self.navigator.get_target_rect,
-            parked_of=parked_of_func
+            parked_of=parked_of_func,
+            free_spots_of=free_spots_func
         )
         t_track = time.perf_counter()
 
