@@ -20,7 +20,7 @@ CONFIG = {
     # 추적을 살리는데, 여기서 미리 걸러버리면 그 박스가 추적기까지 오지 못해
     # 기능이 죽는다.
     #
-    # !! 중요 !! 이 값은 config/ocsort.yaml의 track_low_thresh(0.05)보다
+    # 이 값은 config/ocsort.yaml의 track_low_thresh(0.05)보다
     # 낮거나 같아야 한다. 0.25로 두면 저신뢰 버킷 [0.05, 0.4) 중 실제로는
     # [0.25, 0.4)만 존재하게 되어, 손에 가려져 conf가 0.1~0.2로 떨어진 박스가
     # 추적기에 도달조차 못 한다. (가림 구간 ID 스위치의 주된 원인)
@@ -34,7 +34,7 @@ CONFIG = {
     #   키우면 : 작은 물체(멀리 있는 차, 장난감 차)를 더 잘 잡지만 FPS가 떨어짐.
     #   줄이면 : 빨라지지만 작은 물체를 놓친다
     #
-    # !! 중요 !! MODEL_PATH가 .engine(TensorRT)이면 이 값을 마음대로 바꿀 수 없음.
+    # MODEL_PATH가 .engine(TensorRT)이면 이 값을 마음대로 바꿀 수 없다.
     # 엔진은 빌드할 때 입력 크기가 고정되므로, 다른 값을 주면 추론 시 매 프레임 AssertionError가 나고 스트리밍이 끊긴다.
     # 즉, 해상도를 올리려면 엔진을 그 크기로 다시 export해야 한다.
     #   yolo export model=yolov8s.pt format=engine imgsz=1280
@@ -49,33 +49,26 @@ CONFIG = {
     "CAM_FPS": 30                   # 카메라 프레임레이트
 }
 
-# COCO 데이터셋 기준 차량 관련 클래스 ID
-# 2: car, 3: motorcycle, 5: bus, 7: truck
-# VEHICLE_CLASS_IDS = {2, 3, 5, 7}
-# VEHICLE_CLASS_NAMES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
-
-#fine tuning
+# 검출 클래스.
+# 직접 촬영해 라벨링한 데이터셋으로 파인튜닝한 1클래스 모델이라 car 하나뿐이다.
+# COCO 사전학습 모델로 되돌리려면 {2: car, 3: motorcycle, 5: bus, 7: truck}으로
+# 바꾸고 BOX_COLORS도 함께 늘릴 것.
 VEHICLE_CLASS_IDS = {0}
 VEHICLE_CLASS_NAMES = {0: "Car"}
 
 # Bounding Box 색상 (BGR)
-# BOX_COLORS = {
-#     2: (0, 255, 0),    # Car       - 초록
-#     3: (0, 165, 255),  # Motorcycle - 주황
-#     5: (255, 0, 0),    # Bus       - 파랑
-#     7: (0, 0, 255),    # Truck     - 빨강
-# }
 BOX_COLORS = {
     0: (0, 255, 0),  # Car - 초록색
 }
 DEFAULT_COLOR = (0, 255, 255)
 
 
-# CarDetector 클래스 - 차량 검출 전용
 class CarDetector:
     """
-    YOLOv8s COCO Pretrained 모델을 사용한 차량 검출 클래스.
-    검출 전용이며, 추적(Tracking)은 포함하지 않음.
+    YOLOv8 기반 차량 검출기.
+
+    검출만 담당한다. 추적은 B02_car_mot이 맡고, 이 클래스는 검출 결과를
+    돌려주기만 한다. 모델은 프로젝트 전체에서 여기 한 곳에서만 로드한다.
     """
 
     def __init__(self, model_path=None, conf=None, iou=None, imgsz=None):
@@ -192,7 +185,7 @@ class CarDetector:
 if __name__ == '__main__':
     print("==========================================")
     print(" B01 : 차량 객체 검출 (Car Detection)")
-    print(" 모델 : YOLOv8s (COCO Pretrained)")
+    print(f" 모델 : {CONFIG['MODEL_PATH']}")
     print("==========================================")
 
     # 카메라 열기 (B00_camera_input 모듈 활용)

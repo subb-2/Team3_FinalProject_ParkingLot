@@ -155,10 +155,22 @@ CONFIG = {
         # 1초씩 'WAIT'로 떠 있으면 내비게이션이 그만큼 끊기기 때문이다.
         "MIN_HITS": 3,
 
-        # 유령을 유지할 시간(초). 이보다 오래 안 보이면 다른 차로 간주한다.
-        # 추적기의 track_buffer(60프레임 = 30fps에서 2초)보다 길게 두어야
-        # 추적기가 포기한 뒤의 구간을 이 레이어가 이어받는다.
+        # 유령을 유지할 최소 시간(초). 이보다 오래 안 보이면 다른 차로 간주한다.
+        #
+        # 이 값만으로 정해지지 않는다. 실제 수명은
+        #   max(MAX_GAP_SEC, track_buffer x 실측 프레임간격 + GHOST_MARGIN_SEC)
+        # 이고, CarMOT._ghost_lifetime()이 매 프레임 다시 계산한다.
+        #
+        # 이유: 유령은 '추적기가 트랙을 포기한 뒤'를 이어받으려고 만든 것이다.
+        # 그런데 추적기의 포기 시점(track_buffer)은 프레임 단위라 프레임레이트에
+        # 따라 초가 달라진다. 30fps에서 60프레임은 2초지만 9.5fps에서는 6.3초다.
+        # 여기 3.0초를 그대로 쓰면 유령이 추적기보다 먼저 죽어서, 정작 이어받아야
+        # 할 구간에 비교 대상이 없다. (실제로 그래서 이 레이어가 통째로 죽어 있었다)
         "MAX_GAP_SEC": 3.0,
+
+        # 추적기가 트랙을 버린 뒤 유령을 더 붙들고 있을 시간(초).
+        # 버리는 그 순간에 딱 맞춰 유령도 사라지면 승계할 틈이 없다.
+        "GHOST_MARGIN_SEC": 2.0,
 
         # 도달 가능 거리 판정. 실좌표(cm)를 쓸 수 있으면 그쪽을 쓴다.
         # (C_main처럼 C00의 호모그래피가 준비된 경우. B_main 단독이면 픽셀 기준)
@@ -168,12 +180,23 @@ CONFIG = {
         "MARGIN_PX": 60.0,
 
         # 도달 반경 상한. 시간에 비례해 반경을 넓히기만 하면, 오래 안 보인
-        # 차일수록 판정이 헐거워져 결국 아무 차나 붙는다.
-        # 현재 주차장 목업이 40 x 140cm이므로 3초 gap의 100cm는 사실상
-        # 무제한이다. 그래서 gap과 무관한 상한을 따로 둔다.
-        # 주차장을 키우면 C02의 CELL_W/H_CM과 함께 이 값도 조정할 것.
+        # 차일수록 판정이 헐거워져 결국 아무 차나 붙는다. 그래서 gap과 무관한
+        # 상한을 따로 둔다. 주차장을 키우면 C02의 CELL_W/H_CM과 함께 조정할 것.
         "MAX_REACH_CM": 60.0,
         "MAX_REACH_PX": 400.0,
+
+        # 지금 안내 중인 차(활성 차량)의 유령에만 적용하는 상한.
+        #
+        # 위 상한을 따로 두는 이유는 '엉뚱한 차에 붙는 것'을 막기 위해서인데,
+        # 활성 차량에는 그 걱정이 훨씬 작다. 이 시스템의 운영 전제가
+        # '동시에 움직이는 차는 1대'라서, 안내 중인 차의 트랙이 끊긴 상황에서
+        # 나타난 차는 사실상 그 차다. 반대로 상한이 좁으면 흔한 경우를 놓친다.
+        # 검출이 4초 끊긴 사이 차가 69cm를 갔을 뿐인데 60cm 상한에 걸려
+        # 승계가 실패하고 안내가 통째로 끊겼다. (주차장이 120 x 140cm다)
+        #
+        # 그래서 활성 차량은 주차장을 가로지를 수 있는 만큼 열어 두고,
+        # 물리적 한계는 속도 기준(MAX_SPEED_CM_S x gap)에 맡긴다.
+        "MAX_REACH_ACTIVE_CM": 150.0,
     },
 }
 
@@ -396,6 +419,11 @@ class CarMOT:
         self.tracker_type = cfg.tracker_type
         self.tracker = tracker_cls(cfg)
 
+        # 새 트랙을 만들 최소 신뢰도. yaml이 정하는 값인데, 화면에 '이 박스는
+        # 임계값에 못 미쳐서 트랙이 안 생겼다'를 표시하려면 밖에서도 알아야 한다.
+        # (C_main의 /rawdet 오버레이가 읽는다)
+        self.new_track_thresh = getattr(cfg, 'new_track_thresh', None)
+
         # 저신뢰(track_low_thresh) 2차 연관이 실제로 도는지 여부.
         # ByteTrack은 그 단계가 알고리즘 자체라 항상 켜져 있고,
         # OC-SORT는 use_byte로 켜고 끈다. ultralytics 기본값이 False라서,
@@ -436,6 +464,13 @@ class CarMOT:
         self.rebind = dict(CONFIG['REBIND'] if rebind is None else rebind)
         self.rebind_enable = bool(self.rebind.get('ENABLE', True))
 
+        # 프레임 간격 실측(초). 유령 수명을 추적기의 track_buffer에 맞추는 데 쓴다.
+        # lost_ttl은 '프레임', 유령 수명은 '초'라서 둘을 이으려면 이 값이 필요하다.
+        # 설정에 적힌 fps를 믿지 않고 재는 이유: 검출이 무거워 실제 처리 속도가
+        # 카메라 fps의 3분의 1까지 떨어진다. 그 차이가 곧 유령 수명의 차이다.
+        self._frame_interval = None
+        self._last_update_at = None
+
         # Track ID -> 마지막으로 관측된 상태
         #   {"center": (cx,cy), "bbox": [...], "world": (x_cm,y_cm)|None, "time": float}
         self.last_states = {}
@@ -451,6 +486,20 @@ class CarMOT:
 
         # 안내가 끝났을 때 알려줄 콜백 (A01.mark_parked)
         self.on_parked = on_parked
+
+        # --- 주차 완료 차량 잠금 ---------------------------------------
+        # 주차를 마친 차는 출차 정보가 올 때까지 그 자리에 그대로 있다.
+        # 그 사실을 상태로 붙들어 두는 표다.
+        #
+        #   parked_lock  : {차량번호: Track ID}. 그 번호를 쥘 수 있는 트랙 하나.
+        #   _parked_cars : 이번 프레임 기준 '주차 완료'인 차량번호 집합.
+        #
+        # 이게 없을 때 같은 번호가 화면에 두 개 떴다. track_to_car는 트랙이
+        # 사라져도 lost_ttl(약 2초)이 지나야 지워지는데, 그 사이 옆을 지나던
+        # 다른 트랙이 자리 근처에 들어와 같은 번호를 받아갔다. 그러고 나서
+        # 원래 트랙이 같은 ID로 되살아나면 두 트랙이 같은 번호를 물고 있다.
+        self.parked_lock = {}
+        self._parked_cars = set()
 
         # 지금 안내 중인 차량번호. 주차를 마치면 None으로 돌아간다.
         self.active_car_id = None
@@ -508,8 +557,9 @@ class CarMOT:
                         (정지 시간) 기준으로만 활성 차량이 해제된다.
             parked_of:  {차량번호: (x_cm, y_cm)}를 돌려주는 함수.
                         '이미 그 자리에 세워져 있는 차'의 목록이다.
-                        A01.get_parked_world_positions를 넘기면 된다.
                         그 자리 근처에 서 있는 트랙을 찾아 차량번호를 묶는다.
+                        좌표계는 to_world와 같아야 한다. C_main이 보정으로 얻은
+                        자리 픽셀을 같은 비율로 나눠서 넘긴다.
                         None이면 이 단계를 건너뛴다.
 
         Returns:
@@ -534,6 +584,7 @@ class CarMOT:
         tracks = []
         alive_ids = set()
         now = time.time()
+        self._tick_frame_interval(now)
 
         # 1) 추적기 출력을 파싱하고 트랙별 상태(위치/외형)를 갱신
         # outputs 각 행: [x1, y1, x2, y2, track_id, score, cls, det_idx]
@@ -580,7 +631,10 @@ class CarMOT:
         #    활성 차량 결합보다 먼저 해야, 주차된 차가 검출 흔들림 때문에
         #    '움직이는 차'로 오인되어 안내 대상이 되는 것을 막을 수 있다.
         if parked_of is not None:
-            self._bind_parked_cars(tracks, parked_of(), now)
+            parked_positions = parked_of()
+            self._sync_parked_state(parked_positions, alive_ids)
+            self._drop_duplicate_car_ids(alive_ids)
+            self._bind_parked_cars(tracks, parked_positions, now)
 
         # 3) 활성 차량(움직이는 차) 결합 및 주차 완료 판정.
         #    이 규칙이 가장 강하므로 재바인딩/FIFO보다 먼저 처리한다.
@@ -625,6 +679,86 @@ class CarMOT:
 
         return tracks
 
+    def _bind_car(self, track_id, car_id, now, mark=True):
+        """
+        차량번호를 트랙 하나에만 붙인다. (번호 부여의 유일한 통로)
+
+        '한 번호는 한 트랙'을 여기서 강제한다. 예전에는 붙이는 곳이 넷
+        (주차 결합 / 활성 결합 / 재바인딩 / FIFO)이었고, 각자 '이미 임자가
+        있는 번호'를 살아 있는 트랙 기준으로만 걸렀다. 죽은 트랙이 물고 있던
+        번호는 그 검사에 안 걸리므로 다른 트랙에 또 나갔고, 죽었던 트랙이
+        같은 ID로 되살아나는 순간 화면에 같은 번호가 두 개 떴다.
+
+        그래서 붙이기 전에 그 번호를 쥔 다른 트랙을 살았든 죽었든 전부 떼어낸다.
+
+        Args:
+            mark: 시각화에서 잠시 강조할지. 승계/재결합처럼 '옮겨 붙은' 경우만
+                  True로 둔다. 새로 부여하는 것은 강조할 일이 아니다.
+        """
+        for tid, cid in list(self.track_to_car.items()):
+            if cid == car_id and tid != track_id:
+                self.track_to_car.pop(tid, None)
+                self.ghosts.pop(tid, None)
+                self.rebound_at.pop(tid, None)
+
+        self.track_to_car[track_id] = car_id
+        if mark:
+            self.rebound_at[track_id] = now
+
+        # 주차를 마친 차라면 잠금도 이 트랙으로 옮긴다.
+        if car_id in self._parked_cars:
+            self.parked_lock[car_id] = track_id
+
+    def _drop_duplicate_car_ids(self, alive_ids):
+        """
+        같은 번호를 두 트랙이 물고 있으면 하나만 남긴다. (방어)
+
+        _bind_car를 통하면 중복은 생기지 않지만, 이미 어긋난 상태로 들어온
+        프레임(예전 상태가 남아 있거나 추적기가 옛 ID를 되살린 경우)에서도
+        화면에 번호가 두 개 뜨지 않도록 매 프레임 한 번 훑는다.
+
+        남길 트랙을 고르는 순서:
+          1) 주차 잠금이 가리키는 트랙 (그 자리에 있는 차가 진짜다)
+          2) 이번 프레임에 살아 있는 트랙
+          3) 연속 관측이 더 긴 트랙
+        """
+        by_car = {}
+        for tid, cid in self.track_to_car.items():
+            by_car.setdefault(cid, []).append(tid)
+
+        for car_id, tids in by_car.items():
+            if len(tids) < 2:
+                continue
+
+            locked = self.parked_lock.get(car_id)
+            keep = max(
+                tids,
+                key=lambda t: (t == locked, t in alive_ids, self.hit_counts.get(t, 0))
+            )
+            for tid in tids:
+                if tid == keep:
+                    continue
+                self.track_to_car.pop(tid, None)
+                self.ghosts.pop(tid, None)
+                print(f"[중복 정리] 차량번호 '{car_id}'가 Track {tids}에 겹쳐 있어 "
+                      f"Track {keep}만 남깁니다.")
+
+    def _sync_parked_state(self, parked_positions, alive_ids):
+        """
+        '주차 완료' 목록과 잠금 표를 이번 프레임 상태에 맞춘다.
+
+        출차한 차(목록에서 빠진 차)의 잠금은 푼다. 잠금이 가리키던 트랙이
+        사라졌으면 잠금만 비워 두고, 다음에 그 자리 근처에서 잡히는 트랙에
+        _bind_parked_cars가 다시 묶는다.
+        """
+        self._parked_cars = set(parked_positions)
+
+        for car_id, tid in list(self.parked_lock.items()):
+            if car_id not in self._parked_cars:
+                del self.parked_lock[car_id]        # 출차했거나 안내 중으로 돌아갔다
+            elif tid not in alive_ids and tid not in self.track_to_car:
+                del self.parked_lock[car_id]        # 트랙이 완전히 정리됐다
+
     def _bind_parked_cars(self, tracks, parked_positions, now):
         """
         이미 주차된 차를 그 자리에 서 있는 트랙에 묶는다.
@@ -652,6 +786,9 @@ class CarMOT:
         # 옛 트랙은 lost_ttl(기본 60프레임)이 지나야 정리되므로, 그동안
         # 멀쩡히 세워져 있는 차가 'WAIT'로 뜬다. 주차를 마친 차의 번호가
         # 자꾸 떨어져 보이던 원인이 이것이다.
+        #
+        # (죽은 트랙이 번호를 물고 있어 생기던 '같은 번호 두 개'는 여기서
+        #  거르는 대신 _bind_car가 붙이는 순간 떼어내는 쪽으로 막는다)
         alive = {trk["track_id"] for trk in tracks}
         taken = {car for tid, car in self.track_to_car.items() if tid in alive}
 
@@ -659,7 +796,10 @@ class CarMOT:
             track_id = trk["track_id"]
             held = self.track_to_car.get(track_id)
             if held is not None and held in parked_positions:
-                continue        # 이미 제 번호로 묶여 있다
+                # 이미 제 번호로 묶여 있다. 잠금이 이 트랙을 가리키게 해 둔다.
+                # 출차 정보가 올 때까지 다른 트랙이 이 번호를 가져갈 수 없다.
+                self.parked_lock[held] = track_id
+                continue
 
             world = self.last_states.get(track_id, {}).get("world")
             if world is None:
@@ -669,6 +809,11 @@ class CarMOT:
             best_car, best_dist = None, None
             for car_id, pos in parked_positions.items():
                 if car_id in taken:
+                    continue
+                # 살아 있는 트랙에 잠겨 있는 번호는 건드리지 않는다.
+                # 주차된 차 옆을 지나가는 차가 그 번호를 가져가는 것을 막는다.
+                locked_to = self.parked_lock.get(car_id)
+                if locked_to is not None and locked_to != track_id and locked_to in alive:
                     continue
                 dist = math.hypot(world[0] - pos[0], world[1] - pos[1])
                 if dist > radius:
@@ -702,12 +847,12 @@ class CarMOT:
                 print(f"[정정] Track ID {track_id}는 처음부터 자리에 서 있던 차입니다. "
                       f"'{held}' -> '{best_car}' (번호는 FIFO로 돌려줌)")
 
-            self.track_to_car[track_id] = best_car
-            self.rebound_at[track_id] = now
+            self._bind_car(track_id, best_car, now)
+            self.parked_lock[best_car] = track_id
             taken.discard(held)
             taken.add(best_car)
             print(f"[주차 결합] Track ID {track_id} <- 차량번호 '{best_car}' "
-                  f"(자리에서 {best_dist:.1f}cm)")
+                  f"(자리에서 {best_dist:.1f}cm, 출차까지 고정)")
 
     def _stayed_in_place(self, track_id, radius):
         """
@@ -800,13 +945,7 @@ class CarMOT:
 
     def _bind_active(self, track_id, now):
         """활성 차량번호를 트랙에 붙이고, 이전 트랙에 남아 있던 흔적을 지운다."""
-        for tid, cid in list(self.track_to_car.items()):
-            if cid == self.active_car_id and tid != track_id:
-                self.track_to_car.pop(tid, None)
-                self.ghosts.pop(tid, None)
-
-        self.track_to_car[track_id] = self.active_car_id
-        self.rebound_at[track_id] = now
+        self._bind_car(track_id, self.active_car_id, now)
         self._arrived_since = None
 
     def _track_of_car(self, car_id):
@@ -987,12 +1126,52 @@ class CarMOT:
             self._active_moved_at = None
             released = True
 
+        # 주차 잠금도 여기서 푼다. 출차가 곧 잠금 해제 조건이다.
+        # (다음 프레임의 _sync_parked_state도 같은 일을 하지만, 출차 처리와
+        #  다음 프레임 사이에 잠금이 남아 있으면 그 자리에 들어오는 다음 차가
+        #  번호를 못 받는다)
+        if self.parked_lock.pop(car_id, None) is not None:
+            self._parked_cars.discard(car_id)
+            released = True
+
         for tid, ghost in list(self.ghosts.items()):
             if ghost.get("car_id") == car_id:
                 del self.ghosts[tid]
                 released = True
 
         return released
+
+    def _tick_frame_interval(self, now):
+        """프레임 간격을 지수이동평균으로 갱신한다. (유령 수명 계산용)"""
+        prev = self._last_update_at
+        self._last_update_at = now
+        if prev is None:
+            return
+
+        dt = now - prev
+        # 튀는 값은 버린다. 첫 프레임의 모델 로딩 지연이나 디버거로 멈춘 구간이
+        # 평균에 섞이면 유령 수명이 엉뚱하게 길어진다.
+        if not (0.005 <= dt <= 1.0):
+            return
+
+        if self._frame_interval is None:
+            self._frame_interval = dt
+        else:
+            self._frame_interval += 0.1 * (dt - self._frame_interval)
+
+    def _ghost_lifetime(self):
+        """
+        유령을 붙들고 있을 시간(초).
+
+        추적기가 트랙을 버리는 시점(lost_ttl 프레임)보다 반드시 길어야 한다.
+        그래야 '추적기가 포기한 뒤'를 이 레이어가 이어받는다는 원래 의도가
+        성립한다. 프레임 간격을 아직 못 쟀으면 설정값을 그대로 쓴다.
+        """
+        base = self.rebind['MAX_GAP_SEC']
+        if self._frame_interval is None:
+            return base
+        margin = self.rebind.get('GHOST_MARGIN_SEC', 2.0)
+        return max(base, self.lost_ttl * self._frame_interval + margin)
 
     def _try_rebind(self, track_id, alive_ids, now):
         """
@@ -1010,7 +1189,14 @@ class CarMOT:
         if state is None or not self.ghosts:
             return False
 
-        assigned = set(self.track_to_car.values())
+        # '이미 임자가 있는 번호'는 이번 프레임에 살아 있는 트랙이 쥔 것만 센다.
+        #
+        # track_to_car는 트랙이 사라져도 lost_ttl(60프레임)이 지나야 지워진다.
+        # 그동안 죽은 옛 트랙이 번호를 물고 있어서, 정작 그 번호를 승계해야 할
+        # 새 트랙이 아래 검사에 걸려 걸러졌다. 유령 수명(3초)이 lost_ttl보다
+        # 짧으면 두 구간이 아예 겹치지 않아 이 레이어가 한 번도 못 돈다.
+        # (_bind_parked_cars에 이미 같은 이유로 들어가 있는 처리다)
+        assigned = {car for tid, car in self.track_to_car.items() if tid in alive_ids}
         best_id, best_cost = None, None
 
         for ghost_id, ghost in self.ghosts.items():
@@ -1022,8 +1208,19 @@ class CarMOT:
             if ghost["car_id"] in assigned:
                 continue
 
+            # 주차를 마친 차의 번호는 승계로 옮기지 않는다.
+            #
+            # 그 차는 출차 정보가 올 때까지 제자리에 있으므로, 번호를 옮길
+            # 이유가 애초에 없다. 여기를 열어두면 '거리만 맞으면 승계'라
+            # 주차된 차 옆을 지나가는 차가 그 번호를 가져간다. 그 차의
+            # 원래 트랙은 아직 살아 있으니 결과는 같은 번호 두 개다.
+            # 주차된 차의 번호가 다른 트랙으로 옮겨가는 통로는
+            # _bind_parked_cars(자리 위치 대조) 하나뿐이어야 한다.
+            if ghost["car_id"] in self._parked_cars:
+                continue
+
             gap = now - ghost["lost_at"]
-            if gap > self.rebind['MAX_GAP_SEC']:
+            if gap > self._ghost_lifetime():
                 continue
 
             reachable, cost = self._reachable(state, ghost, gap)
@@ -1047,13 +1244,22 @@ class CarMOT:
         위치마다 같은 값이 다른 실제 거리를 뜻해서 임계값을 정할 수가 없다.
         cm 기준이면 'RC카가 1.2초 동안 최대 46cm'처럼 물리적으로 말이 된다.
 
+        안내 중인 차(활성 차량)의 유령은 상한을 넉넉하게 준다.
+        '동시에 움직이는 차는 1대'라는 전제 덕분에 오인 위험이 작은 반면,
+        상한이 좁으면 몇 초 끊긴 사이 이동한 거리에 걸려 안내가 끊긴다.
+
         Returns:
             (도달 가능 여부, 정규화된 거리 비용 0~1)
         """
+        is_active = (self.active_car_id is not None
+                     and ghost.get("car_id") == self.active_car_id)
+
         w_now, w_old = state.get("world"), ghost.get("world")
         if w_now is not None and w_old is not None:
+            reach = (self.rebind.get('MAX_REACH_ACTIVE_CM', self.rebind['MAX_REACH_CM'])
+                     if is_active else self.rebind['MAX_REACH_CM'])
             limit = min(self.rebind['MAX_SPEED_CM_S'] * gap_sec + self.rebind['MARGIN_CM'],
-                        self.rebind['MAX_REACH_CM'])
+                        reach)
             dist = math.hypot(w_now[0] - w_old[0], w_now[1] - w_old[1])
         else:
             limit = min(self.rebind['MAX_SPEED_PX_S'] * gap_sec + self.rebind['MARGIN_PX'],
@@ -1070,8 +1276,7 @@ class CarMOT:
         ghost = self.ghosts.pop(ghost_id)
         car_id = ghost["car_id"]
 
-        self.track_to_car[new_id] = car_id
-        self.rebound_at[new_id] = now
+        self._bind_car(new_id, car_id, now)
         self.rebind_count += 1
 
         # 끊기기 전 궤적을 앞에 이어 붙인다.
@@ -1114,9 +1319,10 @@ class CarMOT:
         }
 
     def _expire_ghosts(self, now):
-        """MAX_GAP_SEC이 지난 유령을 폐기. 그 뒤에 잡히는 차는 신규로 취급된다."""
+        """수명이 다한 유령을 폐기. 그 뒤에 잡히는 차는 신규로 취급된다."""
+        lifetime = self._ghost_lifetime()
         stale = [gid for gid, g in self.ghosts.items()
-                 if now - g["lost_at"] > self.rebind['MAX_GAP_SEC']]
+                 if now - g["lost_at"] > lifetime]
         for gid in stale:
             ghost = self.ghosts.pop(gid)
             print(f"[재바인딩] Track ID {gid} 유령 만료 "
@@ -1132,7 +1338,7 @@ class CarMOT:
         if car_id is None:
             return False
 
-        self.track_to_car[track_id] = car_id
+        self._bind_car(track_id, car_id, time.time(), mark=False)
         print(f"[매칭] Track ID {track_id} <- 차량번호 '{car_id}'")
         return True
 
@@ -1445,8 +1651,8 @@ if __name__ == '__main__':
     # 시나리오 4 : 유령(위치 매칭)이 못 잡는 구간을 활성 차량 규칙이 잡는다
     #
     #   오래 가려진 사이 차가 멀리(80cm) 이동해 버린 경우.
-    #   REBIND['MAX_REACH_CM'](60cm)를 넘으므로 위치 매칭은 실패해야 정상이다.
-    #   그래도 '지금 움직이는 차는 안내 중인 그 차'이므로 번호를 되찾아야 한다.
+    #   위치 매칭이 어떻게 되든, '지금 움직이는 차는 안내 중인 그 차'라는
+    #   규칙이 유령보다 먼저 돌아서 번호를 되찾아야 한다.
     #
     #   이 시나리오가 SINGLE_ACTIVE의 존재 이유다. 규칙을 끄면 엉뚱하게 FIFO의
     #   다음 번호('5678')를 소비해 차량번호가 어긋난다.
@@ -1465,8 +1671,75 @@ if __name__ == '__main__':
     print(f"    -> 위치 매칭이 실패해도 '1234'를 되찾았는가 : {'OK' if ok4 else 'FAIL'}")
     print("       (SINGLE_ACTIVE를 끄면 여기서 '5678'을 잘못 소비한다)")
 
+    # -------------------------------------------------------------------
+    # 시나리오 5 : 끊긴 채 멈춰 있다가 다시 잡히는 경우 (시간 조건 포함)
+    #
+    #   위 네 시나리오는 즉시 도는 루프라 '초' 단위 조건이 무의미하다.
+    #   유령 수명(초)과 lost_ttl(프레임)의 관계가 깨져 있어도 드러나지 않는다.
+    #   실제로 오래 깨져 있었다. 9.5fps에서 lost_ttl 60프레임은 6.3초인데
+    #   유령은 3초에 죽어서, 승계에 필요한 두 조건이 겹치는 구간이 아예 없었다.
+    #   그래서 여기서는 가짜 시계로 시간을 흘려 그 관계를 직접 검사한다.
+    #
+    #   차가 '움직이면' SINGLE_ACTIVE가 잡아준다(시나리오 4). 하지만 끊긴 채
+    #   멈춰서 새 ID로 돌아오면 유령 승계 말고는 번호를 되찾을 길이 없다.
+    #   이 구멍이 막히지 않으면 안내가 그대로 끊긴다.
+    # -------------------------------------------------------------------
+    FPS = 9.5
+    real_time = time.time
+    clock = {"t": 10_000.0}
+    time.time = lambda: clock["t"]
+    try:
+        fifo5 = CarNumberFIFO()
+        for num in ("1234", "5678"):
+            fifo5.push(num)
+
+        buf5 = io.StringIO()
+        with contextlib.redirect_stdout(buf5):
+            mot5 = CarMOT(tracker_cfg=CONFIG['TRACKER_CFG'],
+                          min_hits=CONFIG['MIN_HITS_FOR_ASSIGN'],
+                          trajectory_maxlen=CONFIG['TRAJECTORY_MAXLEN'],
+                          fifo=fifo5)
+
+            def tick(cars):
+                clock["t"] += 1.0 / FPS
+                return mot5.update([det(cx, cy) for cx, cy in cars],
+                                   to_world=to_world, target_of=TARGETS.get)
+
+            for f in range(25):                       # 움직이며 안내 시작
+                tick([(100 + f * 8, 300)])
+            for _ in range(int(4.0 * FPS)):           # 4초 완전 소실
+                tick([])
+            last5 = []
+            for _ in range(8):                        # 81cm 떨어진 곳에 '멈춘 채' 재등장
+                last5 = tick([(1000, 700)])
+
+        ghost_life = mot5._ghost_lifetime()
+        ttl_sec = mot5.lost_ttl / FPS
+        got5 = [t["car_id"] for t in last5]
+
+        print("\n[시나리오 5 : 끊긴 채 멈춰 있다가 재등장 (유령 승계)]")
+        for line in buf5.getvalue().splitlines():
+            if any(tag in line for tag in ("[활성]", "[재바인딩]", "[소실]")):
+                print("   ", line)
+        print(f"    유령 수명     : {ghost_life:.1f}초  "
+              f"(추적기가 트랙을 버리는 시점 {ttl_sec:.1f}초)")
+        print(f"    재등장 트랙   : {got5}")
+        print(f"    FIFO 잔여     : {fifo5.snapshot()}")
+
+        ok5 = got5 == ["1234"] and fifo5.snapshot() == ["5678"]
+        print(f"    -> 멈춘 채 돌아와도 '1234'를 되찾았는가 : {'OK' if ok5 else 'FAIL'}")
+
+        # 구조 검사. 이 부등식이 깨지면 유령 레이어가 통째로 죽는다.
+        ok6 = ghost_life > ttl_sec
+        print(f"    -> 유령이 추적기보다 오래 사는가 : {'OK' if ok6 else 'FAIL'}")
+        if not ok6:
+            print("       유령이 먼저 죽으면 승계할 대상이 남지 않는다. "
+                  "REBIND의 GHOST_MARGIN_SEC를 늘릴 것.")
+    finally:
+        time.time = real_time
+
     print("\n" + "=" * 62)
-    print(f" 결과 : {'전부 OK' if all((ok1, ok2, ok3, ok4)) else '실패 항목 있음'}")
+    print(f" 결과 : {'전부 OK' if all((ok1, ok2, ok3, ok4, ok5, ok6)) else '실패 항목 있음'}")
     print("=" * 62)
 
 

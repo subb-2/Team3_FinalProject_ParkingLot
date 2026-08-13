@@ -2,7 +2,6 @@ import cv2
 import time
 import sys
 import os
-import json
 import threading
 import traceback
 import numpy as np
@@ -18,7 +17,7 @@ from logic.B02_car_mot import (
     car_number_fifo, enqueue_car_number
 )
 from logic.C00_navigation import (
-    PillarMapper, ParkingNavigator, CONFIG as C00_CONFIG, GATE1_WORLD_POS
+    PillarMapper, ParkingNavigator, CONFIG as C00_CONFIG
 )
 from logic.C01_path_planner import (
     ParkingLotMap, RoutePlanner, CONFIG as C01_CONFIG
@@ -61,7 +60,7 @@ CONFIG = {
     # 크기는 똑같다. 차를 더 크게 보이게 하려면 해상도가 아니라 B01의
     # IMGSZ를 올려야 한다. (그때는 엔진도 그 크기로 다시 export할 것)
     #
-    # !! 주의 !! 이 값을 바꾸면 기둥 보정을 다시 해야 한다.
+    # 이 값을 바꾸면 기둥 보정을 다시 해야 한다.
     # config/pillar_pixels.json에 저장된 좌표가 이미지 픽셀이기 때문이다.
     "CAM_WIDTH": 1280,              # 카메라 가로 해상도
     "CAM_HEIGHT": 800,              # 카메라 세로 해상도
@@ -85,7 +84,20 @@ CONFIG = {
     # 확인이 끝나면 꺼도 된다. (/overlay 로 실행 중에도 켜고 끌 수 있다)
     "DRAW_LAYOUT_OVERLAY": True,
     "DRAW_NAVIGATION": True,        # 목표 지점 안내선을 화면에 표시
+
+    # YOLO가 찾은 박스를 신뢰도와 함께 전부 얇게 그린다. (/rawdet 로 토글)
+    #
+    # 화면에 박스가 안 뜨는 차가 있을 때 이걸 켠다. 원인이 둘인데 손볼 곳이
+    # 완전히 다르기 때문이다.
+    #   얇은 박스도 없다        -> YOLO가 아예 못 본다. 모델/조명/각도 문제.
+    #   얇은 박스는 있는데 흐리다 -> 신뢰도가 ocsort.yaml의 new_track_thresh(0.4)에
+    #                             못 미쳐 트랙이 안 생긴 것. 임계값 문제.
+    # 이 구분을 눈으로 못 하면 '왜 저 차만 안 잡히지'에서 계속 막힌다.
+    "DRAW_RAW_DETECTIONS": False,
 }
+
+# 원본 검출 박스 색 (BGR). 추적 박스와 헷갈리지 않게 어둡게.
+COLOR_RAW_DET = (140, 140, 140)
 
 
 
@@ -212,6 +224,10 @@ class ParkingNavigationPipeline:
         #    배치 오버레이를 가장 먼저 그린다. 차량 박스나 경로선에 가리지 않게.
         if CONFIG['DRAW_LAYOUT_OVERLAY']:
             self.navigator.mapper.draw_layout_overlay(frame)
+        # 원본 검출은 추적 박스 밑에 깔아야 한다. 위에 그리면 정상 추적 중인
+        # 차까지 회색 박스가 덧씌워져 화면을 읽을 수 없다.
+        if CONFIG['DRAW_RAW_DETECTIONS']:
+            self._draw_raw_detections(frame, detections)
         self.mot.draw_tracks(frame, tracks)
         if CONFIG['DRAW_NAVIGATION']:
             self.navigator.draw_navigation(frame, nav_results)
@@ -228,11 +244,30 @@ class ParkingNavigationPipeline:
         self.latest_nav = nav_results
         return tracks, nav_results
 
+    def _draw_raw_detections(self, frame, detections):
+        """
+        YOLO 원본 박스를 신뢰도와 함께 얇게 그린다.
+
+        추적기가 걸러낸 저신뢰 박스까지 전부 보인다. 그래서 '박스가 없는 차'가
+        검출 자체를 못 한 것인지, 검출은 됐는데 신뢰도가 모자라 트랙이 안
+        생긴 것인지 화면만 보고 구별할 수 있다.
+        """
+        thresh = getattr(self.mot, 'new_track_thresh', None)
+        for det in detections:
+            x1, y1, x2, y2 = det["bbox"]
+            conf = det["confidence"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_RAW_DET, 1)
+            # 신뢰도는 박스 아래에 적는다. 위는 추적 라벨이 쓴다.
+            label = f"{conf:.2f}"
+            if thresh is not None and conf < thresh:
+                label += " LOW"
+            cv2.putText(frame, label, (x1, y2 + 13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_RAW_DET, 1, cv2.LINE_AA)
+
     def draw_status(self, frame):
         """FPS, 추적 대수, FIFO 대기 수, 호모그래피 상태를 프레임에 표시."""
         matched = sum(1 for t in self.latest_tracks if t["car_id"])
         mapper = self.navigator.mapper
-        ready = mapper.is_ready()
 
         # 처리 FPS 옆에 카메라가 실제로 주는 fps와 버린 프레임 수를 함께 적는다.
         # 이 둘이 벌어져 있으면(예: cam 30 / FPS 24) 화면이 밀리는 원인은
@@ -666,6 +701,18 @@ if __name__ == '__main__':
         else:
             CONFIG['DRAW_LAYOUT_OVERLAY'] = not CONFIG['DRAW_LAYOUT_OVERLAY']
         return f"배치 오버레이: {'ON' if CONFIG['DRAW_LAYOUT_OVERLAY'] else 'OFF'}"
+
+    @app.route('/rawdet')
+    @app.route('/rawdet/<state>')
+    def rawdet(state=None):
+        """YOLO 원본 검출 박스 표시를 켜고 끈다. (/rawdet/on, /rawdet/off, /rawdet)"""
+        if state == 'on':
+            CONFIG['DRAW_RAW_DETECTIONS'] = True
+        elif state == 'off':
+            CONFIG['DRAW_RAW_DETECTIONS'] = False
+        else:
+            CONFIG['DRAW_RAW_DETECTIONS'] = not CONFIG['DRAW_RAW_DETECTIONS']
+        return f"원본 검출 표시: {'ON' if CONFIG['DRAW_RAW_DETECTIONS'] else 'OFF'}"
 
     @app.route('/recalibrate')
     def recalibrate():

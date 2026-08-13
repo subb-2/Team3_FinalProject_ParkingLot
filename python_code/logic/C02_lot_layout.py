@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.map_data import (
     grid_map, spot_map, coord_to_spot, spot_type, PILL_MARKER_ID, MARKER_ID_CELL,
     GATE1_POS, GATE2_POS, PILL, SPOT_CELLS, SPOT_TYPE_NAME, get_rows, get_cols,
+    one_way_segments, validate_one_way_loop,
 )
 
 # 설정 (Configuration)
@@ -234,6 +235,9 @@ def validate_layout():
     if GATE2_POS is None:
         problems.append("grid_map에 출구(GATE2) 칸이 없습니다.")
 
+    # 7) 일방통행 순환선이 실제 통로 위를 지나는가
+    problems.extend(validate_one_way_loop())
+
     return problems
 
 
@@ -244,6 +248,13 @@ MARKER_WORLD_POS = uniform_marker_world_pos()
 SPOT_WORLD_POS = build_spot_world_pos(MARKER_WORLD_POS)
 GATE1_WORLD_POS = cell_to_world(GATE1_POS)   # 입구 (경로 시작점)
 GATE2_WORLD_POS = cell_to_world(GATE2_POS)   # 출구
+
+# 일방통행 순환선을 실좌표(cm) 선분 목록으로. [((x1,y1), (x2,y2)), ...]
+# 마지막 점에서 첫 점으로 닫힌다.
+# C01_path_planner가 이걸로 통행 방향장을 만들고, C00과 D00이 화살표로 그린다.
+ONE_WAY_SEGMENTS_WORLD = [
+    (cell_to_world(a), cell_to_world(b)) for a, b in one_way_segments()
+]
 
 
 def build_spot_pixel_pos(pillar_pixels):
@@ -377,7 +388,7 @@ if __name__ == '__main__':
         print(f"  {spot_id}  {kind:4s} ->  ({x:7.1f}, {y:7.1f}) cm   "
               f"(기둥 id{marker_a} / id{marker_b} 사이 {t:.2f} 지점, {note})")
 
-    print(f"\n--- 입출구 ---")
+    print("\n--- 입출구 ---")
     print(f"  GATE1(입구) 격자{GATE1_POS}  ->  "
           f"({GATE1_WORLD_POS[0]:.1f}, {GATE1_WORLD_POS[1]:.1f}) cm")
     print(f"  GATE2(출구) 격자{GATE2_POS}  ->  "

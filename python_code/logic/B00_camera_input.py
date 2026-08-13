@@ -249,7 +249,7 @@ def get_camera(sensor_id=0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
         print(f"       {cand_w}x{cand_h} 실패, 다음 후보로 넘어갑니다.")
 
     if opened is None:
-        print(f"[오류] 카메라를 열지 못했습니다. 지원 해상도를 확인하세요.")
+        print("[오류] 카메라를 열지 못했습니다. 지원 해상도를 확인하세요.")
         print(f"       v4l2-ctl --list-formats-ext -d /dev/video{sensor_id}")
         return cv2.VideoCapture()       # isOpened() == False
 

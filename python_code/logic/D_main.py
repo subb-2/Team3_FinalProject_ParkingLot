@@ -146,11 +146,6 @@ class PipelineRunner:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
         return canvas
 
-    def latest_frame(self):
-        """가장 최근에 처리된 프레임의 복사본. 아직 없으면 None."""
-        with self._cond:
-            return None if self._frame is None else self._frame.copy()
-
     def latest_jpeg(self, last_seq=0, timeout=2.0):
         """
         가장 최근 프레임의 JPEG 바이트를 (일련번호, 바이트)로 반환.

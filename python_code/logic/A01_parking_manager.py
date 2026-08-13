@@ -39,30 +39,28 @@ def _distance_from_gate(spot_id):
 
 
 # 통합 입차 처리
-def get_assign_order(cell_type, distance_fn=None):
+def get_assign_order(cell_type):
     """
     구역 종류의 배정 순서를 반환.
 
-    map_data.SPOT_PRIORITY에 적어둔 고정 순서가 우선이고, 거기에 없는 자리는
-    뒤에 붙인다(입구 직선거리 순). 배치를 바꿔 새 자리가 생겨도 배정이 멈추지
-    않게 하기 위한 안전장치다.
+    map_data.SPOT_PRIORITY에 적어둔 순서를 그대로 쓴다. 그 배열은 입구에서
+    가까운 순서대로 미리 손으로 적어둔 것이다.
+
+    목록에 없는 자리는 배정하지 않는다. 자동으로 뒤에 붙여주면 배치를 바꿨을 때
+    아무도 모르는 순서로 배정이 나가므로, 자리를 늘리면 SPOT_PRIORITY에도
+    적도록 강제한다. (빠진 자리는 map_data가 import 시점에 경고한다)
 
     Args:
-        cell_type:   구역 종류 상수 (SPOT1~SPOT4)
-        distance_fn: 목록에 없는 자리를 정렬할 거리 함수
+        cell_type: 구역 종류 상수 (SPOT1~SPOT4)
 
     Returns:
         구역 ID 리스트 (배정할 순서대로)
     """
-    distance_fn = _distance_from_gate if distance_fn is None else distance_fn
-
     actual = set(get_spot_ids_by_type(cell_type))
-    ordered = [s for s in SPOT_PRIORITY.get(cell_type, []) if s in actual]
-    leftover = sorted(actual - set(ordered), key=lambda s: (distance_fn(s), s))
-    return ordered + leftover
+    return [s for s in SPOT_PRIORITY.get(cell_type, []) if s in actual]
 
 
-def find_spot_for_car(car_id, distance_fn=None):
+def find_spot_for_car(car_id):
     """
     차량 번호에 맞는 종류의 빈자리 중 우선순위가 가장 앞선 자리를 찾는다.
 
@@ -77,9 +75,7 @@ def find_spot_for_car(car_id, distance_fn=None):
     다른 종류로 대체하지 않고 실패를 돌려준다.
 
     Args:
-        car_id:      차량 번호 4자리 문자열
-        distance_fn: SPOT_PRIORITY에 없는 자리를 정렬할 때 쓸 거리 함수.
-                     None이면 입구에서의 직선거리.
+        car_id: 차량 번호 4자리 문자열
 
     Returns:
         (spot_id, reason) 튜플. 실패하면 spot_id가 None이고 reason이 사유.
@@ -89,7 +85,7 @@ def find_spot_for_car(car_id, distance_fn=None):
         return None, REASON_UNKNOWN_TYPE
 
     # 이 종류로 지정된 구역이 주차장에 하나라도 있는가
-    order = get_assign_order(required, distance_fn)
+    order = get_assign_order(required)
     if not order:
         return None, REASON_NO_SPOT_TYPE
 
@@ -121,8 +117,6 @@ def handle_car_entry(car_id, receive_time):
             "message": "대형 구역이 모두 찼습니다. (6/6)",
         }
     """
-    global last_entry_result
-
     car_type = get_car_type(car_id)
     print(f"\n[입차 요청] 차량 번호: {car_id} 수신됨  ({describe_car(car_id)})")
 
@@ -185,29 +179,6 @@ def mark_parked(car_id):
     info["parked"] = True
     print(f"[주차 완료] 차량 '{car_id}' -> {info['spot_id']}")
     return True
-
-
-def get_parked_world_positions():
-    """
-    실제로 주차를 마친 차량들의 '배정된 자리' 실좌표를 반환.
-
-    B02가 이 표를 보고 그 자리에 서 있는 트랙을 찾아 차량번호를 묶는다.
-    미리 세워둔 차(INITIAL_PARKED)가 화면에서 'WAIT'로 뜨거나, 엉뚱하게
-    안내 대상으로 잡히는 것을 막는다.
-
-    안내 중인 차(parked=False)는 제외한다. 아직 그 자리에 없기 때문이다.
-
-    Returns:
-        {차량번호: (x_cm, y_cm)}
-    """
-    result = {}
-    for car_id, info in cars_info.items():
-        if not info.get("parked"):
-            continue
-        pos = SPOT_WORLD_POS.get(info.get("spot_id"))
-        if pos is not None:
-            result[car_id] = pos
-    return result
 
 
 def get_availability_by_type():

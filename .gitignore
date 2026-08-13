@@ -37,6 +37,9 @@ Desktop.ini
 *.png
 *.mp4
 
+# 발표 자료 (가이드라인 원본 + 산출 PPT + 스케치)
+ppt/
+
 # 대용량 소스/빌드 산출물
 python_code/logic/torchvision_src/
 torchvision_src/

@@ -6,7 +6,7 @@ E_main_final : 최종 통합 실행 파일
     [1단계] UART   A00_uart_rx  Zybo Wi-Fi(TCP) 수신 서버
     [2단계] 카메라  B00          카메라 열기
     [3단계] MOT    B01/B02/C00  검출 -> 추적 -> 위치추정 -> 경로
-    [4단계] 화면    E00          3분할 관제 화면 + 감시 스레드
+    [4단계] 화면    E00          4구간 관제 화면 + 감시 스레드
 
     python logic/E_main_final.py
 
@@ -55,10 +55,11 @@ CONFIG = {
 
     # 영상 두 구간의 전송 프레임레이트 (Hz).
     # 영상 처리는 백그라운드 스레드가 최대 속도로 돌고, 화면은 이 값으로 내보낸다.
-    "CAM_FEED_FPS": 20,             # 3번 구간 : 카메라 원본 + 검출/추적 오버레이
+    "CAM_FEED_FPS": 20,             # 2번 구간 : 카메라 원본 + 검출/추적 오버레이
     "NAV_FEED_FPS": 20,             # 4번 구간 : 차량 시점 안내
 
-    # 3번 구간에 띄울 '내 차'. None이면 안내 중인 차를 자동으로 고른다.
+    # 4번 구간(차량 시점 안내)에 띄울 '내 차'. None이면 자동으로 고른다.
+    # 3번 격자에 깔리는 안내 경로도 같은 차를 따라간다.
     # 실행 중에는 /follow/<차량번호> 로 바꿀 수 있다.
     "MY_CAR_ID": None,
 
@@ -151,7 +152,7 @@ def main():
     # [1단계] UART -----------------------------------------------------
     # 카메라보다 먼저 띄운다. 로딩 중에 온 입차를 놓치지 않기 위해서다.
     stage(1, "Zybo Wi-Fi(UART) 수신 서버")
-    uart_on = start_uart(rx_feed)
+    start_uart(rx_feed)
 
     # [2단계] 카메라 ----------------------------------------------------
     stage(2, "카메라")
@@ -190,7 +191,7 @@ def main():
     # --- 화면 ---------------------------------------------------------
     @app.route('/')
     def index():
-        """세로 3분할 최종 화면. 맵 보정이 안되어 있으면 보정 페이지로 이동"""
+        """최종 관제 화면. 맵 보정이 안 되어 있으면 보정 페이지로 보낸다."""
         if not pipeline.navigator.mapper.is_ready():
             from flask import redirect
             return redirect('/calibrate')
@@ -203,12 +204,14 @@ def main():
 
     @app.route('/ui_state')
     def ui_state():
-        """세 구간이 그릴 현재 상태 전부."""
-        return build_ui_state(pipeline, rx_feed, watcher)
+        """네 구간이 그릴 현재 상태 전부."""
+        # my_car를 함께 넘긴다. 3번 격자에 깔 경로와 4번이 안내하는 차가
+        # 같아야 두 화면을 짝지어 읽을 수 있다. (/follow로 지정한 차 포함)
+        return build_ui_state(pipeline, rx_feed, watcher, my_car["id"])
 
     @app.route('/video_feed')
     def video_feed():
-        """3번 구간 : 카메라 원본 + 검출/추적/마커 오버레이 (MJPEG)."""
+        """2번 구간 : 카메라 원본 + 검출/추적/마커 오버레이 (MJPEG)."""
         return mjpeg_runner_response(runner, CONFIG['CAM_FEED_FPS'])
 
     @app.route('/nav_feed')
@@ -238,7 +241,7 @@ def main():
     @app.route('/overlay/<state>')
     def overlay(state=None):
         """
-        3번 구간(카메라)에 격자 배치를 겹쳐 그릴지 켜고 끈다.
+        2번 구간(카메라)에 격자 배치를 겹쳐 그릴지 켜고 끈다.
 
         보정이 맞는지 확인할 때는 켜 두는 것이 좋지만, 시연 중에는 격자가
         차량 위에 겹쳐 검출 박스를 가린다. 그때 꺼서 화면을 정리한다.
@@ -252,9 +255,32 @@ def main():
             C_CONFIG['DRAW_LAYOUT_OVERLAY'] = not C_CONFIG['DRAW_LAYOUT_OVERLAY']
         return f"배치 오버레이: {'ON' if C_CONFIG['DRAW_LAYOUT_OVERLAY'] else 'OFF'}"
 
+    @app.route('/rawdet')
+    @app.route('/rawdet/<state>')
+    def rawdet(state=None):
+        """
+        YOLO가 찾은 박스를 신뢰도와 함께 전부 얇게 그린다.
+
+        어떤 차만 초록 박스가 안 뜰 때 여기를 켠다. 원인이 둘이고 손볼 곳이
+        완전히 다르다.
+          얇은 박스도 없다        -> YOLO가 못 본다. 학습 데이터에 그 차가 없거나
+                                    조명/각도 문제. 모델을 다시 학습해야 한다.
+          얇은 박스가 'LOW'로 뜬다 -> 신뢰도가 config/ocsort.yaml의
+                                    new_track_thresh에 못 미쳐 트랙이 안 생긴 것.
+                                    임계값을 내리면 된다.
+        (/rawdet/on, /rawdet/off, /rawdet 로 토글)
+        """
+        if state == 'on':
+            C_CONFIG['DRAW_RAW_DETECTIONS'] = True
+        elif state == 'off':
+            C_CONFIG['DRAW_RAW_DETECTIONS'] = False
+        else:
+            C_CONFIG['DRAW_RAW_DETECTIONS'] = not C_CONFIG['DRAW_RAW_DETECTIONS']
+        return f"원본 검출 표시: {'ON' if C_CONFIG['DRAW_RAW_DETECTIONS'] else 'OFF'}"
+
     @app.route('/follow/<car_id>')
     def follow(car_id):
-        """3번 구간에 띄울 차량을 지정. 'auto'면 자동 선택."""
+        """4번 구간(과 3번 격자의 경로)에 띄울 차량을 지정. 'auto'면 자동 선택."""
         my_car["id"] = None if car_id == "auto" else car_id
         return f"안내 대상: {my_car['id'] or '자동 선택'}"
 
@@ -282,9 +308,9 @@ def main():
     register_map_routes(app, pipeline, cap_module=b00_camera_input)
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     if pipeline.navigator.mapper.is_ready():
-        print(f"  보정을 다시 하려면 /recalibrate (저장된 좌표를 지우고 다시 찍습니다)")
+        print("  보정을 다시 하려면 /recalibrate (저장된 좌표를 지우고 다시 찍습니다)")
     else:
-        print(f"  좌표계가 아직 없습니다. /calibrate 에서 기둥을 직접 찍으세요.")
+        print("  좌표계가 아직 없습니다. /calibrate 에서 기둥을 직접 찍으세요.")
     print("=" * 46)
 
     try:

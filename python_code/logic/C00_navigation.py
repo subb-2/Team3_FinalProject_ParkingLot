@@ -39,29 +39,25 @@ CONFIG = {
 # 배치를 바꾸려면 data/map_data.py의 grid_map과 PILL_MARKER_ID를 고칠 것.
 # 여기서는 아무것도 하드코딩하지 않는다.
 from logic.C02_lot_layout import (
-    MARKER_WORLD_POS,     # {마커ID: (x_cm, y_cm)}  기둥 위치
-    SPOT_WORLD_POS,       # {구역ID: (x_cm, y_cm)}  기둥 사이 중점
-    GATE1_WORLD_POS,      # 입구 (경로 안내 시작점)
-    GATE2_WORLD_POS,      # 출구
-    cell_to_world,        # 격자 칸 -> 실좌표
-    build_spot_world_pos, # 기둥 좌표 -> 자리 좌표 (같은 열 기둥 사이 보간)
-    CONFIG as C02_CONFIG, # 칸 크기(CELL_W_CM / CELL_H_CM)
+    MARKER_WORLD_POS,        # {마커ID: (x_cm, y_cm)}  기둥 위치
+    SPOT_WORLD_POS,          # {구역ID: (x_cm, y_cm)}  기둥 사이 보간 위치
+    cell_to_world,           # 격자 칸 -> 실좌표
+    ONE_WAY_SEGMENTS_WORLD,  # 일방통행 순환선 [((x1,y1),(x2,y2)), ...]
+    CONFIG as C02_CONFIG,    # 칸 크기(CELL_W_CM / CELL_H_CM)
 )
-# 역투영 오버레이(등록된 배치를 화면에 겹쳐 그리기)에 필요한 격자 정보
 from data.map_data import (
-    grid_map, spot_map, spot_type, coord_to_spot,
-    SPOT_CELLS, SPOT_TYPE_NAME, SPOT1, SPOT2, SPOT3, SPOT4,
-    PILL, GATE1_POS, GATE2_POS, get_rows, get_cols, get_spot_cell_count,
+    spot_type, SPOT1, SPOT2, SPOT3, SPOT4, get_spot_cell_count,
 )
 
-# 시각화 색상 (BGR)
-# 역투영 오버레이 색상 (BGR)
-# 등록된 격자를 화면에 겹쳐 그려 실물과 맞는지 눈으로 확인하기 위한 것.
-COLOR_OVERLAY_EDGE  = (90, 90, 90)      # 도로 격자선 - 어두운 회색
-COLOR_OVERLAY_BOUND = (255, 255, 255)   # 주차장 외곽 - 흰색
+# 배치 오버레이 색상 (BGR).
+# 등록된 배치를 화면에 겹쳐 그려 보정이 실물과 맞는지 눈으로 확인하는 용도.
 COLOR_OVERLAY_PILL  = (0, 140, 255)     # 기둥       - 주황
 COLOR_OVERLAY_GATE1 = (0, 255, 0)       # 입구       - 초록
 COLOR_OVERLAY_GATE2 = (0, 128, 255)     # 출구       - 주황빨강
+COLOR_OVERLAY_FLOW  = (200, 200, 60)    # 일방통행   - 청록
+
+# 일방통행 화살표를 몇 cm 간격으로 찍을지. 촘촘하면 화면이 지저분해진다.
+ONE_WAY_ARROW_STEP_CM = 25.0
 
 # 주차 구역 종류별 색 (D00_ui_navi와 같은 규칙)
 COLOR_OVERLAY_SPOT = {
@@ -272,22 +268,6 @@ class PillarMapper:
                 car_pixel[1] - self.spot_pixels[s][1])
         )
 
-    def pixel_distance_to_spot(self, car_pixel, spot_id):
-        """
-        차량 픽셀과 특정 자리 픽셀 간의 거리.
-
-        Args:
-            car_pixel: (x_px, y_px)
-            spot_id: 구역 ID
-
-        Returns:
-            픽셀 거리. spot이 없으면 float('inf').
-        """
-        sp = self.spot_pixels.get(spot_id)
-        if sp is None:
-            return float('inf')
-        return math.hypot(car_pixel[0] - sp[0], car_pixel[1] - sp[1])
-
     def reset(self, clear_cache=True):
         """
         보정을 초기화한다. (카메라를 다시 설치했을 때 사용)
@@ -316,21 +296,21 @@ class PillarMapper:
 
     # --- 배치 오버레이 -------------------------------------------------------
 
-    def draw_layout_overlay(self, frame, show_grid=True, show_spots=True,
-                            show_pillars=True, show_gates=True, show_labels=True):
+    def draw_layout_overlay(self, frame, show_spots=True, show_pillars=True,
+                            show_gates=True, show_labels=True, show_flow=True):
         """
-        등록된 배치(기둥/자리/입출구)를 화면에 오버레이한다.
+        등록된 배치(기둥/자리/입출구/통행방향)를 화면에 오버레이한다.
 
         기둥과 자리의 픽셀 좌표를 그대로 쓴다. 좌표 변환을 거치지 않으므로
         기둥 위치가 맞으면 자리 위치도 반드시 맞는다.
 
         Args:
             frame:        그릴 대상 프레임 (원본이 수정됨)
-            show_grid:    쓰지 않는다. 격자는 픽셀 좌표로 놓을 수 없다.
             show_spots:   주차 구역 (종류별 색)
             show_pillars: 기둥
             show_gates:   입출구
             show_labels:  구역 ID 등 글자
+            show_flow:    일방통행 방향 화살표
 
         Returns:
             frame (입력과 동일 객체)
@@ -338,15 +318,21 @@ class PillarMapper:
         if not self.pillar_pixels:
             return frame
         return self._draw_layout_pixel(frame, show_spots, show_pillars,
-                                       show_gates, show_labels)
+                                       show_gates, show_labels, show_flow)
 
-    def _draw_layout_pixel(self, frame, show_spots, show_pillars, show_gates, show_labels):
+    def _draw_layout_pixel(self, frame, show_spots, show_pillars, show_gates,
+                           show_labels, show_flow=False):
         """
         픽셀 기반 오버레이. 기둥/자리 픽셀 좌표를 직접 사용.
 
         호모그래피 없이 동작하므로 절대 좌표 오차가 없다.
         기둥 위치가 맞으면 자리 위치도 반드시 맞는다.
         """
+        # 통행 방향을 가장 먼저 그린다. 자리/기둥 표시에 가리게 두어야
+        # 배치를 확인할 때 방해가 되지 않는다.
+        if show_flow:
+            self._draw_one_way(frame)
+
         # 자리 표시 (원으로 표시 + 자리 ID)
         if show_spots:
             for spot_id, (sx, sy) in self.spot_pixels.items():
@@ -383,6 +369,38 @@ class PillarMapper:
                 if show_labels:
                     cv2.putText(frame, label, (gx - 14, gy + 4),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+
+        return frame
+
+    def _draw_one_way(self, frame):
+        """
+        일방통행 순환 방향을 화살표로 그린다.
+
+        경로가 왜 저렇게 도는지 영상만 보고 알 수 있어야 한다. 안 그리면
+        '한 바퀴 도는 경로'가 버그인지 일방통행 때문인지 구별할 수 없다.
+
+        순환선은 설계 cm 좌표라 픽셀로 되돌려야 하는데, 그 변환에는 기둥이
+        4개 이상 필요하다. 모자라면 조용히 건너뛴다. (경고는 pixel_to_cm이 낸다)
+        """
+        for (ax, ay), (bx, by) in ONE_WAY_SEGMENTS_WORLD:
+            length = math.hypot(bx - ax, by - ay)
+            if length == 0:
+                continue
+
+            steps = max(int(length / ONE_WAY_ARROW_STEP_CM), 1)
+            for i in range(steps):
+                # 구간을 나눠 각 조각을 화살표 하나로 그린다.
+                # 조각의 방향이 곧 그 구간의 통행 방향이다.
+                t0 = i / steps
+                t1 = (i + 1) / steps
+                p0 = self.cm_to_pixel((ax + (bx - ax) * t0, ay + (by - ay) * t0))
+                p1 = self.cm_to_pixel((ax + (bx - ax) * t1, ay + (by - ay) * t1))
+                if p0 is None or p1 is None:
+                    return      # 변환이 없으면 이 오버레이 자체를 건너뛴다
+
+                cv2.arrowedLine(frame,
+                                (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])),
+                                COLOR_OVERLAY_FLOW, 1, cv2.LINE_AA, tipLength=0.35)
 
         return frame
 
@@ -464,8 +482,12 @@ class ParkingNavigator:
         self.world_history = {}
         # 차량번호 -> 목표 주차 구역 ID
         self.targets = {}
-        # 차량번호 -> 경로 상태 {"waypoints": [...], "index": int, "spot": 구역ID}
+        # 차량번호 -> 경로 상태
+        # {"waypoints": [...], "index": int, "spot": 구역ID, "wrong_way": bool}
         self.routes = {}
+        # 역주행 경고를 이미 남긴 (차량번호, 목적지). 매 프레임 같은 줄을
+        # 찍지 않기 위한 것이다. (_check_one_way 참고)
+        self._wrong_way_warned = set()
         # 보정으로 잡은 자리 픽셀 좌표 {구역ID: (x_px, y_px)}.
         # update_spot_pixels가 매퍼에서 옮겨 담는다. 그 호출을 놓쳐도
         # _spot_pixel이 매퍼에서 바로 읽으므로 비어 있어도 동작한다.
@@ -608,8 +630,7 @@ class ParkingNavigator:
         #   - 비워 둔 자리를 다른 차에게 배정했을 때 목표가 겹친다.
         for car_id in list(self.targets):
             if car_id not in cars_info:
-                self.clear_target(car_id)
-                self.world_history.pop(car_id, None)
+                self.clear_vehicle(car_id)
 
     def update(self, frame, tracks):
         """
@@ -657,6 +678,8 @@ class ParkingNavigator:
 
             guide = GUIDE_UNKNOWN
             route = None
+            route_cm = None
+            route_wrong_way = False
             route_index = 0
             next_waypoint = None
             maneuver = GUIDE_UNKNOWN
@@ -671,6 +694,7 @@ class ParkingNavigator:
                     if state is not None:
                         route_cm = state["waypoints"]
                         route_index = state["index"]
+                        route_wrong_way = bool(state.get("wrong_way"))
                         if route_index < len(route_cm):
                             next_cm = route_cm[route_index]
                         distance_cm = route_length(route_cm, route_index, pos_cm)
@@ -715,6 +739,16 @@ class ParkingNavigator:
                 "target_world": target_pos, # 픽셀 모드면 픽셀 좌표가 들어감
                 "distance_cm": distance_cm,
                 "route": route,
+                # 계획기가 낸 그대로의 cm 경로.
+                #
+                # route는 화면에 그리려고 픽셀로 옮긴 사본이라, 다시 cm가
+                # 필요한 쪽(3번 구간 격자)은 픽셀->cm를 한 번 더 거쳐야 했다.
+                # 변환을 왕복하면 자리 근처에서 몇 cm씩 밀리고, 변환이 실패한
+                # 점은 cm 값이 픽셀 목록에 섞여 들어가 경로가 통째로 튄다.
+                # 원본을 함께 실어 보내면 그 왕복이 사라진다.
+                "route_cm": route_cm,
+                # 이 경로에 역주행 구간이 있는가. (_check_one_way)
+                "route_wrong_way": route_wrong_way,
                 "route_index": route_index,
                 "next_waypoint": next_waypoint,
                 "maneuver": maneuver,
@@ -758,11 +792,47 @@ class ParkingNavigator:
                 return None
             # 첫 경유점은 현재 위치이므로 다음 지점부터 향한다
             state = {"waypoints": waypoints, "index": min(1, len(waypoints) - 1),
-                     "spot": target_spot}
+                     "spot": target_spot,
+                     "wrong_way": self._check_one_way(car_id, target_spot, waypoints)}
             self.routes[car_id] = state
 
         self._advance_waypoint(state, world_pos)
         return state
+
+    def _check_one_way(self, car_id, target_spot, waypoints):
+        """
+        방금 세운 경로가 일방통행을 지키는지 확인하고, 어기면 경고를 남긴다.
+
+        계획기(C01)는 역주행에 큰 벌점을 물릴 뿐 금지하지는 않는다. 막아버리면
+        조건이 하나만 어긋나도 경로가 통째로 안 나와 안내가 멈추기 때문이다.
+        그래서 '역주행 경로가 나오는 것' 자체는 있을 수 있는 일이고, 문제는
+        그 사실이 아무 데도 안 남아서 화면만 보고는 계획기가 그렇게 낸 것인지
+        화면이 잘못 그린 것인지 구별할 수 없었다는 점이다.
+
+        같은 목적지로 계속 재계획되는 동안 같은 경고를 매 프레임 찍지 않도록
+        차량+목적지 단위로 한 번만 남긴다.
+
+        Returns:
+            역주행 구간이 있으면 True.
+        """
+        checker = getattr(self.planner, "wrong_way_legs", None)
+        if checker is None:
+            return False
+
+        bad = checker(waypoints)
+        key = (car_id, target_spot)
+        if not bad:
+            self._wrong_way_warned.discard(key)
+            return False
+
+        if key not in self._wrong_way_warned:
+            self._wrong_way_warned.add(key)
+            first = bad[0]
+            print(f"[경고] 차량 '{car_id}' -> {target_spot} 경로에 역주행 구간이 "
+                  f"{len(bad)}개 있습니다. 예) ({first[1][0]:.0f},{first[1][1]:.0f}) "
+                  f"-> ({first[2][0]:.0f},{first[2][1]:.0f}) "
+                  f"[3번 구간에서 붉은 선으로 표시됩니다]")
+        return True
 
     def _advance_waypoint(self, state, world_pos):
         """

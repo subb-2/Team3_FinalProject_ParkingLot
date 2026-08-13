@@ -1,27 +1,29 @@
 """
 E00_final_ui : 최종 통합 관제 화면
 
-화면을 세로 3열로 나누고, 오른쪽 열은 다시 위아래로 반씩 나눈다.
+위에 1번 구간을 가로 띠로 깔고, 그 아래를 2·3·4번이 똑같이 3등분한다.
 
-    +---------------+-----------------+-----------------+
-    |  1) Zybo 수신  |                 |  2) 주차장 상태  |
-    |               |                 |     (50%)       |
-    |  수신 목록      |  3) 실시간 카메라 |  전체 자리 현황   |
-    |  (전체 높이)    |   차량 검출/추적  |  + 배정 자리     |
-    |               |   오버레이       |    깜빡임        |
-    |               |   (B01/B02)     +-----------------+
-    |               |                 |  4) 실시간 안내   |
-    |               |                 |     (50%)       |
-    |  + 하단 안내문  |                 |  차량 시점       |
-    |    (주차 완료)  |                 |  내비게이션      |
-    |               |                 |  (D00 재사용)    |
-    +---------------+-----------------+-----------------+
+    +------------------------------------------------------------------+
+    | 1) Zybo 수신 & 차량번호 FIFO                                        |
+    |   [수신] -push-> [FIFO 대기열 front→back] -pop-> [안내 중] [주차완료]  |
+    +--------------------+-------------------+-------------------------+
+    | 2) 주차장 CCTV       | 3) 주차장 상태      | 4) 실시간 주차 안내        |
+    |                    |                   |                         |
+    |  카메라 원본 +       |  전체 자리 현황 +    |  차량 시점 내비게이션       |
+    |  검출/추적 오버레이   |  일방통행 화살표 +   |  (D00 재사용)            |
+    |  (B01/B02)         |  안내 경로(파란 선)  |                         |
+    +--------------------+-------------------+-------------------------+
 
-주차 완료/오주차 안내문은 1번 구간 아래에 붙인다. 수신부터 배정, 주차 완료까지
-한 차량의 흐름이 한 열에서 위에서 아래로 읽힌다.
+1번을 가로 띠로 올린 이유는 이 구간이 보여주는 것이 '한 대의 차가 수신에서
+안내, 주차 완료까지 지나가는 흐름'이기 때문이다. B02의 CarNumberFIFO가 실제로
+하는 일(뒤로 쌓고 앞에서 꺼낸다)을 왼쪽에서 오른쪽으로 그대로 늘어놓는다.
+숫자 하나('대기 3대')로 줄이면 어느 차가 다음 차례인지가 화면에서 사라진다.
+
+3번의 안내 경로는 4번이 그리는 것과 같은 경로다. 4번은 차 기준으로 돌려 원근을
+입힐 뿐이라, 일방통행을 지키는지는 화살표와 같은 평면인 3번에서 확인한다.
 
 왜 OpenCV 캔버스가 아니라 HTML인가
-  1번과 2번 구간은 한글 안내문이 핵심이다. OpenCV의 putText는 한글을 못 그린다.
+  1번과 3번 구간은 한글 안내문이 핵심이다. OpenCV의 putText는 한글을 못 그린다.
   (D00의 MANEUVER_LABEL이 전부 영문인 것도 그 때문이다)
   3, 4번만 영상이므로 그 둘은 MJPEG로 넣고 나머지는 브라우저가 그리게 했다.
   깜빡이는 점도 CSS 애니메이션이 프레임을 새로 그리는 것보다 싸다.
@@ -38,7 +40,6 @@ E00_final_ui : 최종 통합 관제 화면
 
 import sys
 import os
-import json
 import threading
 from collections import deque
 from datetime import datetime
@@ -49,7 +50,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.map_data import (
     grid_map, coord_to_spot, PILL_MARKER_ID, spot_type as SPOT_TYPE_OF,
     SPOT_TYPE_NAME, SPOT_CELLS, ROAD, PILL, GATE1, GATE2,
-    SPOT1, SPOT2, SPOT3, SPOT4, get_rows, get_cols,
+    SPOT1, SPOT2, SPOT3, SPOT4, get_rows, get_cols, one_way_segments,
 )
 from data.car_data import cars_info, get_car_type
 from logic.B02_car_mot import CONFIG as B02_CONFIG
@@ -69,7 +70,7 @@ CONFIG = {
     "RX_LOG_MAX": 60,
     "EVENT_LOG_MAX": 40,
 
-    # 2번 구간 격자를 어떤 가로세로비로 그릴지.
+    # 3번 구간 격자를 어떤 가로세로비로 그릴지.
     #
     #   "grid" : 칸을 정사각형으로 그린다. 열(13)이 행(9)보다 많으므로
     #            가로가 긴 화면이 된다. 실제 매트가 가로로 긴 형태라
@@ -188,7 +189,7 @@ class RxFeed:
             return list(self._items), dict(self._total)
 
 
-# 주차 완료 / 오주차 감시 (2번 구간)
+# 주차 완료 / 오주차 감시 (3번 구간)
 class ParkingWatcher:
     """
     차량이 실제로 어디에 섰는지 보고 안내문과 기록을 정리한다.
@@ -358,7 +359,7 @@ class ParkingWatcher:
 # 주차장 배치 (브라우저가 격자를 그릴 때 한 번만 가져간다)
 def lot_aspect(rows, cols):
     """
-    2번 구간 격자의 가로/세로 비를 CONFIG['LOT_ASPECT']에 따라 계산.
+    3번 구간 격자의 가로/세로 비를 CONFIG['LOT_ASPECT']에 따라 계산.
 
     1보다 크면 가로가 긴 화면이다. 자세한 설명은 CONFIG의 주석 참고.
     """
@@ -405,6 +406,12 @@ def build_lot_layout():
         "rows": rows,
         "cols": cols,
         "cells": cells,
+        # 일방통행 순환선. 화면이 격자 위에 화살표로 깔아 준다.
+        # 안내 경로가 왜 한 바퀴 도는지를 이것 없이는 설명할 수 없다.
+        "one_way": [
+            {"r1": a[0], "c1": a[1], "r2": b[0], "c2": b[1]}
+            for a, b in one_way_segments()
+        ],
         # 격자 한 칸의 실제 크기. 참고용으로 함께 보낸다.
         "cell_w_cm": C02_CONFIG['CELL_W_CM'],
         "cell_h_cm": C02_CONFIG['CELL_H_CM'],
@@ -492,7 +499,7 @@ def world_to_cell(world_cm):
     """
     cm 좌표를 격자 좌표(행, 열)로. 소수까지 그대로 돌려준다.
 
-    2번 구간은 격자를 칸 단위로 그리므로, 차량 점을 찍으려면 cm가 아니라
+    3번 구간은 격자를 칸 단위로 그리므로, 차량 점을 찍으려면 cm가 아니라
     '몇 번째 칸의 어디쯤'인지가 필요하다. cell_to_world의 역변환이다.
 
     Returns:
@@ -505,7 +512,7 @@ def world_to_cell(world_cm):
 
 def _build_cars_on_map(pipeline):
     """
-    2번 구간 격자 위에 찍을 차량 점 목록.
+    3번 구간 격자 위에 찍을 차량 점 목록.
 
     픽셀 모드의 world_pos는 이미지 픽셀이므로 cm로 옮긴 뒤 격자 좌표로 바꾼다.
     (PillarMapper.pixel_to_cm)
@@ -570,8 +577,98 @@ def _build_cars_on_map(pipeline):
     return cars
 
 
+def _build_fifo_view(pipeline):
+    """
+    1번 구간이 그릴 FIFO 큐의 현재 모습.
+
+    화면을 로직 그대로 세운다. 왼쪽에서 번호가 들어와(push) 큐에 줄을 서고,
+    카메라가 움직이는 차를 찾으면 맨 앞에서 하나 꺼내(pop) 안내가 시작된다.
+    큐 내용을 숫자 하나('대기 3대')로만 보여주면 순서가 안 보여서, 어느 차가
+    다음 차례인지도 왜 이 차가 먼저 안내받는지도 화면에서 읽을 수 없다.
+
+    Returns:
+        {"waiting": [앞에서부터 차량번호], "active": {...}|None}
+    """
+    fifo = getattr(pipeline.mot, "fifo", None)
+    waiting = fifo.snapshot() if fifo is not None else []
+
+    active_id = getattr(pipeline.mot, "active_car_id", None)
+    active = None
+    if active_id:
+        info = cars_info.get(active_id) or {}
+        active = {
+            "car_id": active_id,
+            "spot_id": info.get("spot_id"),
+            "car_type": info.get("car_type") or get_car_type(active_id),
+        }
+
+    return {
+        "waiting": waiting,
+        "active": active,
+        # 큐에 들어오기를 기다리는 것이 아니라 '이미 꺼내 간' 수. 화면 설명용.
+        "size": len(waiting),
+    }
+
+
+def _build_route_on_map(pipeline, follow_car=None):
+    """
+    3번 구간 격자 위에 그릴 안내 경로.
+
+    4번 구간(차량 시점 3D)이 그리는 것과 '같은 경로, 같은 차'다. 4번은 이
+    경로를 차 기준으로 돌려서 원근을 입힐 뿐이므로, 여기 격자에 그려지는
+    선이 곧 4번이 안내하는 길이다.
+
+    이 선을 3번에 그리는 이유:
+      3D 화면은 차를 따라 돌아가고 원근이 걸려 있어서, 그려진 선이 일방통행을
+      지키는지 눈으로 판정할 수가 없다. 격자는 바닥 화살표(one_way)와 같은
+      평면에 같은 방향으로 서 있으므로, 두 선을 겹쳐 보면 역주행인지 아닌지가
+      바로 보인다.
+
+    좌표는 C00이 계획한 cm 원본(route_cm)을 쓴다. 화면용 픽셀 사본을 다시
+    cm로 되돌리면 변환을 왕복하게 되고, 되돌리지 못한 점이 섞이면 선이 튄다.
+
+    Returns:
+        {"car_id", "target_spot", "wrong_way", "points": [{"row","col"}, ...]}
+        그릴 것이 없으면 None.
+    """
+    from logic.D00_ui_navi import pick_my_vehicle
+
+    nav = pick_my_vehicle(pipeline.latest_nav, follow_car)
+    if nav is None:
+        return None
+
+    route_cm = nav.get("route_cm")
+    if not route_cm or len(route_cm) < 2:
+        return None
+
+    # 남은 구간만 그린다. 이미 지나온 경유점까지 그리면 차 뒤로 선이 남는다.
+    idx = min(nav.get("route_index", 1), len(route_cm) - 1)
+    points = list(route_cm[idx:])
+
+    # 선은 차의 현재 위치에서 시작해야 한다. 다음 경유점부터 그리면
+    # 차와 선이 떨어져 있어 어디로 가라는 것인지 읽히지 않는다.
+    pos = nav.get("world_pos")
+    if pos is not None:
+        start = pipeline.navigator.mapper.pixel_to_cm(pos) or pos
+        points.insert(0, start)
+
+    cells = []
+    for pt in points:
+        row, col = world_to_cell(pt)
+        cells.append({"row": round(row, 3), "col": round(col, 3)})
+
+    return {
+        "car_id": nav.get("car_id"),
+        "target_spot": nav.get("target_spot"),
+        # 계획기가 역주행 구간을 물고 나왔다는 표시. 화면이 붉게 그린다.
+        # (C00._check_one_way가 판정하고 터미널에도 한 번 남긴다)
+        "wrong_way": bool(nav.get("route_wrong_way")),
+        "points": cells,
+    }
+
+
 # 화면 상태 (0.5초마다 브라우저가 가져간다)
-def build_ui_state(pipeline, rx_feed, watcher):
+def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
     """
     세 구간이 그릴 내용을 한 번에 담아 반환.
 
@@ -625,11 +722,14 @@ def build_ui_state(pipeline, rx_feed, watcher):
     return {
         # --- 1번 구간 ---
         "rx": {"items": rx_items, "total": rx_total},
+        "fifo": _build_fifo_view(pipeline),
 
-        # --- 2번 구간 ---
+        # --- 3번 구간 ---
         "spots": spots,
         # 격자 위에 실시간으로 움직이는 차량 점
         "cars_on_map": _build_cars_on_map(pipeline),
+        # 4번 구간이 안내하는 것과 같은 경로. 격자 위에 파란 선으로 깐다.
+        "route_on_map": _build_route_on_map(pipeline, follow_car),
         "assigned_pending": assigned_pending,
         "availability": {
             info["name"]: {"empty": info["empty"], "total": info["total"]}
@@ -638,7 +738,7 @@ def build_ui_state(pipeline, rx_feed, watcher):
         "latest_event": latest,
         "events": events,
 
-        # --- 3번 구간 + 공통 ---
+        # --- 2번 구간 + 공통 ---
         "vehicles": [
             {
                 "car_id": n.get("car_id"),
@@ -692,17 +792,23 @@ FINAL_UI_HTML = r"""
  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
       font-family:"Malgun Gothic","맑은 고딕","Noto Sans KR",sans-serif}
 
- /* 3분할. 오른쪽 칸은 다시 위아래 반반으로 나뉜다.
-    +---------+-----------+-----------+
-    | 1 수신   |           | 2 주차장   |
-    |         | 3 카메라   +-----------+
-    | +안내문  |           | 4 주차안내 |
-    +---------+-----------+-----------+                        */
- #app{display:grid;grid-template-columns:0.9fr 1.5fr 1.5fr;
+ /* 위에 1번 가로 띠, 아래에 2·3·4번 3등분.
+    +-------------------------------------------------------+
+    | 1 수신 -> push -> FIFO 큐 -> pop -> 안내 중 -> 주차 완료  |
+    +---------------+---------------+-----------------------+
+    | 2 주차장 CCTV  | 3 주차장 상태   | 4 실시간 주차 안내       |
+    +---------------+---------------+-----------------------+
+
+    1번을 가로 띠로 올린 이유: 이 구간이 보여주는 것은 '한 대의 차가 수신에서
+    안내까지 지나가는 흐름'이라 왼쪽에서 오른쪽으로 읽혀야 한다. 세로 열에
+    넣으면 그 흐름이 그냥 목록으로만 보인다.
+
+    아래 셋은 1fr씩 똑같이. 퍼센트로 주면 33%x3 + gap이 100%를 넘어
+    오른쪽이 잘린다. */
+ #app{display:grid;grid-template-rows:auto 1fr;
       gap:10px;padding:10px;height:100vh}
- /* 50 : 50. fr로 주어야 사이의 gap이 비율에서 알아서 빠진다.
-    퍼센트로 주면 50%+50%+gap이 100%를 넘어 아래가 잘린다. */
- #right{display:grid;grid-template-rows:1fr 1fr;gap:10px;min-height:0;min-width:0}
+ #grid{display:grid;grid-template-columns:1fr 1fr 1fr;
+       gap:10px;min-height:0;min-width:0}
  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;
       display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
  .col > h2{margin:0;padding:11px 14px;font-size:15px;font-weight:600;
@@ -714,21 +820,62 @@ FINAL_UI_HTML = r"""
  .sub{font-size:11px;color:var(--dim);font-weight:400}
  .body{flex:1;overflow:auto;padding:10px 12px;min-height:0}
 
- /* ---- 1번 구간 : 수신 목록 ---- */
+ /* ---- 1번 구간 : 수신 -> FIFO -> 안내 (가로 흐름) ----
+    로직 순서 그대로 왼쪽에서 오른쪽으로 늘어놓는다.
+      수신(A00) -> push -> 대기열(CarNumberFIFO) -> pop -> 안내 중(B02) -> 주차 완료 */
+ #pipe{display:flex;align-items:stretch;gap:0;padding:10px 12px;
+       min-height:0;overflow:hidden}
+ .stg{background:#232329;border:1px solid var(--line);border-radius:8px;
+      padding:8px 11px;display:flex;flex-direction:column;min-width:0;
+      justify-content:flex-start}
+ .stg > .cap{font-size:10px;color:var(--dim);margin-bottom:6px;white-space:nowrap;
+             display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+ .stg.rxbox{flex:0 0 210px}
+ .stg.queue{flex:1;min-width:0;border-color:#3a5a72;background:#1e242b}
+ .stg.act  {flex:0 0 172px}
+ .stg.done {flex:0 0 258px}
+
+ /* 단계 사이 화살표. push / pop이 어느 쪽으로 도는지가 이 화면의 핵심이다. */
+ .flowarw{flex:0 0 62px;display:flex;flex-direction:column;align-items:center;
+          justify-content:center;color:var(--dim);font-size:10px;gap:2px}
+ .flowarw b{font-size:11px;color:var(--accent);font-weight:700}
+ .flowarw .ln{width:100%;height:0;border-top:1px solid #3f3f48;position:relative}
+ .flowarw .ln::after{content:"";position:absolute;right:0;top:-4px;
+                     border-left:7px solid #3f3f48;
+                     border-top:4px solid transparent;border-bottom:4px solid transparent}
+
+ /* 대기열 카드. 왼쪽 끝이 front(다음에 매칭될 차)다. */
+ .qrow{display:flex;align-items:center;gap:6px;overflow-x:auto;min-height:44px}
+ .qcard{flex:0 0 auto;border:1px solid #3f6f92;border-radius:7px;background:#22303b;
+        padding:5px 11px;text-align:center}
+ .qcard.front{border-color:var(--accent);background:#1d3d55;
+              box-shadow:0 0 0 2px rgba(63,169,255,.22)}
+ .qcard .no{font-size:17px;font-weight:700;letter-spacing:2px;
+            font-variant-numeric:tabular-nums;line-height:1.25}
+ .qcard .mk{font-size:9px;color:var(--accent);letter-spacing:0}
+ .qempty{color:var(--dim);font-size:12px;padding:12px 4px}
+
+ /* 최근 수신 (가로 띠라 최근 두 건만 보인다) */
  .rx{border:1px solid var(--line);border-left:3px solid var(--accent);
-     border-radius:7px;padding:8px 10px;margin-bottom:7px;background:#232329}
+     border-radius:6px;padding:5px 8px;margin-bottom:5px;background:#1e1e23}
  .rx.exit{border-left-color:var(--warn)}
  .rx.fail{border-left-color:var(--bad)}
  .rx-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
- .rx-car{font-size:21px;font-weight:700;letter-spacing:2px;font-variant-numeric:tabular-nums}
- .rx-time{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
- .rx-tag{font-size:10px;padding:2px 6px;border-radius:4px;background:#33333b;color:var(--dim)}
- .rx-line{font-size:12px;color:var(--dim);margin-top:4px;word-break:break-all}
+ .rx-car{font-size:16px;font-weight:700;letter-spacing:1.5px;font-variant-numeric:tabular-nums}
+ .rx-time{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+ .rx-line{font-size:11px;color:var(--dim);margin-top:2px;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
  .rx-spot{color:var(--ok);font-weight:600}
  .rx-fail{color:var(--bad)}
- .empty{color:var(--dim);font-size:13px;text-align:center;padding:26px 10px;line-height:1.7}
+ .empty{color:var(--dim);font-size:12px;text-align:center;padding:14px 8px;line-height:1.6}
 
- /* ---- 2번 구간 : 주차장 상태 ---- */
+ /* 안내 중인 차 */
+ .actcar{font-size:20px;font-weight:700;letter-spacing:2px;color:#ffd964;
+         font-variant-numeric:tabular-nums}
+ .actto{font-size:12px;color:var(--dim);margin-top:3px}
+ .actto b{color:var(--ok)}
+
+ /* ---- 3번 구간 : 주차장 상태 ---- */
  #lotwrap{flex:1;display:flex;align-items:center;justify-content:center;
           padding:8px;min-height:0;min-width:0}
  /* 크기는 fitLot()이 픽셀로 넣는다.
@@ -741,6 +888,22 @@ FINAL_UI_HTML = r"""
     칸(그리드 아이템)이 아니라 격자 전체를 덮는 한 겹 위에 올린다.
     transition 시간을 폴링 주기에 맞춰 두면 0.4초마다 오는 위치가
     뚝뚝 끊기지 않고 이어져 보인다. */
+ /* 일방통행 화살표. 바닥 표시이므로 차량 점보다 아래, 칸보다 위에 깐다. */
+ #flow{position:absolute;inset:0;pointer-events:none;overflow:visible}
+ #flow path{stroke:#3d6b6b;stroke-width:1.5;fill:none}
+ #flow polygon{fill:#3d6b6b}
+ /* 안내 경로. 일방통행 화살표 위, 차량 점 아래에 깐다.
+    4번 구간이 그리는 것과 같은 선이므로 색도 그쪽 파랑에 맞춘다. */
+ #route{position:absolute;inset:0;pointer-events:none;overflow:visible}
+ #route .rt{stroke:#42b2ff;stroke-width:5;fill:none;
+            stroke-linejoin:round;stroke-linecap:round;opacity:.9}
+ #route .rt.bad{stroke:#ff5a5a}
+ #route .goal{fill:#42b2ff}
+ #route .goal.bad{fill:#ff5a5a}
+ /* 3번 제목줄에 지금 그려진 경로가 누구 것인지 적는다.
+    4번과 같은 차를 고르므로 두 화면을 짝지어 읽을 수 있다. */
+ #lotroute{color:#42b2ff;margin-right:8px}
+ #lotroute.bad{color:#ff5a5a}
  #cars{position:absolute;inset:0;pointer-events:none}
  .car{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
       border-radius:50%;background:var(--accent);border:2px solid #0b0b0d;
@@ -780,22 +943,24 @@ FINAL_UI_HTML = r"""
  .av .n{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
  .av .l{font-size:10px;color:var(--dim);margin-top:1px}
 
- /* 하단 안내문 */
- #notice{border-top:1px solid var(--line);padding:11px 14px;min-height:96px;
-         background:#1a1a1e}
- #notice.ok{border-top:2px solid var(--ok)}
- #notice.bad{border-top:2px solid var(--bad)}
- #notice.warn{border-top:2px solid var(--warn)}
- .nt-head{display:flex;justify-content:space-between;font-size:11px;
-          color:var(--dim);margin-bottom:6px}
- .nt-line{font-size:15px;font-weight:600;line-height:1.55}
+ /* 주차 완료 안내문. 흐름의 마지막 칸이라 1번 띠의 오른쪽 끝에 붙는다.
+    수신 -> 큐 -> 안내 -> 완료가 한 줄로 읽힌다. */
+ #notice{overflow:hidden;min-width:0}
+ #notice.ok  {border-color:var(--ok)}
+ #notice.bad {border-color:var(--bad)}
+ #notice.warn{border-color:var(--warn)}
+ .nt-head{display:flex;justify-content:space-between;font-size:10px;
+          color:var(--dim);margin-bottom:4px;gap:8px}
+ .nt-line{font-size:13px;font-weight:600;line-height:1.5;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  #notice.ok .nt-line{color:var(--ok)}
  #notice.bad .nt-line{color:#ff9b9b}
  #notice.warn .nt-line{color:var(--warn)}
- .nt-note{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
- .nt-idle{font-size:13px;color:var(--dim)}
+ .nt-note{font-size:10px;color:var(--dim);margin-top:3px;line-height:1.45;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .nt-idle{font-size:12px;color:var(--dim)}
 
- /* ---- 3번 구간 : 카메라 (차량 검출) ---- */
+ /* ---- 2번 구간 : 카메라 (차량 검출) ---- */
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
     min-height:0이 없으면 flex 자식이 콘텐츠 크기만큼 밀어내 패널이 넘친다. */
  #camwrap{flex:1;display:flex;align-items:center;justify-content:center;
@@ -835,38 +1000,70 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 1번 구간 : Zybo 수신 (왼쪽 열 전체). 아래에 주차 완료 안내문이 붙는다 -->
-  <div class="col" id="left">
-    <h2><span><span class="num">1</span>Zybo 수신</span>
+  <!-- 1번 구간 : Zybo 수신 -> FIFO 대기열 -> 안내 -> 주차 완료 (상단 가로 띠).
+       B02의 CarNumberFIFO가 실제로 하는 일을 그대로 늘어놓은 것이다. -->
+  <div class="col" id="top">
+    <h2><span><span class="num">1</span>Zybo 수신 &amp; 차량번호 FIFO</span>
         <span class="sub" id="rxcount">-</span></h2>
-    <div class="body" id="rxlist">
-      <div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>
+    <div id="pipe">
+
+      <div class="stg rxbox">
+        <div class="cap"><span>수신 (A00)</span><span>2바이트</span></div>
+        <div id="rxlist">
+          <div class="empty">Zybo 수신 대기 중</div>
+        </div>
+      </div>
+
+      <div class="flowarw"><b>push</b><div class="ln"></div><span>배정 성공만</span></div>
+
+      <div class="stg queue">
+        <div class="cap"><span>FIFO 대기열 (front → back)</span>
+                         <span id="qcount">대기 0대</span></div>
+        <div class="qrow" id="queue">
+          <div class="qempty">대기 중인 차량번호가 없습니다.</div>
+        </div>
+      </div>
+
+      <div class="flowarw"><b>pop</b><div class="ln"></div><span>움직이는 차</span></div>
+
+      <div class="stg act">
+        <div class="cap"><span>안내 중 (B02)</span></div>
+        <div id="active"><div class="empty">없음</div></div>
+      </div>
+
+      <div class="flowarw"><b>도착</b><div class="ln"></div><span>반경 __ARRIVAL_CM__cm</span></div>
+
+      <div class="stg done" id="notice">
+        <div class="cap"><span>주차 완료 / 오주차</span></div>
+        <div id="noticebody"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
+      </div>
+
     </div>
-    <div id="notice"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
   </div>
 
-  <!-- 3번 구간 : 카메라 실시간 (차량 검출/추적 오버레이) -->
-  <div class="col">
-    <h2><span><span class="num">3</span>실시간 카메라 (차량 검출)</span>
-        <span class="sub" id="camsub">-</span></h2>
-    <div id="camwrap">
-      <img id="camimg" src="/video_feed">
-      <div id="tracks"></div>
-    </div>
-    <div id="caminfo">
-      <span id="camdet">검출 대기 중</span>
-      <span><span class="pill" id="cammark">-</span>
-            <span class="pill" id="camfps">-</span></span>
-    </div>
-  </div>
+  <!-- 아래 3등분 : 2 CCTV / 3 주차장 상태 / 4 실시간 안내 -->
+  <div id="grid">
 
-  <!-- 오른쪽 열 : 위 2번 주차장 상태 / 아래 4번 실시간 안내 (반반) -->
-  <div id="right">
-
-    <!-- 2번 구간 : 주차장 상태 -->
+    <!-- 2번 구간 : 주차장 CCTV (차량 검출/추적 오버레이) -->
     <div class="col">
-      <h2><span><span class="num">2</span>주차장 상태</span>
-          <span class="sub" id="lottime">-</span></h2>
+      <h2><span><span class="num">2</span>주차장 CCTV 화면</span>
+          <span class="sub" id="camsub">-</span></h2>
+      <div id="camwrap">
+        <img id="camimg" src="/video_feed">
+        <div id="tracks"></div>
+      </div>
+      <div id="caminfo">
+        <span id="camdet">검출 대기 중</span>
+        <span><span class="pill" id="cammark">-</span>
+              <span class="pill" id="camfps">-</span></span>
+      </div>
+    </div>
+
+    <!-- 3번 구간 : 주차장 상태 -->
+    <div class="col">
+      <h2><span><span class="num">3</span>주차장 상태</span>
+          <span class="sub"><span id="lotroute"></span>
+          <span id="lottime">-</span></span></h2>
       <div id="lotwrap"><div id="lot"></div></div>
       <div id="avail"></div>
     </div>
@@ -908,6 +1105,122 @@ function fitLot(){
   const w = Math.min(availW, availH * lotAspect);
   lot.style.width  = Math.floor(w) + 'px';
   lot.style.height = Math.floor(w / lotAspect) + 'px';
+  drawFlow();
+  drawRoute();
+}
+
+// 격자 좌표(행/열) -> 격자 안 픽셀. 칸 사이 gap까지 넣는다.
+// drawFlow / drawRoute / renderCars가 모두 같은 규칙을 써야 선과 점이 맞는다.
+function lotMetrics(){
+  const lot = document.getElementById('lot');
+  if (!layout) return null;
+  const w = lot.clientWidth, h = lot.clientHeight;
+  if (!w || !h) return null;
+  const cw = (w - (layout.cols - 1) * LOT_GAP) / layout.cols;
+  const ch = (h - (layout.rows - 1) * LOT_GAP) / layout.rows;
+  return {
+    w, h, cw, ch,
+    cx: c => c * (cw + LOT_GAP) + cw / 2,
+    cy: r => r * (ch + LOT_GAP) + ch / 2,
+  };
+}
+
+// 일방통행 화살표를 격자 위에 그린다.
+// 격자 크기가 바뀔 때마다 다시 그려야 하므로 fitLot에서 부른다.
+// 좌표 계산은 renderCars와 같은 규칙이다. (칸 사이 gap까지 넣는다)
+function drawFlow(){
+  const lot = document.getElementById('lot');
+  const svg = document.getElementById('flow');
+  if (!layout || !svg || !layout.one_way) return;
+
+  const w = lot.clientWidth, h = lot.clientHeight;
+  if (!w || !h) return;
+  const cw = (w - (layout.cols - 1) * LOT_GAP) / layout.cols;
+  const ch = (h - (layout.rows - 1) * LOT_GAP) / layout.rows;
+  const cx = c => c * (cw + LOT_GAP) + cw / 2;
+  const cy = r => r * (ch + LOT_GAP) + ch / 2;
+
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+
+  let out = '';
+  const STEP = 60;      // 화살촉 간격 (px)
+  const HEAD = 5;       // 화살촉 크기 (px)
+
+  layout.one_way.forEach(seg => {
+    const x1 = cx(seg.c1), y1 = cy(seg.r1);
+    const x2 = cx(seg.c2), y2 = cy(seg.r2);
+    out += `<path d="M ${x1} ${y1} L ${x2} ${y2}"/>`;
+
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (!len) return;
+    const ux = (x2 - x1) / len, uy = (y2 - y1) / len;   // 진행 방향
+    const px = -uy, py = ux;                            // 그 수직 방향
+
+    // 구간을 STEP 간격으로 나눠 각 조각 가운데에 화살촉을 찍는다.
+    const n = Math.max(Math.round(len / STEP), 1);
+    for (let i = 0; i < n; i++){
+      const t = (i + 0.5) / n * len;
+      const hx = x1 + ux * t, hy = y1 + uy * t;
+      out += `<polygon points="${hx + ux*HEAD},${hy + uy*HEAD} `
+           + `${hx - ux*HEAD + px*HEAD},${hy - uy*HEAD + py*HEAD} `
+           + `${hx - ux*HEAD - px*HEAD},${hy - uy*HEAD - py*HEAD}"/>`;
+    }
+  });
+
+  svg.innerHTML = out;
+}
+
+// 안내 경로. 4번 구간(차량 시점)이 그리는 것과 같은 선을 격자 위에 그대로
+// 깐다. 바닥 화살표(drawFlow)와 같은 평면에 겹쳐 보이므로, 안내가 일방통행을
+// 지키는지 화살표와 비교해 바로 확인할 수 있다.
+//
+// 격자 크기가 바뀔 때(fitLot)와 상태가 올 때(renderRoute) 모두 다시 그려야
+// 하므로 마지막 상태를 붙들어 둔다.
+let lastRoute = null;
+
+function drawRoute(){
+  const svg = document.getElementById('route');
+  const m = lotMetrics();
+  if (!svg || !m) return;
+
+  svg.setAttribute('viewBox', `0 0 ${m.w} ${m.h}`);
+  svg.setAttribute('width', m.w);
+  svg.setAttribute('height', m.h);
+
+  const rt = lastRoute;
+  if (!rt || !rt.points || rt.points.length < 2){
+    svg.innerHTML = '';
+    return;
+  }
+
+  // 역주행 구간을 물고 나온 경로는 붉게 그린다. 잘못된 안내를 파란 선으로
+  // 그리면 화면만 보고는 정상과 구별할 수 없다.
+  const bad = rt.wrong_way ? ' bad' : '';
+  const pts = rt.points
+    .map(p => `${m.cx(p.col).toFixed(1)},${m.cy(p.row).toFixed(1)}`).join(' ');
+  const goal = rt.points[rt.points.length - 1];
+
+  svg.innerHTML =
+    `<polyline class="rt${bad}" points="${pts}"/>` +
+    `<circle class="goal${bad}" cx="${m.cx(goal.col).toFixed(1)}" `
+    + `cy="${m.cy(goal.row).toFixed(1)}" r="4"/>`;
+}
+
+function renderRoute(st){
+  lastRoute = st.route_on_map || null;
+  drawRoute();
+
+  const sub = document.getElementById('lotroute');
+  if (!sub) return;
+  if (!lastRoute){
+    sub.textContent = '';
+    return;
+  }
+  sub.textContent = `${lastRoute.car_id || '?'} → ${lastRoute.target_spot || '?'}`
+    + (lastRoute.wrong_way ? ' (역주행 경고)' : '');
+  sub.className = lastRoute.wrong_way ? 'bad' : '';
 }
 
 // 크기가 잡히는 시점이 제각각이라 세 군데서 부른다.
@@ -963,6 +1276,16 @@ function buildLot(lay){
     }
   }
 
+  // 일방통행 화살표 겹. 차량 점보다 먼저 붙여 아래에 깔리게 한다.
+  const flow = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  flow.id = 'flow';
+  lot.appendChild(flow);
+
+  // 안내 경로 겹. 화살표 위, 차량 점 아래.
+  const route = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  route.id = 'route';
+  lot.appendChild(route);
+
   // 차량 점을 올릴 겹. 칸을 다 만든 뒤에 붙인다 (innerHTML='' 로 지워지므로)
   const cars = document.createElement('div');
   cars.id = 'cars';
@@ -981,18 +1304,22 @@ function esc(s){
     m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 }
 
-// ---- 1번 구간 ----
+// ---- 1번 구간 : 수신 -> FIFO -> 안내 ----
+// 가로 띠라 높이가 좁다. 수신 목록은 최근 두 건만 보여준다.
+// (전체 이력이 필요하면 /status를 볼 것)
+const RX_SHOWN = 2;
+
 function renderRx(rx){
   document.getElementById('rxcount').textContent =
     `입차 ${rx.total.entry} · 출차 ${rx.total.exit}`;
 
   const box = document.getElementById('rxlist');
   if (!rx.items.length){
-    box.innerHTML = '<div class="empty">Zybo에서 보낸 차량번호를 기다리는 중입니다.</div>';
+    box.innerHTML = '<div class="empty">Zybo 수신 대기 중</div>';
     return;
   }
 
-  box.innerHTML = rx.items.map(it => {
+  box.innerHTML = rx.items.slice(0, RX_SHOWN).map(it => {
     const cls = !it.ok ? 'fail' : (it.role === 'exit' ? 'exit' : '');
     let detail;
     if (it.role === 'exit'){
@@ -1006,19 +1333,42 @@ function renderRx(rx){
     } else {
       detail = `<span class="rx-fail">${esc(it.message) || '배정 실패'}</span>`;
     }
-    const src = it.source === 'manual' ? '<span class="rx-tag">수동</span>' : '';
+    const src = it.source === 'manual' ? '(수동)' : '';
     return `<div class="rx ${cls}">
       <div class="rx-top">
         <span class="rx-car">${esc(it.car_id)}</span>
-        <span class="rx-time">${esc(it.role_label)} ${src} ${esc(it.time)}</span>
+        <span class="rx-time">${esc(it.role_label)}${src} ${esc(it.time)}</span>
       </div>
       <div class="rx-line">${detail}</div>
-      <div class="rx-line">수신 ${esc(it.raw_hex)}</div>
     </div>`;
   }).join('');
 }
 
-// ---- 2번 구간 ----
+// FIFO 대기열. 왼쪽 끝이 front(다음에 매칭될 차)다.
+// 이 순서가 곧 안내를 받는 순서라, 숫자 하나로 줄이면 화면에서 그 사실이 사라진다.
+function renderFifo(st){
+  const f = st.fifo || {waiting: [], active: null};
+
+  document.getElementById('qcount').textContent = `대기 ${f.waiting.length}대`;
+
+  const q = document.getElementById('queue');
+  q.innerHTML = f.waiting.length
+    ? f.waiting.map((car, i) =>
+        `<div class="qcard${i === 0 ? ' front' : ''}">
+           <div class="no">${esc(car)}</div>
+           <div class="mk">${i === 0 ? 'front' : '&nbsp;'}</div>
+         </div>`).join('')
+    : '<div class="qempty">대기 중인 차량번호가 없습니다.</div>';
+
+  const a = document.getElementById('active');
+  a.innerHTML = f.active
+    ? `<div class="actcar">${esc(f.active.car_id)}</div>
+       <div class="actto">→ <b>${esc(f.active.spot_id || '?')}</b>
+          <span>${esc(f.active.car_type || '')}</span></div>`
+    : '<div class="empty">없음</div>';
+}
+
+// ---- 3번 구간 ----
 function renderLot(st){
   for (const [spotId, els] of Object.entries(cellEls)){
     const s = st.spots[spotId];
@@ -1111,13 +1461,16 @@ const NOTICE_CLASS = {
 };
 
 function renderNotice(ev){
-  const box = document.getElementById('notice');
+  // 겉칸(#notice)은 1번 띠의 카드라서 stg/done 클래스를 잃으면 안 된다.
+  // 상태 색만 갈아 끼우고 내용은 안쪽(#noticebody)에 쓴다.
+  const card = document.getElementById('notice');
+  const box = document.getElementById('noticebody');
   if (!ev){
-    box.className = '';
+    card.className = 'stg done';
     box.innerHTML = '<div class="nt-idle">주차 완료를 기다리는 중입니다.</div>';
     return;
   }
-  box.className = NOTICE_CLASS[ev.kind] || '';
+  card.className = 'stg done ' + (NOTICE_CLASS[ev.kind] || '');
   const where = ev.spot_id ? `${esc(ev.spot_id)}` : '위치 미확인';
   box.innerHTML =
     `<div class="nt-head"><span>차량 ${esc(ev.car_id)} · ${where}</span>
@@ -1126,7 +1479,7 @@ function renderNotice(ev){
     (ev.note ? `<div class="nt-note">${esc(ev.note)}</div>` : '');
 }
 
-// ---- 3번 구간 : 카메라 ----
+// ---- 2번 구간 : 카메라 ----
 function renderCam(st){
   const t = st.tracks;
   document.getElementById('camsub').textContent =
@@ -1182,8 +1535,10 @@ async function tick(){
     }
     const st = await (await fetch('/ui_state')).json();
     renderRx(st.rx);
+    renderFifo(st);
     renderLot(st);
     renderCars(st);
+    renderRoute(st);
     renderNotice(st.latest_event);
     renderCam(st);
     renderNav(st);
@@ -1199,8 +1554,16 @@ setInterval(tick, POLL_MS);
 
 
 def render_page():
-    """최종 화면 HTML을 반환."""
-    return FINAL_UI_HTML.replace("__POLL_MS__", str(CONFIG['POLL_INTERVAL_MS']))
+    """
+    최종 화면 HTML을 반환.
+
+    설정에서 온 값은 HTML에 박아두지 않고 여기서 채운다. 박아두면 CONFIG를
+    고쳤을 때 화면만 옛 값으로 남아, 화면에 적힌 숫자와 실제 판정이 어긋난다.
+    """
+    return (FINAL_UI_HTML
+            .replace("__POLL_MS__", str(CONFIG['POLL_INTERVAL_MS']))
+            .replace("__ARRIVAL_CM__",
+                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_RADIUS_CM']:g}"))
 
 
 # 단독 실행 : 배치 JSON 확인

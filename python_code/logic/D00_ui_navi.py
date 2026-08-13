@@ -7,15 +7,19 @@ from collections import deque
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# 안내 방향 상수는 C00이, 배치 실좌표는 C02가 원본이다.
+# C00을 거쳐 좌표를 가져오지 않는다. 재수출은 출처를 흐린다.
 from logic.C00_navigation import (
-    SPOT_WORLD_POS, GATE1_WORLD_POS, GATE2_WORLD_POS,
     GUIDE_ARRIVED, GUIDE_UNKNOWN, GUIDE_STRAIGHT, GUIDE_LEFT,
     GUIDE_RIGHT, GUIDE_UTURN,
 )
-from logic.C02_lot_layout import cell_to_world, CONFIG as C02_CONFIG
+from logic.C02_lot_layout import (
+    SPOT_WORLD_POS, GATE1_WORLD_POS, GATE2_WORLD_POS,
+    cell_to_world, ONE_WAY_SEGMENTS_WORLD, CONFIG as C02_CONFIG,
+)
 from data.map_data import (
-    grid_map, coord_to_spot, PILL_MARKER_ID, spot_type,
-    ROAD, SPOT_CELLS, SPOT_TYPE_NAME, SPOT1, SPOT2, SPOT3, SPOT4,
+    grid_map, PILL_MARKER_ID, spot_type,
+    ROAD, SPOT_CELLS, SPOT1, SPOT2, SPOT3, SPOT4,
     GATE1, GATE2, PILL, get_rows, get_cols, get_spot_cell_count,
 )
 
@@ -116,6 +120,10 @@ COLOR_VEHICLE_UNK = (0, 165, 255)    # 차량 (번호 미매칭)
 COLOR_TRAJECTORY  = (0, 220, 220)    # 이동 궤적
 COLOR_GUIDE_LINE  = (0, 255, 255)    # 안내선
 COLOR_ARRIVED     = (0, 255, 0)      # 도착 표시
+COLOR_ONE_WAY     = (110, 105, 70)   # 일방통행 방향 (바닥 표시라 어둡게)
+
+# 일방통행 화살표 간격 (cm). 촘촘하면 배경이 지저분해진다.
+ONE_WAY_ARROW_STEP_CM = 25.0
 
 # 차량 시점 화면 색상 (BGR)
 #
@@ -131,6 +139,9 @@ COLOR_NAV_CARD    = (38, 34, 30)     # 떠 있는 카드 (조감도/상태)
 COLOR_NAV_LINE    = (64, 60, 56)     # 카드 테두리
 COLOR_NAV_ROUTE   = (255, 178, 66)   # 주행 경로 (내비 특유의 하늘색)
 COLOR_NAV_ROUTE_E = (170, 96, 16)    # 경로 테두리 (짙은 파랑)
+# 계획된 경로가 아니라 '목적지 방향'만 가리키는 직선. 통로도 일방통행도
+# 지키지 않은 선이므로 경로와 같은 색으로 그리면 안 된다. (_route_points)
+COLOR_NAV_ROUTE_HINT = (130, 126, 122)
 COLOR_NAV_CAR     = (245, 245, 245)  # 내 차량 (흰 화살표)
 COLOR_NAV_HALO    = (200, 130, 40)   # 내 차량 주변 후광
 COLOR_NAV_ACCENT  = (255, 210, 120)  # 강조 (거리 숫자)
@@ -139,7 +150,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 # 방위 고정 화면에서 쓰는 시선 방향.
 # _world_to_flat의 각도 규약(x축 오른쪽 0도, y축 아래로 +90도)에서 -90도가
-# '월드의 위쪽(-y)이 화면 위쪽'이다. 즉 2번 주차장 상태 화면과 같은 방향.
+# '월드의 위쪽(-y)이 화면 위쪽'이다. 즉 3번 주차장 상태 화면과 같은 방향.
 FIXED_VIEW_HEADING = -90.0
 
 
@@ -147,6 +158,31 @@ FIXED_VIEW_HEADING = -90.0
 # OpenCV에는 둥근 모서리도, 반투명 채우기도 없다. 실제 내비게이션 UI는
 # 거의 전부 '둥근 카드'라서 이 둘이 없으면 어떻게 그려도 각진 관제 화면이
 # 된다. 아래 세 함수가 그 셋을 메운다.
+def _dashed_polyline(img, pts, color, thickness, dash=16, gap=12):
+    """
+    점선 꺾은선. OpenCV에는 점선이 없어서 구간을 잘라 그린다.
+
+    '계획된 경로가 아니다'를 선 모양만으로 알리려고 만들었다. 색만 바꾸면
+    작은 화면에서 구분이 안 된다.
+    """
+    period = max(dash + gap, 1)
+    for a, b in zip(pts[:-1], pts[1:]):
+        x1, y1 = float(a[0]), float(a[1])
+        x2, y2 = float(b[0]), float(b[1])
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < 1:
+            continue
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        t = 0.0
+        while t < length:
+            e = min(t + dash, length)
+            cv2.line(img,
+                     (int(x1 + ux * t), int(y1 + uy * t)),
+                     (int(x1 + ux * e), int(y1 + uy * e)),
+                     color, thickness, cv2.LINE_AA)
+            t += period
+
+
 def _rounded_rect(img, p1, p2, radius, color, thickness=-1):
     """모서리가 둥근 사각형."""
     x1, y1 = int(p1[0]), int(p1[1])
@@ -585,7 +621,7 @@ class NavigationView:
         """
         if self._display_heading is None:
             # 아직 한 번도 안 움직인 차를 임의 방향으로 돌려놓으면 어디가
-            # 어디인지 알 수 없다. 2번 주차장 상태 화면과 같은 방향에서 시작한다.
+            # 어디인지 알 수 없다. 3번 주차장 상태 화면과 같은 방향에서 시작한다.
             self._display_heading = (FIXED_VIEW_HEADING if moving_deg is None
                                      else moving_deg)
             return self._display_heading
@@ -770,19 +806,28 @@ class NavigationView:
 
     def _route_points(self, nav):
         """
-        내 차에서 목적지까지 이어 그릴 점들. 없으면 None.
+        내 차에서 목적지까지 이어 그릴 점들과 그것이 '계획된 경로'인지 여부.
 
         경로 계획(C01)이 있으면 남은 경유점을 따라가고, 없으면 목적지까지
         직선으로 잇는다. 픽셀 모드에는 경로 계획이 없어 목적지가 정해져 있는데도
         아무 선도 그리지 않던 것을 메운다.
+
+        둘을 구분해서 돌려주는 이유: 직선은 통로도 일방통행도 전혀 고려하지
+        않은 '방향 표시'일 뿐인데, 계획된 경로와 똑같은 파란 띠로 그리면
+        화면만 보고는 구별할 수 없다. 주차 구역을 관통하고 역주행으로 보이는
+        선이 계획기가 낸 것으로 오해된다. 그래서 호출부가 다르게 그릴 수 있게
+        사실을 함께 넘긴다.
+
+        Returns:
+            (점 목록, planned). 그릴 것이 없으면 (None, False).
         """
         route = nav.get("route")
         if route and len(route) >= 2:
             idx = min(nav.get("route_index", 1), len(route) - 1)
-            return list(route[idx:])
+            return list(route[idx:]), True
 
         target = nav.get("target_world")
-        return [target] if target is not None else None
+        return ([target], False) if target is not None else (None, False)
 
     def _draw_ground_route(self, layer, car_pos, heading, nav):
         """
@@ -790,14 +835,22 @@ class NavigationView:
 
         polylines는 꺾이는 곳이 뾰족하게 잘린다. 이음매마다 원을 찍어
         둥글게 만들면 내비게이션의 그 파란 경로선이 된다.
+
+        계획된 경로가 아닐 때(목적지까지의 직선)는 얇은 회색 점선으로 그린다.
+        같은 파란 띠로 그리면 통로도 일방통행도 안 지킨 선이 계획 결과처럼
+        보인다. (_route_points 주석 참고)
         """
-        rest = self._route_points(nav)
+        rest, planned = self._route_points(nav)
         if not rest:
             return
 
         pts = [self._world_to_flat(car_pos, car_pos, heading)]
         pts += [self._world_to_flat(p, car_pos, heading) for p in rest]
         arr = np.array(pts, dtype=np.int32)
+
+        if not planned:
+            _dashed_polyline(layer, arr, COLOR_NAV_ROUTE_HINT, 4, dash=18, gap=14)
+            return
 
         for color, w in ((COLOR_NAV_ROUTE_E, 30), (COLOR_NAV_ROUTE, 22)):
             cv2.polylines(layer, [arr], False, color, w, cv2.LINE_AA)
@@ -1005,7 +1058,7 @@ class NavigationView:
         방위 나침반.
 
         화면이 진행 방향으로 도니까 북쪽이 어디인지 알 수 없다. 실제
-        내비게이션에도 같은 이유로 나침반이 붙어 있다. 2번 주차장 상태
+        내비게이션에도 같은 이유로 나침반이 붙어 있다. 3번 주차장 상태
         화면이 '북쪽 위'로 서 있으므로, 이 바늘이 그 화면과의 대조표가 된다.
         """
         r = 24
@@ -1066,7 +1119,7 @@ class NavigationView:
         우하단 전체 조감도.
 
         확대된 시점만 보면 주차장 전체에서 어디쯤인지 알기 어렵다.
-        이쪽은 화면과 달리 늘 북쪽이 위라서, 2번 주차장 상태 화면과
+        이쪽은 화면과 달리 늘 북쪽이 위라서, 3번 주차장 상태 화면과
         같은 방향으로 읽힌다.
         """
         mw, mh = CONFIG['NAV_MINIMAP_W'], CONFIG['NAV_MINIMAP_H']
@@ -1118,11 +1171,13 @@ class NavigationView:
                 color = (128, 124, 120)
             cv2.rectangle(canvas, p1, p2, color, -1)
 
-        rest = self._route_points(nav)
+        rest, planned = self._route_points(nav)
         if rest:
             pts = np.array([to_mini(car_pos)] + [to_mini(p) for p in rest],
                            dtype=np.int32)
-            cv2.polylines(canvas, [pts], False, COLOR_NAV_ROUTE, 2, cv2.LINE_AA)
+            cv2.polylines(canvas, [pts], False,
+                          COLOR_NAV_ROUTE if planned else COLOR_NAV_ROUTE_HINT,
+                          2, cv2.LINE_AA)
 
         mc = to_mini(car_pos)
         cv2.circle(canvas, mc, 6, COLOR_NAV_ROUTE_E, -1, cv2.LINE_AA)
@@ -1361,6 +1416,8 @@ class NavigationMapUI:
 
         self._draw_grid(canvas)
         self._draw_layout(canvas)
+        # 통행 방향은 바닥 표시다. 배치 위, 자리/경로 아래에 깐다.
+        self._draw_one_way(canvas)
         self._draw_gate(canvas)
         self._draw_spots(canvas, spot_status, target_spots)
         self._draw_guide_lines(canvas, nav_results)
@@ -1443,6 +1500,27 @@ class NavigationMapUI:
                             cv2.putText(canvas, text,
                                         (cx - tw // 2, cy + th // 2),
                                         FONT, 0.4, COLOR_PILL_TEXT, 1, cv2.LINE_AA)
+
+    def _draw_one_way(self, canvas):
+        """
+        일방통행 순환 방향을 바닥 화살표로 그린다.
+
+        안내선이 왜 한 바퀴 도는지가 이 화살표로 설명된다. 없으면 경로가
+        엉뚱하게 도는 것처럼 보인다.
+        """
+        for (ax, ay), (bx, by) in ONE_WAY_SEGMENTS_WORLD:
+            length = math.hypot(bx - ax, by - ay)
+            if length == 0:
+                continue
+
+            steps = max(int(length / ONE_WAY_ARROW_STEP_CM), 1)
+            for i in range(steps):
+                t0 = i / steps
+                t1 = (i + 1) / steps
+                p0 = self.world_to_map((ax + (bx - ax) * t0, ay + (by - ay) * t0))
+                p1 = self.world_to_map((ax + (bx - ax) * t1, ay + (by - ay) * t1))
+                cv2.arrowedLine(canvas, p0, p1, COLOR_ONE_WAY, 1,
+                                cv2.LINE_AA, tipLength=0.3)
 
     def _draw_gate(self, canvas):
         """입구(GATE1)와 출구(GATE2)를 구분해서 표시."""

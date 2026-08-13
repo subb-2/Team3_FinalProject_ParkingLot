@@ -39,11 +39,16 @@ def calculate_fee(duration_minutes):
     return total_fee
 
 
-# 테스트
-# if __name__ == "__main__":
-    # test_cases = [5, 10, 20, 30, 40, 60, 90, 120, 1000, 2100]
-    # print("========== 요금 계산 테스트 ==========")
-    # for minutes in test_cases:
-        # fee = calculate_fee(minutes)
-        # print(f"  {minutes:>4d}분 주차 → {fee:,}원")
-    # print("=====================================") 
+# 테스트용 메인 (단독 실행 시 구간별 요금 확인)
+if __name__ == "__main__":
+    cfg = get_fee_config()
+    print("=" * 40)
+    print(" 요금 계산")
+    print(f"  {cfg['min_time']}분 이하 무료 / "
+          f"{cfg['base_minutes']}분까지 {cfg['base_fee']:,}원 / "
+          f"이후 {cfg['extra_per_minutes']}분마다 {cfg['extra_fee']:,}원 / "
+          f"상한 {cfg['max_fee']:,}원")
+    print("=" * 40)
+
+    for minutes in (5, 10, 11, 30, 31, 40, 60, 90, 120, 1000, 2100):
+        print(f"  {minutes:>4d}분  ->  {calculate_fee(minutes):>7,}원") 
