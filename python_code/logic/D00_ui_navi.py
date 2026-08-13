@@ -1092,6 +1092,10 @@ class NavigationView:
             label = f"CAR {_ascii_label(car)}"
 
         sub = list(extra_info) if extra_info else []
+        # 안내가 끝났거나 추적이 끊겨 '마지막 모습'을 붙들고 있는 중이라면
+        # 그 사실을 적는다. 안 적으면 멈춘 화면을 실시간으로 착각한다.
+        if nav is not None and nav.get("stale"):
+            sub.append("last seen")
         if fps is not None:
             sub.append(f"{fps:.0f} fps")
         sub_text = "  ".join(sub)
@@ -1186,6 +1190,9 @@ class NavigationView:
 
 # 자동 선택으로 마지막에 고른 차. 아래 pick_my_vehicle이 쓴다.
 _LAST_PICK = None
+# 마지막으로 내보낸 안내 결과 그대로. 안내가 끝났거나 추적이 끊겨 고를 차가
+# 없을 때 이것을 다시 내보내 화면을 마지막 모습에 붙들어 둔다.
+_LAST_NAV = None
 
 
 def pick_my_vehicle(nav_results, car_id=None, sticky=True):
@@ -1196,7 +1203,12 @@ def pick_my_vehicle(nav_results, car_id=None, sticky=True):
     가장 가까운 차'로 다시 고르면, 두 대가 안내를 받는 동안 남은 거리가
     엇갈릴 때마다 화면이 다른 차로 갈아탄다. 차가 바뀌면 서 있는 방향도
     있는 자리도 달라지니 화면이 통째로 뒤집힌 것처럼 보인다.
-    안내 중인 차가 화면에서 사라졌을 때만 다시 고른다.
+
+    안내가 끝나면(주차 완료) 그 차의 목표가 지워진다. 예전에는 그 순간
+    '번호가 붙은 아무 차'로 넘어가서, 방금까지 안내하던 화면이 엉뚱한
+    주차 차량과 그 자리(D-3 같은)로 튀었다. 추적이 잠깐 끊겨도 마찬가지였다.
+    지금은 그러지 않고 **마지막 모습 그대로 붙들어 둔다.** 안내가 끝난 차의
+    마지막 위치가 화면에 남는 편이, 관계없는 차로 갈아타는 것보다 낫다.
 
     Args:
         nav_results: C00_navigation.ParkingNavigator.update()의 반환 결과
@@ -1205,42 +1217,60 @@ def pick_my_vehicle(nav_results, car_id=None, sticky=True):
 
     Returns:
         선택된 nav 딕셔너리. 없으면 None.
+        붙들어 둔 결과를 내보낼 때는 nav["stale"]이 True다.
     """
-    global _LAST_PICK
+    global _LAST_PICK, _LAST_NAV
 
-    if not nav_results:
-        return None
-
-    if car_id is not None:
-        for n in nav_results:
-            if n.get("car_id") == car_id:
-                return n
-        return None
+    def remember(nav):
+        """고른 결과를 기억하고 그대로 돌려준다."""
+        global _LAST_PICK, _LAST_NAV
+        _LAST_PICK = key_of(nav)
+        _LAST_NAV = dict(nav, stale=False)
+        return nav
 
     def key_of(n):
         return n.get("car_id") or f"#{n.get('track_id')}"
 
+    def frozen():
+        """마지막 모습 그대로. 살아 있는 결과가 아님을 표시해 둔다."""
+        if _LAST_NAV is None:
+            return None
+        return dict(_LAST_NAV, stale=True)
+
+    if car_id is not None:
+        for n in nav_results or ():
+            if n.get("car_id") == car_id:
+                return remember(n)
+        # 지정한 차가 화면에서 사라졌다. 다른 차로 갈아타지 않는다.
+        return frozen() if _LAST_PICK == car_id else None
+
+    if not nav_results:
+        return frozen()
+
     if sticky and _LAST_PICK is not None:
         for n in nav_results:
             if key_of(n) == _LAST_PICK and n.get("target_spot"):
-                return n
+                return remember(n)
 
     # 고르는 순서
     #   1) 안내 중인 차 (목표 구역이 있다). 그중 목적지가 가장 가까운 차.
-    #   2) 번호가 붙은 차. 안내는 끝났어도 어느 차인지는 알 수 있다.
-    #   3) 그 외. 번호도 목표도 없는 트랙이라 오검출일 수 있다.
+    #   2) 직전에 보던 차. 안내는 끝났어도 아직 화면에 있으면 계속 본다.
+    #   3) 마지막 모습 그대로 붙들어 둔다.
     #
-    # 2)와 3)을 나눈 이유는, 안내할 차가 없을 때 화면이 엉뚱한 오검출을
-    # 따라가지 않게 하기 위해서다. 바닥에 비친 그림자 같은 것이 잡히면
-    # 안내 화면이 주차장 밖을 비추게 된다.
+    # '번호가 붙은 아무 차'를 고르던 단계는 뺐다. 안내가 끝나는 순간 화면이
+    # 관계없는 주차 차량으로 튀는 원인이었고, 그 차는 어차피 갈 곳이 없어
+    # 안내 화면에 띄울 내용도 없다. 세워둔 차들의 위치는 3번 격자가 보여준다.
     with_target = [n for n in nav_results if n.get("target_spot")]
     if with_target:
         picked = min(with_target, key=lambda n: n.get("distance_cm") or float('inf'))
-    else:
-        known = [n for n in nav_results if n.get("car_id")]
-        picked = known[0] if known else nav_results[0]
-    _LAST_PICK = key_of(picked)
-    return picked
+        return remember(picked)
+
+    if _LAST_PICK is not None:
+        for n in nav_results:
+            if key_of(n) == _LAST_PICK:
+                return remember(n)
+
+    return frozen()
 
 
 # 내비게이션 맵 UI

@@ -83,7 +83,12 @@ CONFIG = {
     # 그려진 격자가 실제 매트 선과 겹쳐 보이면 좌표계가 맞은 것이다.
     # 확인이 끝나면 꺼도 된다. (/overlay 로 실행 중에도 켜고 끌 수 있다)
     "DRAW_LAYOUT_OVERLAY": True,
-    "DRAW_NAVIGATION": True,        # 목표 지점 안내선을 화면에 표시
+    # 차에서 목적지까지 '직선'을 긋는다. [디버그]를 켠 상태에서만 나온다.
+    #
+    # 껐다. 이 선은 통로도 일방통행도 무시한 직선이라 주차 구역과 다른 차를
+    # 관통해 지나간다. 안내를 그렇게 하라는 뜻으로 읽히는데 실제 경로가 아니다.
+    # 진짜 경로는 3번 격자와 4번 화면이 그린다. (C01이 통로를 따라 계획한 것)
+    "DRAW_NAVIGATION": False,
 
     # 일방통행 화살표를 영상 위에 겹쳐 그릴지.
     #
@@ -244,8 +249,13 @@ class ParkingNavigationPipeline:
         if CONFIG['DRAW_RAW_DETECTIONS']:
             self._draw_raw_detections(frame, detections)
         self.mot.draw_tracks(frame, tracks)
-        if CONFIG['DRAW_NAVIGATION']:
-            self.navigator.draw_navigation(frame, nav_results)
+        # 좌표 글자와 목적지 직선은 진단용이라 [디버그]를 켤 때만 나온다.
+        # (직선은 통로도 일방통행도 무시해서 주차 구역과 다른 차를 관통한다.
+        #  실제 안내 경로는 3번 격자와 4번 화면이 그린다)
+        if CONFIG['DRAW_STATUS_TEXT']:
+            self.navigator.draw_navigation(
+                frame, nav_results,
+                draw_target_line=CONFIG['DRAW_NAVIGATION'])
 
         t_draw = time.perf_counter()
         self.stage_ms = {

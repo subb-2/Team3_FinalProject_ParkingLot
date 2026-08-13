@@ -1009,30 +1009,41 @@ class ParkingNavigator:
         self.targets.pop(car_id, None)
         self.routes.pop(car_id, None)
 
-    def draw_navigation(self, frame, nav_results, draw_target_line=True):
+    def draw_navigation(self, frame, nav_results,
+                        draw_target_line=False, draw_coords=True):
         """
-        내비게이션 정보를 프레임에 시각화.
+        내비게이션 정보를 프레임에 시각화. (진단용)
+
+        Args:
+            frame:            그릴 대상
+            nav_results:      update()의 반환 결과
+            draw_target_line: 차에서 목적지까지 '직선'을 긋는다.
+                              기본 꺼짐. 이 선은 통로도 일방통행도 무시한
+                              직선이라 주차 구역과 다른 차를 관통해 지나간다.
+                              실제 안내 경로는 3번 격자와 4번 화면이 그린다.
+                              (C01이 통로를 따라 계획한 route)
+            draw_coords:      차마다 픽셀 좌표와 목적지 글자를 적는다.
         """
         for nav in nav_results:
             cx, cy = int(nav["image_pos"][0]), int(nav["image_pos"][1])
 
             # 좌표 표시. 보정 좌표계는 이미지 픽셀이라 그대로 적는다.
-            cv2.putText(frame, f"({cx},{cy})px", (cx - 40, cy + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
+            if draw_coords:
+                cv2.putText(frame, f"({cx},{cy})px", (cx - 40, cy + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_PATH, 2, cv2.LINE_AA)
 
             if not draw_target_line or nav["target_world"] is None:
                 continue
 
-            # 목적지까지 직선으로 잇는다.
-            # 통로를 따라가는 경로(C01)는 cm 좌표를 전제로 짜여 있어 지금은
-            # 만들어지지 않는다. C00.update의 '남은 일' 주석 참고.
+            # 목적지까지 직선으로 잇는다. 어디로 가야 하는지가 아니라
+            # '목적지가 어느 쪽인가'만 뜻한다.
             target_img = (int(nav["target_world"][0]), int(nav["target_world"][1]))
             cv2.arrowedLine(frame, (cx, cy), target_img, COLOR_PATH, 2, tipLength=0.05)
             cv2.circle(frame, target_img, 8, COLOR_TARGET, 2)
 
             # 안내 문구
             dist = nav["distance_cm"]
-            if dist is not None:
+            if draw_coords and dist is not None:
                 cv2.putText(frame, f"{nav['target_spot']} {nav['guide']} {dist:.0f}px",
                             (cx - 40, cy + 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_TARGET, 2, cv2.LINE_AA)
