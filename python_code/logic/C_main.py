@@ -85,6 +85,20 @@ CONFIG = {
     "DRAW_LAYOUT_OVERLAY": True,
     "DRAW_NAVIGATION": True,        # 목표 지점 안내선을 화면에 표시
 
+    # 일방통행 화살표를 영상 위에 겹쳐 그릴지.
+    #
+    # 껐다. 목업 바닥에 화살표가 이미 붙어 있어서 화면에 또 그리면 같은 것이
+    # 두 겹으로 보이고, 차 위를 지나가는 선이 박스를 가린다. 방향을 확인해야
+    # 하면 여기를 True로 두거나 /overlay 로 배치 오버레이째 켜면 된다.
+    "DRAW_ONE_WAY_ARROWS": False,
+
+    # 영상 좌상단 상태 글자(FPS / Tracks / FIFO / Map / 단계별 소요시간).
+    #
+    # 기본은 꺼둔다. 시연 화면에 늘 떠 있을 이유가 없고, 글자가 큰 데다
+    # 왼쪽 위 차량을 가린다. 점검할 때만 화면의 [디버그] 버튼이나
+    # /debug 로 켠다.
+    "DRAW_STATUS_TEXT": False,
+
     # YOLO가 찾은 박스를 신뢰도와 함께 전부 얇게 그린다. (/rawdet 로 토글)
     #
     # 화면에 박스가 안 뜨는 차가 있을 때 이걸 켠다. 원인이 둘인데 손볼 곳이
@@ -223,7 +237,8 @@ class ParkingNavigationPipeline:
         # 4) 시각화
         #    배치 오버레이를 가장 먼저 그린다. 차량 박스나 경로선에 가리지 않게.
         if CONFIG['DRAW_LAYOUT_OVERLAY']:
-            self.navigator.mapper.draw_layout_overlay(frame)
+            self.navigator.mapper.draw_layout_overlay(
+                frame, show_flow=CONFIG['DRAW_ONE_WAY_ARROWS'])
         # 원본 검출은 추적 박스 밑에 깔아야 한다. 위에 그리면 정상 추적 중인
         # 차까지 회색 박스가 덧씌워져 화면을 읽을 수 없다.
         if CONFIG['DRAW_RAW_DETECTIONS']:
@@ -265,7 +280,16 @@ class ParkingNavigationPipeline:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_RAW_DET, 1, cv2.LINE_AA)
 
     def draw_status(self, frame):
-        """FPS, 추적 대수, FIFO 대기 수, 호모그래피 상태를 프레임에 표시."""
+        """
+        FPS, 추적 대수, FIFO 대기 수, 호모그래피 상태를 프레임에 표시.
+
+        CONFIG['DRAW_STATUS_TEXT']가 꺼져 있으면 아무것도 그리지 않는다.
+        같은 값들은 화면 아래 정보줄(E00)이 한글로 이미 보여주므로, 영상 위
+        글자는 점검할 때만 필요하다. [디버그] 버튼 또는 /debug로 켠다.
+        """
+        if not CONFIG['DRAW_STATUS_TEXT']:
+            return frame
+
         matched = sum(1 for t in self.latest_tracks if t["car_id"])
         mapper = self.navigator.mapper
 

@@ -289,6 +289,24 @@ def main():
         """추적/내비게이션 상태 JSON. (점검용)"""
         return build_status(pipeline)
 
+    @app.route('/debug')
+    @app.route('/debug/<state>')
+    def debug(state=None):
+        """
+        영상 위 상태 글자(FPS / Tracks / FIFO / Map / 단계별 소요시간)를 켜고 끈다.
+
+        2번 구간의 [디버그] 버튼이 이 주소를 부른다. 기본은 꺼짐이다.
+        같은 값을 화면 아래 정보줄이 한글로 이미 보여주므로, 영상 위 글자는
+        점검할 때만 필요하고 평소에는 왼쪽 위 차량을 가리기만 한다.
+        """
+        if state == 'on':
+            C_CONFIG['DRAW_STATUS_TEXT'] = True
+        elif state == 'off':
+            C_CONFIG['DRAW_STATUS_TEXT'] = False
+        else:
+            C_CONFIG['DRAW_STATUS_TEXT'] = not C_CONFIG['DRAW_STATUS_TEXT']
+        return {"debug": C_CONFIG['DRAW_STATUS_TEXT']}
+
     @app.route('/recalibrate')
     def recalibrate():
         """
@@ -305,7 +323,9 @@ def main():
 
     from logic.B03_map_setting import register_map_routes
     import logic.B00_camera_input as b00_camera_input
-    register_map_routes(app, pipeline, cap_module=b00_camera_input)
+    # runner를 넘겨야 /snapshot이 카메라를 다시 읽지 않는다.
+    # 안 넘기면 처리 스레드와 프레임을 놓고 다퉈 보정 사진이 안 뜬다.
+    register_map_routes(app, pipeline, cap_module=b00_camera_input, runner=runner)
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     if pipeline.navigator.mapper.is_ready():
         print("  보정을 다시 하려면 /recalibrate (저장된 좌표를 지우고 다시 찍습니다)")

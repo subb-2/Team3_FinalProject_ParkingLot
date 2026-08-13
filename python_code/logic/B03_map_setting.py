@@ -135,10 +135,33 @@ function save(){
   });
 }
 img.onload = show;
+// 사진을 못 받으면 show()가 한 번도 안 불려서 안내문이 비고, 화면이 죽은
+// 것처럼 보인다. 실제로 그래서 '보정이 실행이 안 된다'로 보였다.
+// 무엇이 잘못됐는지 화면에 남긴다.
+img.onerror = () => {
+  document.getElementById('now').textContent =
+    '카메라 사진을 받지 못했습니다. [사진 다시 찍기]를 눌러 보세요.';
+  document.getElementById('msg').style.color = '#f00';
+  document.getElementById('msg').textContent =
+    '/snapshot 응답이 없습니다. 카메라가 열려 있는지 터미널 로그를 확인하세요.';
+};
+show();
 </script></body></html>
 """
 
-def register_map_routes(app, pipeline, cap_module=None):
+def register_map_routes(app, pipeline, cap_module=None, runner=None):
+    """
+    보정(/calibrate) 관련 라우트를 등록한다.
+
+    Args:
+        app:        Flask 앱
+        pipeline:   ParkingNavigationPipeline
+        cap_module: 카메라 모듈 (예약)
+        runner:     D_main.PipelineRunner. 주면 /snapshot이 카메라를 직접
+                    읽지 않고 이 처리 스레드가 받아둔 원본을 그대로 쓴다.
+                    카메라를 두 곳에서 읽으면 프레임 커서를 놓고 다퉈
+                    보정 화면의 사진이 안 뜬다. (PipelineRunner._raw 주석 참고)
+    """
     from flask import request, Response
     from data.map_data import PILL_MARKER_ID
 
@@ -171,8 +194,19 @@ def register_map_routes(app, pipeline, cap_module=None):
 
     @app.route('/snapshot')
     def snapshot():
-        ok, frame = pipeline.cap.read()
-        if not ok:
-            return "카메라 프레임을 읽을 수 없습니다.", 503
+        """보정 화면에 띄울 정지 사진 한 장."""
+        frame = runner.raw_frame() if runner is not None else None
+
+        # 처리 스레드가 아직 첫 프레임을 못 받았거나 runner가 없는 단독 실행
+        # (C_main 등)일 때만 카메라를 직접 읽는다.
+        if frame is None:
+            ok, frame = pipeline.cap.read()
+            if not ok or frame is None:
+                return "카메라 프레임을 읽을 수 없습니다.", 503
+
         ok, buf = cv2.imencode('.jpg', frame)
-        return Response(buf.tobytes(), mimetype='image/jpeg')
+        if not ok:
+            return "사진을 인코딩할 수 없습니다.", 503
+        # 브라우저가 이전 사진을 재사용하면 '사진 다시 찍기'가 먹히지 않는다.
+        return Response(buf.tobytes(), mimetype='image/jpeg',
+                        headers={"Cache-Control": "no-store"})

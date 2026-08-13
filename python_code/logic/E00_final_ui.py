@@ -54,6 +54,8 @@ from data.map_data import (
 )
 from data.car_data import cars_info, get_car_type
 from logic.B02_car_mot import CONFIG as B02_CONFIG
+# 영상 위 상태 글자 on/off는 C_main이 들고 있다. 화면은 그 값을 읽기만 한다.
+from logic.C_main import CONFIG as C_MAIN_CONFIG
 from logic.C02_lot_layout import CONFIG as C02_CONFIG, SPOT_WORLD_POS
 
 
@@ -773,6 +775,9 @@ def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
         "camera_fps": round(getattr(pipeline.cap, "capture_fps", 0.0), 1),
         "dropped_frames": getattr(pipeline.cap, "dropped", 0),
         "homography": homography,
+        # 영상 위 상태 글자가 켜져 있는지. 버튼이 이 값을 따라간다.
+        # 창을 여러 개 열어도 서버 값 하나만 보므로 어긋나지 않는다.
+        "debug_overlay": bool(C_MAIN_CONFIG['DRAW_STATUS_TEXT']),
         "time": datetime.now().strftime("%H:%M:%S"),
     }
 
@@ -823,17 +828,20 @@ FINAL_UI_HTML = r"""
  /* ---- 1번 구간 : 수신 -> FIFO -> 안내 (가로 흐름) ----
     로직 순서 그대로 왼쪽에서 오른쪽으로 늘어놓는다.
       수신(A00) -> push -> 대기열(CarNumberFIFO) -> pop -> 안내 중(B02) -> 주차 완료 */
- #pipe{display:flex;align-items:stretch;gap:0;padding:10px 12px;
-       min-height:0;overflow:hidden}
+ /* 세로를 넉넉히 준다. 좁으면 대기열 카드와 안내문이 눌려 읽기 어렵다. */
+ #pipe{display:flex;align-items:stretch;gap:0;padding:12px;
+       min-height:200px;overflow:hidden}
  .stg{background:#232329;border:1px solid var(--line);border-radius:8px;
-      padding:8px 11px;display:flex;flex-direction:column;min-width:0;
+      padding:10px 13px;display:flex;flex-direction:column;min-width:0;
       justify-content:flex-start}
- .stg > .cap{font-size:10px;color:var(--dim);margin-bottom:6px;white-space:nowrap;
+ .stg > .cap{font-size:11px;color:var(--dim);margin-bottom:8px;white-space:nowrap;
              display:flex;justify-content:space-between;gap:8px;align-items:baseline}
- .stg.rxbox{flex:0 0 210px}
+ .stg.rxbox{flex:0 0 230px}
  .stg.queue{flex:1;min-width:0;border-color:#3a5a72;background:#1e242b}
- .stg.act  {flex:0 0 172px}
- .stg.done {flex:0 0 258px}
+ /* '안내 중'과 '주차 완료'는 글이 길어 좁으면 줄이 잘린다.
+    안내문은 두 줄(자리 + 사유)이 다 보여야 한다. */
+ .stg.act  {flex:0 0 250px}
+ .stg.done {flex:0 0 420px}
 
  /* 단계 사이 화살표. push / pop이 어느 쪽으로 도는지가 이 화면의 핵심이다. */
  .flowarw{flex:0 0 62px;display:flex;flex-direction:column;align-items:center;
@@ -845,15 +853,15 @@ FINAL_UI_HTML = r"""
                      border-top:4px solid transparent;border-bottom:4px solid transparent}
 
  /* 대기열 카드. 왼쪽 끝이 front(다음에 매칭될 차)다. */
- .qrow{display:flex;align-items:center;gap:6px;overflow-x:auto;min-height:44px}
- .qcard{flex:0 0 auto;border:1px solid #3f6f92;border-radius:7px;background:#22303b;
-        padding:5px 11px;text-align:center}
+ .qrow{display:flex;align-items:center;gap:8px;overflow-x:auto;flex:1;min-height:0}
+ .qcard{flex:0 0 auto;border:1px solid #3f6f92;border-radius:8px;background:#22303b;
+        padding:9px 15px;text-align:center}
  .qcard.front{border-color:var(--accent);background:#1d3d55;
               box-shadow:0 0 0 2px rgba(63,169,255,.22)}
- .qcard .no{font-size:17px;font-weight:700;letter-spacing:2px;
+ .qcard .no{font-size:22px;font-weight:700;letter-spacing:2px;
             font-variant-numeric:tabular-nums;line-height:1.25}
- .qcard .mk{font-size:9px;color:var(--accent);letter-spacing:0}
- .qempty{color:var(--dim);font-size:12px;padding:12px 4px}
+ .qcard .mk{font-size:10px;color:var(--accent);letter-spacing:0;margin-top:2px}
+ .qempty{color:var(--dim);font-size:13px;padding:16px 4px}
 
  /* 최근 수신 (가로 띠라 최근 두 건만 보인다) */
  .rx{border:1px solid var(--line);border-left:3px solid var(--accent);
@@ -870,9 +878,9 @@ FINAL_UI_HTML = r"""
  .empty{color:var(--dim);font-size:12px;text-align:center;padding:14px 8px;line-height:1.6}
 
  /* 안내 중인 차 */
- .actcar{font-size:20px;font-weight:700;letter-spacing:2px;color:#ffd964;
-         font-variant-numeric:tabular-nums}
- .actto{font-size:12px;color:var(--dim);margin-top:3px}
+ .actcar{font-size:26px;font-weight:700;letter-spacing:2px;color:#ffd964;
+         font-variant-numeric:tabular-nums;line-height:1.3}
+ .actto{font-size:13px;color:var(--dim);margin-top:5px}
  .actto b{color:var(--ok)}
 
  /* ---- 3번 구간 : 주차장 상태 ---- */
@@ -889,9 +897,6 @@ FINAL_UI_HTML = r"""
     transition 시간을 폴링 주기에 맞춰 두면 0.4초마다 오는 위치가
     뚝뚝 끊기지 않고 이어져 보인다. */
  /* 일방통행 화살표. 바닥 표시이므로 차량 점보다 아래, 칸보다 위에 깐다. */
- #flow{position:absolute;inset:0;pointer-events:none;overflow:visible}
- #flow path{stroke:#3d6b6b;stroke-width:1.5;fill:none}
- #flow polygon{fill:#3d6b6b}
  /* 안내 경로. 일방통행 화살표 위, 차량 점 아래에 깐다.
     4번 구간이 그리는 것과 같은 선이므로 색도 그쪽 파랑에 맞춘다. */
  #route{position:absolute;inset:0;pointer-events:none;overflow:visible}
@@ -949,16 +954,14 @@ FINAL_UI_HTML = r"""
  #notice.ok  {border-color:var(--ok)}
  #notice.bad {border-color:var(--bad)}
  #notice.warn{border-color:var(--warn)}
- .nt-head{display:flex;justify-content:space-between;font-size:10px;
-          color:var(--dim);margin-bottom:4px;gap:8px}
- .nt-line{font-size:13px;font-weight:600;line-height:1.5;
-          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .nt-head{display:flex;justify-content:space-between;font-size:11px;
+          color:var(--dim);margin-bottom:6px;gap:10px}
+ .nt-line{font-size:14px;font-weight:600;line-height:1.5}
  #notice.ok .nt-line{color:var(--ok)}
  #notice.bad .nt-line{color:#ff9b9b}
  #notice.warn .nt-line{color:var(--warn)}
- .nt-note{font-size:10px;color:var(--dim);margin-top:3px;line-height:1.45;
-          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
- .nt-idle{font-size:12px;color:var(--dim)}
+ .nt-note{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
+ .nt-idle{font-size:13px;color:var(--dim)}
 
  /* ---- 2번 구간 : 카메라 (차량 검출) ---- */
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
@@ -967,7 +970,15 @@ FINAL_UI_HTML = r"""
           background:#0e0e10;min-height:0;min-width:0;padding:6px;position:relative}
  #camimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
  #caminfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
-          color:var(--dim);display:flex;justify-content:space-between;gap:10px}
+          color:var(--dim);display:flex;justify-content:space-between;gap:10px;
+          align-items:center}
+ #caminfo > span{display:flex;align-items:center;gap:8px;min-width:0}
+ /* 영상 위 상태 글자 토글. 평소에는 꺼져 있어야 시연 화면이 깨끗하다. */
+ #dbgbtn{background:#2a2a31;color:var(--dim);border:1px solid var(--line);
+         border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;
+         font-family:inherit;white-space:nowrap;flex:0 0 auto}
+ #dbgbtn:hover{background:#34343d;color:var(--text)}
+ #dbgbtn.on{background:#1d3d55;border-color:var(--accent);color:var(--accent)}
 
  /* 트랙 목록. 영상 위에 겹친다.
     영상에도 박스와 라벨이 그려지지만 화면에서 작아 읽기 어렵다.
@@ -1053,7 +1064,8 @@ FINAL_UI_HTML = r"""
         <div id="tracks"></div>
       </div>
       <div id="caminfo">
-        <span id="camdet">검출 대기 중</span>
+        <span><button id="dbgbtn" onclick="toggleDebug()">디버그</button>
+              <span id="camdet">검출 대기 중</span></span>
         <span><span class="pill" id="cammark">-</span>
               <span class="pill" id="camfps">-</span></span>
       </div>
@@ -1105,12 +1117,11 @@ function fitLot(){
   const w = Math.min(availW, availH * lotAspect);
   lot.style.width  = Math.floor(w) + 'px';
   lot.style.height = Math.floor(w / lotAspect) + 'px';
-  drawFlow();
   drawRoute();
 }
 
 // 격자 좌표(행/열) -> 격자 안 픽셀. 칸 사이 gap까지 넣는다.
-// drawFlow / drawRoute / renderCars가 모두 같은 규칙을 써야 선과 점이 맞는다.
+// drawRoute / renderCars가 같은 규칙을 써야 선과 점이 맞는다.
 function lotMetrics(){
   const lot = document.getElementById('lot');
   if (!layout) return null;
@@ -1125,56 +1136,16 @@ function lotMetrics(){
   };
 }
 
-// 일방통행 화살표를 격자 위에 그린다.
-// 격자 크기가 바뀔 때마다 다시 그려야 하므로 fitLot에서 부른다.
-// 좌표 계산은 renderCars와 같은 규칙이다. (칸 사이 gap까지 넣는다)
-function drawFlow(){
-  const lot = document.getElementById('lot');
-  const svg = document.getElementById('flow');
-  if (!layout || !svg || !layout.one_way) return;
-
-  const w = lot.clientWidth, h = lot.clientHeight;
-  if (!w || !h) return;
-  const cw = (w - (layout.cols - 1) * LOT_GAP) / layout.cols;
-  const ch = (h - (layout.rows - 1) * LOT_GAP) / layout.rows;
-  const cx = c => c * (cw + LOT_GAP) + cw / 2;
-  const cy = r => r * (ch + LOT_GAP) + ch / 2;
-
-  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  svg.setAttribute('width', w);
-  svg.setAttribute('height', h);
-
-  let out = '';
-  const STEP = 60;      // 화살촉 간격 (px)
-  const HEAD = 5;       // 화살촉 크기 (px)
-
-  layout.one_way.forEach(seg => {
-    const x1 = cx(seg.c1), y1 = cy(seg.r1);
-    const x2 = cx(seg.c2), y2 = cy(seg.r2);
-    out += `<path d="M ${x1} ${y1} L ${x2} ${y2}"/>`;
-
-    const len = Math.hypot(x2 - x1, y2 - y1);
-    if (!len) return;
-    const ux = (x2 - x1) / len, uy = (y2 - y1) / len;   // 진행 방향
-    const px = -uy, py = ux;                            // 그 수직 방향
-
-    // 구간을 STEP 간격으로 나눠 각 조각 가운데에 화살촉을 찍는다.
-    const n = Math.max(Math.round(len / STEP), 1);
-    for (let i = 0; i < n; i++){
-      const t = (i + 0.5) / n * len;
-      const hx = x1 + ux * t, hy = y1 + uy * t;
-      out += `<polygon points="${hx + ux*HEAD},${hy + uy*HEAD} `
-           + `${hx - ux*HEAD + px*HEAD},${hy - uy*HEAD + py*HEAD} `
-           + `${hx - ux*HEAD - px*HEAD},${hy - uy*HEAD - py*HEAD}"/>`;
-    }
-  });
-
-  svg.innerHTML = out;
-}
+// 일방통행 화살표는 격자에 그리지 않는다.
+//
+// 목업 바닥에 화살표가 이미 붙어 있고, 2번 CCTV 화면에도 그 실물이 보인다.
+// 격자에 또 그리면 같은 정보가 두 겹이 되고, 안내 경로(파란 선)와 겹쳐서
+// 어느 것이 지금 가야 할 길인지 읽기 어려워진다.
+// 방향 데이터(layout.one_way)는 그대로 내려오므로 필요하면 다시 그릴 수 있다.
 
 // 안내 경로. 4번 구간(차량 시점)이 그리는 것과 같은 선을 격자 위에 그대로
-// 깐다. 바닥 화살표(drawFlow)와 같은 평면에 겹쳐 보이므로, 안내가 일방통행을
-// 지키는지 화살표와 비교해 바로 확인할 수 있다.
+// 깐다. 격자는 실제 주차장과 같은 방향으로 서 있으므로 어느 길로 가는지가
+// 그대로 읽힌다.
 //
 // 격자 크기가 바뀔 때(fitLot)와 상태가 올 때(renderRoute) 모두 다시 그려야
 // 하므로 마지막 상태를 붙들어 둔다.
@@ -1276,12 +1247,7 @@ function buildLot(lay){
     }
   }
 
-  // 일방통행 화살표 겹. 차량 점보다 먼저 붙여 아래에 깔리게 한다.
-  const flow = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  flow.id = 'flow';
-  lot.appendChild(flow);
-
-  // 안내 경로 겹. 화살표 위, 차량 점 아래.
+  // 안내 경로 겹. 칸 위, 차량 점 아래.
   const route = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   route.id = 'route';
   lot.appendChild(route);
@@ -1501,14 +1467,41 @@ function renderCam(st){
   document.getElementById('camfps').textContent =
     d.detect != null ? `검출 ${d.detect}ms` : `${st.fps} FPS`;
 
-  // 영상 위에 겹치는 트랙 목록
-  document.getElementById('tracks').innerHTML = (t.items || []).map(it => `
+  // 영상 위에 겹치는 트랙 목록.
+  //
+  // 지금 안내 중인 차만 띄운다. 주차를 마친 차까지 전부 띄우면 목록이
+  // 화면 절반을 덮어 정작 봐야 할 영상을 가린다. 세워둔 차가 어디에 있는지는
+  // 3번 격자가 점으로 보여주고, 영상에도 초록 박스로 이미 표시된다.
+  // 여기서 알고 싶은 것은 '지금 누구를 어디로 보내는 중인가' 하나다.
+  document.getElementById('tracks').innerHTML = (t.items || [])
+    .filter(it => it.state === 'active')
+    .map(it => `
     <div class="trk ${it.state}">
       <span class="tid">#${it.track_id}</span>
       <span class="car">${esc(it.car_id) || '번호 미상'}</span>
       <span class="st">${esc(it.state_label)}</span>
       ${it.spot_id ? `<span class="sp">→ ${esc(it.spot_id)}</span>` : ''}
     </div>`).join('');
+
+  // 디버그 버튼 상태 (영상 위 상태 글자 on/off)
+  const b = document.getElementById('dbgbtn');
+  if (b){
+    b.classList.toggle('on', !!st.debug_overlay);
+    b.textContent = st.debug_overlay ? '디버그 끄기' : '디버그';
+  }
+}
+
+// 영상 위 상태 글자를 켜고 끈다. 서버가 실제 상태를 돌려주므로
+// 화면은 그것만 반영한다. (여러 창을 열어도 어긋나지 않는다)
+async function toggleDebug(){
+  try {
+    const r = await (await fetch('/debug')).json();
+    const b = document.getElementById('dbgbtn');
+    b.classList.toggle('on', !!r.debug);
+    b.textContent = r.debug ? '디버그 끄기' : '디버그';
+  } catch (e) {
+    console.error('디버그 토글 실패', e);
+  }
 }
 
 // ---- 4번 구간 ----

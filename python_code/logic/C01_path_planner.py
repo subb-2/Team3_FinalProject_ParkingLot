@@ -833,12 +833,16 @@ def distance_to_route(route, point, from_index=0):
     best = float('inf')
     start = max(from_index - 1, 0)
     for a, b in zip(route[start:-1], route[start + 1:]):
-        best = min(best, _point_segment_distance(point, a, b))
+        best = min(best, point_segment_distance(point, a, b))
     return best
 
 
-def _point_segment_distance(p, a, b):
-    """점 p와 선분 ab 사이의 최단 거리."""
+def point_segment_distance(p, a, b):
+    """
+    점 p와 선분 ab 사이의 최단 거리.
+
+    C00이 '차가 경로의 어느 구간에 와 있는지' 찾을 때도 쓰므로 공개 이름이다.
+    """
     ax, ay = a
     bx, by = b
     px, py = p

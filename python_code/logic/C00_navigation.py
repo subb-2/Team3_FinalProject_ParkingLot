@@ -7,7 +7,9 @@ from collections import deque
 
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from logic.C01_path_planner import route_length, distance_to_route
+from logic.C01_path_planner import (
+    route_length, distance_to_route, point_segment_distance,
+)
 
 
 
@@ -836,13 +838,40 @@ class ParkingNavigator:
 
     def _advance_waypoint(self, state, world_pos):
         """
-        경유점에 충분히 가까워졌으면 다음 경유점으로 넘어간다.
+        차가 지나온 경유점을 넘긴다.
         마지막 경유점(목적지)은 도착 판정에 쓰이므로 넘기지 않는다.
+
+        '경유점 반경 안에 들어오면 넘긴다'만으로는 부족했다. 경유점은 통로
+        한가운데 찍히는데 차는 차선을 따라 조금 벗어나 지나가므로, 반경
+        (waypoint_radius, 5cm)에 한 번도 들어오지 않고 스쳐 지나가는 일이 흔하다.
+        그러면 인덱스가 그 자리에 멈춰버리고, 화면에 그려지는 선이
+        '차 -> 이미 지나온 경유점 -> 다시 앞으로'가 된다. 뒤를 한 번 찍고
+        되돌아오는 그 선이 이것이다. 안내 거리도 그만큼 부풀려 나온다.
+
+        그래서 남은 경로에서 차와 가장 가까운 구간을 찾아, 그 구간의 끝
+        경유점으로 인덱스를 맞춘다. 반경에 들어왔는지가 아니라 '지금 어디쯤
+        와 있는가'가 기준이 되므로 스쳐 지나가도 정확히 따라간다.
+
+        인덱스는 절대 뒤로 가지 않는다. 경로가 스스로 교차하는 경우(한 바퀴
+        도는 경로에서 흔하다) 되돌아간 것으로 잘못 볼 수 있기 때문이다.
         """
         waypoints = state["waypoints"]
-        while state["index"] < len(waypoints) - 1:
-            wp = waypoints[state["index"]]
-            if self._distance(world_pos, wp) > self.waypoint_radius:
+        last = len(waypoints) - 1
+        if last < 1:
+            return
+
+        # 한 구간 뒤부터 본다. 방금 넘긴 구간에 아직 걸쳐 있을 수 있다.
+        best_index, best_dist = state["index"], None
+        for i in range(max(state["index"] - 1, 0), last):
+            d = point_segment_distance(world_pos, waypoints[i], waypoints[i + 1])
+            if best_dist is None or d < best_dist:
+                best_dist, best_index = d, i + 1
+
+        state["index"] = min(max(state["index"], best_index), last)
+
+        # 경유점 바로 위에 서 있으면 그것도 지난 것으로 본다.
+        while state["index"] < last:
+            if self._distance(world_pos, waypoints[state["index"]]) > self.waypoint_radius:
                 break
             state["index"] += 1
 

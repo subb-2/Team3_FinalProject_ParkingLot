@@ -60,6 +60,16 @@ class PipelineRunner:
     def __init__(self, pipeline):
         self.pipeline = pipeline
         self._frame = None          # 검출/추적/마커까지 그려진 최신 프레임
+        # 아무것도 그리지 않은 최신 원본. 보정 화면(/snapshot)이 쓴다.
+        #
+        # 예전에는 /snapshot이 카메라를 직접 read()했다. 그런데 이 스레드도
+        # 같은 카메라를 최대 속도로 읽고 있어서, 둘이 같은 프레임 커서
+        # (B00의 _last_read_seq)를 놓고 다퉜다. 그 결과 보정 화면의 사진
+        # 요청이 대기 시간만 채우고 실패하거나(503) 처리 스레드의 프레임을
+        # 가로챘다. 기둥을 찍으려고 /calibrate에 들어가면 사진이 안 뜨고
+        # 화면이 죽은 것처럼 보이던 원인이다.
+        # 여기 받아둔 것을 그대로 내주면 카메라를 두 번 읽을 일이 없다.
+        self._raw = None
         self._seq = 0               # 프레임 일련번호 (새 프레임인지 판단용)
         self._jpeg = None           # 위 프레임을 인코딩한 결과 (한 번만 인코딩)
         # 여러 화면이 같은 프레임을 기다리므로 Lock이 아니라 Condition을 쓴다.
@@ -92,6 +102,8 @@ class PipelineRunner:
             # 카메라가 들고 있는 원본에 직접 그리지 않는다.
             # /snapshot(보정 화면)이 같은 배열을 보기 때문에, 여기서 격자와
             # 박스를 그려버리면 보정할 때 깨끗한 사진을 찍을 수 없다.
+            with self._cond:
+                self._raw = frame
             frame = frame.copy()
 
             # 처리 중 예외가 나도 스레드를 죽이지 않는다.
@@ -114,6 +126,16 @@ class PipelineRunner:
 
             self.pipeline.draw_status(frame)
             self._publish(frame)
+
+    def raw_frame(self):
+        """
+        아무것도 그리지 않은 최신 원본 프레임. 아직 없으면 None.
+
+        보정 화면이 쓴다. 카메라를 직접 읽지 않으므로 처리 스레드와 다투지
+        않는다. (위 self._raw 주석 참고)
+        """
+        with self._cond:
+            return self._raw
 
     def _publish(self, frame):
         """처리가 끝난 프레임을 화면들에게 알린다."""
@@ -319,7 +341,8 @@ if __name__ == '__main__':
 
     from logic.B03_map_setting import register_map_routes
     import logic.B00_camera_input as b00_camera_input
-    register_map_routes(app, pipeline, cap_module=b00_camera_input)
+    # runner를 넘겨야 /snapshot이 카메라를 다시 읽지 않는다. (E_main_final과 같은 이유)
+    register_map_routes(app, pipeline, cap_module=b00_camera_input, runner=runner)
 
     @app.route('/')
     def index():
