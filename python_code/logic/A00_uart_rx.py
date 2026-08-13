@@ -20,6 +20,7 @@ TODO
 import socket
 import threading
 import time
+import errno
 import datetime
 import sys
 import os
@@ -195,6 +196,17 @@ def _serve_role(role, label, host, port, timeout, stop_event):
         srv.settimeout(timeout)
     except OSError as e:
         print(f"[에러] {label} 포트({port})를 열 수 없습니다: {e}")
+
+        # 이 오류는 거의 항상 '이미 실행 중인 프로그램이 있다'는 뜻이다.
+        # SO_REUSEADDR을 켜 두었으므로 종료 직후의 TIME_WAIT 때문은 아니다.
+        #
+        # 이걸 짚어주지 않으면 원인을 엉뚱한 데서 찾게 된다. 같은 이유로
+        # 카메라(/dev/video0)도 그 프로세스가 잡고 있어서 몇 줄 뒤에
+        # "카메라를 열 수 없습니다"가 뜨는데, 그쪽이 훨씬 눈에 띄기 때문이다.
+        if e.errno == errno.EADDRINUSE:
+            print(f"       이미 실행 중인 프로그램이 이 포트를 쓰고 있습니다.")
+            print(f"       확인 : ss -ltnp | grep {port}")
+            print(f"       정리 : pkill -f E_main_final")
         return
 
     print(f"[{label}] TCP 서버 대기 중: {host}:{port}")

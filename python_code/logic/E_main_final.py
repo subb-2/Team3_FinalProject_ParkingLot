@@ -328,9 +328,15 @@ def main():
     register_map_routes(app, pipeline, cap_module=b00_camera_input, runner=runner)
     print(f"\n[준비 완료] http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     if pipeline.navigator.mapper.is_ready():
-        print("  보정을 다시 하려면 /recalibrate (저장된 좌표를 지우고 다시 찍습니다)")
+        # 저장된 보정을 이미 불러왔다는 뜻이다. 이때 첫 화면은 보정으로
+        # 넘어가지 않으므로, '기둥을 안 찍었는데 왜 보정이 안 뜨지'로 헷갈리기
+        # 쉽다. 그래서 그 사실과 다시 찍는 방법을 함께 적는다.
+        print("  좌표계가 이미 서 있어 보정 화면으로 넘어가지 않습니다.")
+        print("  다시 찍으려면 화면 왼쪽 아래 [기둥 보정] 버튼 또는 /calibrate")
+        print("  저장된 좌표까지 지우려면 /recalibrate")
     else:
-        print("  좌표계가 아직 없습니다. /calibrate 에서 기둥을 직접 찍으세요.")
+        print("  좌표계가 아직 없습니다. 접속하면 /calibrate 로 넘어갑니다.")
+        print("  기둥 10개를 표에 적힌 순서대로 찍어주세요.")
     print("=" * 46)
 
     try:

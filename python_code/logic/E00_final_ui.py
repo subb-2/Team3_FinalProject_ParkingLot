@@ -973,12 +973,21 @@ FINAL_UI_HTML = r"""
           color:var(--dim);display:flex;justify-content:space-between;gap:10px;
           align-items:center}
  #caminfo > span{display:flex;align-items:center;gap:8px;min-width:0}
- /* 영상 위 상태 글자 토글. 평소에는 꺼져 있어야 시연 화면이 깨끗하다. */
- #dbgbtn{background:#2a2a31;color:var(--dim);border:1px solid var(--line);
+ /* 버튼 두 개가 자리를 먹으므로 글자는 줄바꿈 대신 잘리게 둔다.
+    줄바꿈되면 정보줄 높이가 늘어 영상이 그만큼 눌린다. */
+ #camdet{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+ /* 영상 아래 버튼 두 개 (기둥 보정 / 디버그).
+    보정 버튼이 화면에 없으면 저장된 보정이 불려온 뒤로는 다시 찍을 방법이
+    /recalibrate 주소를 직접 치는 것뿐이다. 실제로 그래서 '보정이 실행 안 된다'가 됐다. */
+ #caminfo button{background:#2a2a31;color:var(--dim);border:1px solid var(--line);
          border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;
          font-family:inherit;white-space:nowrap;flex:0 0 auto}
- #dbgbtn:hover{background:#34343d;color:var(--text)}
+ #caminfo button:hover{background:#34343d;color:var(--text)}
  #dbgbtn.on{background:#1d3d55;border-color:var(--accent);color:var(--accent)}
+ /* 좌표계가 아직 없으면 보정 버튼이 눈에 띄어야 한다. 그 상태에서는
+    자리 위치도 경로도 나오지 않으므로 이것이 첫 번째로 할 일이다. */
+ #calbtn.need{background:#4a1d1d;border-color:var(--bad);color:#ff9b9b;
+              font-weight:700}
 
  /* 트랙 목록. 영상 위에 겹친다.
     영상에도 박스와 라벨이 그려지지만 화면에서 작아 읽기 어렵다.
@@ -1064,7 +1073,9 @@ FINAL_UI_HTML = r"""
         <div id="tracks"></div>
       </div>
       <div id="caminfo">
-        <span><button id="dbgbtn" onclick="toggleDebug()">디버그</button>
+        <span><button id="calbtn" onclick="location.href='/calibrate'"
+                      title="기둥을 다시 찍어 좌표계를 잡습니다">기둥 보정</button>
+              <button id="dbgbtn" onclick="toggleDebug()">디버그</button>
               <span id="camdet">검출 대기 중</span></span>
         <span><span class="pill" id="cammark">-</span>
               <span class="pill" id="camfps">-</span></span>
@@ -1488,6 +1499,15 @@ function renderCam(st){
   if (b){
     b.classList.toggle('on', !!st.debug_overlay);
     b.textContent = st.debug_overlay ? '디버그 끄기' : '디버그';
+  }
+
+  // 좌표계가 없으면 보정 버튼을 붉게. 그 상태에서는 자리도 경로도 안 나오므로
+  // 화면에서 가장 먼저 눈에 띄어야 한다.
+  const cb = document.getElementById('calbtn');
+  if (cb){
+    const need = st.homography.state !== 'locked';
+    cb.classList.toggle('need', need);
+    cb.textContent = need ? '기둥 보정 필요' : '기둥 보정';
   }
 }
 
