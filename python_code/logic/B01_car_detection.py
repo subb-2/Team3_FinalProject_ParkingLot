@@ -13,7 +13,7 @@ from logic.B00_camera_input import get_camera
 # 검출 관련 설정의 단일 출처.
 CONFIG = {
     # 모델 추론 설정
-    "MODEL_PATH": "/home/eojin/parking_manage_python/dataset/best0810.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
+    "MODEL_PATH": "/home/eojin/parking_manage_python/dataset/best_0811.engine", # 엔진 모델 경로 ('yolov8s.pt'로 변경 시 일반 파이토치 모델 사용)
 
     # Confidence 임계값을 일부러 낮게 둠.
     # 추적기의 2차 연관(ByteTrack 방식)은 신뢰도가 낮은 박스를 재매칭해서 끊긴
