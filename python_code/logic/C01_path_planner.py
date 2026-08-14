@@ -43,7 +43,12 @@ CONFIG = {
     # 그 구간만 비스듬한 선이 된다. 화면에서는 통로를 대각선으로 가로지르는
     # 것처럼 보이고, 차가 움직일 때마다 그 선의 기울기가 계속 흔들린다.
     #
-    # 켜면 그 두 구간을 모서리 경유점을 옮겨서 편다. 경유점 개수는 그대로다.
+    # 켜면 계획할 때 그 두 구간을 모서리 경유점을 옮겨서 편다. 경유점 개수는
+    # 그대로다. 옮기는 것은 계획하는 순간뿐이고, 그 뒤로 꼭지점은 고정이다.
+    #
+    # 화면에 그릴 때도 같은 값을 본다. 차를 지금 달리는 구간 위에 내려 찍어
+    # 선을 시작하므로(route_from_position) 꼭지점을 건드리지 않고도 첫 구간이
+    # 가로/세로로 떨어진다.
     "STRAIGHT_LEGS_ONLY": True,
 
     # 경로에서 이 거리 이상 벗어나면 다시 계획한다 (cm).
@@ -1036,82 +1041,74 @@ class RoutePlanner:
 
 
 # 경로 유틸리티
-def route_from_position(route, index, position, straight=None, lot_map=None):
+def route_from_position(route, index, position, straight=None):
     """
     차의 현재 위치에서 시작하는 '남은 경로'를 만든다. (화면에 그릴 선)
 
     이미 지나온 경유점을 빼고 남은 것만 이어야 차 뒤로 선이 남지 않는다.
     그런데 그냥 앞에 차 위치를 끼우면, 차가 차선 한가운데에서 벗어난 만큼
-    첫 구간이 비스듬해진다. 차는 계속 조금씩 움직이므로 그 기울기가 매
-    프레임 바뀌어, 통로를 대각선으로 가로지르는 선이 흔들리며 따라다닌다.
+    첫 구간이 비스듬해진다.
 
-    그래서 첫 구간이 비스듬하면 다음 모서리를 옆으로 옮겨 가로/세로로 편다.
-    옮기는 거리는 차가 차선에서 벗어난 만큼(보통 몇 cm)이고, 그 자리는 차가
-    지금 서 있는 통로 안이다. 선은 '앞으로 직진, 저 앞에서 좌회전' 모양으로
-    떨어진다.
+    경유점(꼭지점)은 한 번 계획한 뒤로는 건드리지 않는다. 차에 맞춰 모서리를
+    옮기면 선이 가로/세로로 떨어지기는 하지만, 차가 조금 움직일 때마다 그
+    모서리가 따라 움직여서 선 전체가 계속 흔들린다. 화면에서는 그것이
+    '직선으로 안 움직인다'로 보인다.
+
+    대신 차를 선 위에 세운다. 지금 달리고 있는 구간(index-1 -> index)에
+    차의 위치를 수직으로 내려 찍고, 그 점에서 선을 시작한다. 구간이 가로나
+    세로이므로 첫 구간도 반드시 가로나 세로가 되고, 꼭지점은 계획된 자리에
+    그대로 박혀 있다. 실제 자동차 내비게이션이 하는 것과 같다. 차가 차선을
+    조금 벗어나 있으면 선이 차 옆을 지나가는데, 벗어난 거리는 재계획 기준
+    (REPLAN_TOLERANCE_CM)보다 작으므로 몇 cm다.
 
     Args:
         route:    경유점 리스트 (cm)
         index:    지금 향하고 있는 경유점 인덱스
         position: 차의 현재 실좌표 (cm). None이면 경로만 잘라서 돌려준다.
-        straight: 가로/세로로 펼지 여부. None이면 CONFIG를 따른다.
-        lot_map:  ParkingLotMap. 주면 옮긴 모서리가 벽이나 자리를 뚫지 않는지
-                  확인한다. 차가 경유점 바로 뒤에 있는 보통의 경우에는 몇 cm
-                  옆으로 옮기는 것이라 늘 통로 안이지만, 무슨 이유로 차가
-                  경유점에서 멀리 떨어져 있으면 옮긴 모서리가 주차장을
-                  가로지를 수 있다. 그때는 펴지 않고 원래 선을 그린다.
+        straight: 선을 구간 위에 세울지 여부. None이면 CONFIG를 따른다.
+                  끄면 예전처럼 차 위치를 그대로 앞에 붙인다.
 
     Returns:
-        [(x, y), ...] 차 위치에서 시작하는 점 목록.
+        [(x, y), ...] 차 앞의 선. 목적지로 끝난다.
     """
     if straight is None:
         straight = CONFIG['STRAIGHT_LEGS_ONLY']
 
-    rest = [] if not route else [
-        (float(p[0]), float(p[1]))
-        for p in route[min(max(index, 0), len(route) - 1):]
-    ]
+    if not route:
+        return [] if position is None else [(float(position[0]), float(position[1]))]
+
+    idx = min(max(index, 0), len(route) - 1)
+    rest = [(float(p[0]), float(p[1])) for p in route[idx:]]
     if position is None:
         return rest
 
-    pts = [(float(position[0]), float(position[1]))] + rest
-    if not straight or len(pts) < 2:
-        return pts
+    pos = (float(position[0]), float(position[1]))
+    if not straight:
+        return [pos] + rest
 
-    eps = CONFIG['GRID_RESOLUTION_CM']
-    a, corner = pts[0], pts[1]
-    dx, dy = corner[0] - a[0], corner[1] - a[1]
-    if abs(dx) < eps or abs(dy) < eps:
-        return pts          # 이미 가로/세로다
+    # 달리고 있는 구간에 차를 내려 찍는다. 첫 경유점을 향하는 중이라
+    # 이전 구간이 없으면(index 0) 차 위치를 그대로 쓴다.
+    start = pos if idx == 0 else _project_on_segment(pos, route[idx - 1], rest[0])
 
-    def blocked(p, q):
-        if lot_map is None:
-            return False
-        return not lot_map.line_of_sight(lot_map.world_to_cell(p, clamp=True),
-                                         lot_map.world_to_cell(q, clamp=True))
+    # 그 점이 다음 경유점에 거의 닿아 있으면 길이 0인 구간이 생긴다.
+    # C00이 구간마다 방향을 재므로 그런 구간은 방향이 수치 잡음이 된다.
+    if math.hypot(rest[0][0] - start[0], rest[0][1] - start[1]) < \
+            CONFIG['GRID_RESOLUTION_CM']:
+        return rest
+    return [start] + rest
 
-    # 다음 구간의 방향은 지켜야 한다. 세로로 이어지는 모서리면 x를,
-    # 가로로 이어지는 모서리면 y를 그대로 두고 나머지를 차에 맞춘다.
-    nxt = pts[2] if len(pts) > 2 else None
-    if nxt is not None:
-        if abs(nxt[0] - corner[0]) < eps:
-            moved = (corner[0], a[1])
-        elif abs(nxt[1] - corner[1]) < eps:
-            moved = (a[0], corner[1])
-        else:
-            moved = None
-        if moved is not None:
-            if blocked(a, moved) or blocked(moved, corner):
-                return pts      # 펴면 뚫고 지나간다. 원래 선을 그린다.
-            pts[1] = moved
-            return pts
 
-    # 남은 것이 마지막 한 점(자리로 들어가는 구간)뿐이라 지킬 방향이 없다.
-    # 긴 축으로 먼저 가고 짧은 축으로 꺾는다. 모서리를 하나 끼운다.
-    elbow = (corner[0], a[1]) if abs(dx) >= abs(dy) else (a[0], corner[1])
-    if blocked(a, elbow) or blocked(elbow, corner):
-        return pts
-    return [a, elbow] + pts[1:]
+def _project_on_segment(p, a, b):
+    """점 p에서 선분 ab에 내린 수선의 발. 선분 밖이면 가까운 끝점."""
+    ax, ay = float(a[0]), float(a[1])
+    bx, by = float(b[0]), float(b[1])
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    if denom == 0:
+        return (ax, ay)
+
+    t = max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / denom))
+    return (ax + t * dx, ay + t * dy)
 
 
 def route_length(route, from_index=0, current_pos=None):

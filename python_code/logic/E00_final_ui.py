@@ -654,9 +654,7 @@ def _build_route_on_map(pipeline, follow_car=None):
     pos = nav.get("world_pos")
     if pos is not None:
         pos = pipeline.navigator.mapper.pixel_to_cm(pos) or pos
-    points = route_from_position(
-        route_cm, nav.get("route_index", 1), pos,
-        lot_map=getattr(pipeline.navigator.planner, "lot_map", None))
+    points = route_from_position(route_cm, nav.get("route_index", 1), pos)
 
     cells = []
     for pt in points:

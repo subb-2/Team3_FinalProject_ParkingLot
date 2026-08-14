@@ -21,15 +21,6 @@ from logic.C02_lot_layout import (
 # 화면마다 달라지면 안 되므로 계산은 C01 한 곳에 둔다.
 from logic.C01_path_planner import route_from_position
 
-
-def _lot_map_of(navigator):
-    """
-    계획기가 쓰는 점유 격자. 없으면 None.
-
-    경로를 펼 때 '옮긴 모서리가 벽을 뚫지 않는지' 확인하는 데만 쓴다.
-    단독 테스트처럼 navigator가 없으면 확인 없이 편다.
-    """
-    return getattr(getattr(navigator, "planner", None), "lot_map", None)
 from data.map_data import (
     grid_map, PILL_MARKER_ID, spot_type,
     ROAD, SPOT_CELLS, SPOT1, SPOT2, SPOT3, SPOT4,
@@ -858,8 +849,7 @@ class NavigationView:
         if route and len(route) >= 2:
             # 첫 구간이 비스듬해지지 않도록 C01이 모서리를 차에 맞춰 준다.
             return route_from_position(
-                route, nav.get("route_index", 1), car_pos,
-                lot_map=_lot_map_of(self.navigator)), True
+                route, nav.get("route_index", 1), car_pos), True
 
         target = nav.get("target_world")
         return ([car_pos, target], False) if target is not None else (None, False)
@@ -1643,8 +1633,7 @@ class NavigationMapUI:
                 # 현재 위치에서 남은 경유점까지만 이어서 그린다.
                 # (첫 구간이 비스듬해지지 않게 C01이 모서리를 맞춰 준다)
                 pts = [self.world_to_map(p) for p in route_from_position(
-                    route, nav.get("route_index", 1), nav["world_pos"],
-                    lot_map=_lot_map_of(self.navigator))]
+                    route, nav.get("route_index", 1), nav["world_pos"])]
                 for a, b in zip(pts[:-1], pts[1:]):
                     cv2.line(canvas, a, b, COLOR_GUIDE_LINE, 2, cv2.LINE_AA)
                 # 경유점 표시 (목적지 제외)
