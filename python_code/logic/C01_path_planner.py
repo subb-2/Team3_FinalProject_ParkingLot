@@ -113,6 +113,24 @@ CONFIG = {
         # 통로 한 칸이 10cm이므로 그 절반보다 조금 넉넉하게 둔다.
         "LANE_FREE_CM": 6.0,
 
+        # -----------------------------------------------------------------
+        # 목적지 근처에서는 일방통행을 풀어준다
+        # -----------------------------------------------------------------
+        # 목적지에서 이 거리(cm) 안에서는 역주행 벌점과 차선 인력을 모두 끈다.
+        #
+        # 자리가 통로 흐름의 '조금 지나친' 쪽에 있으면(자리 중심이 기준선보다
+        # 몇 cm 아래에 있다든지) 규칙만 지켜서는 주차장을 한 바퀴 돌아 다시
+        # 들어오는 경로가 나온다. 계산은 맞지만 눈앞의 자리를 두고 한 바퀴
+        # 도는 안내라 사람이 따르지 않는다.
+        #
+        # 실제 주차장에서도 자리 앞에서는 한두 걸음 물러서거나 비스듬히
+        # 들어가는 것이 허용되므로, 목적지 주변만 예외로 둔다.
+        #
+        # 크기: 자리 한 칸(가로 10cm, 세로 17.5cm)을 조금 넘는 정도. 이보다
+        # 크게 잡으면 통로 하나가 통째로 풀려서 진짜 역주행이 나온다.
+        # 0으로 두면 예전 동작(주차장 전체에 규칙 적용)으로 돌아간다.
+        "GOAL_RELAX_CM": 25.0,
+
         # 경로 단순화가 지름길을 낼 때 봐줄 비용 차이 (cm).
         #
         # 단순화는 격자의 계단 모양을 없애려는 것이지 더 싼 길을 찾는 것이
@@ -561,7 +579,7 @@ class RoutePlanner:
     # 8방향 이동 (대각선 포함). 모듈 상단의 MOVES와 같은 것을 쓴다.
     _MOVES = MOVES
 
-    def __init__(self, lot_map, simplify=True, one_way=None):
+    def __init__(self, lot_map, simplify=True, one_way=None, goal_relax_cm=None):
         """
         RoutePlanner 초기화.
 
@@ -570,6 +588,8 @@ class RoutePlanner:
             simplify: True면 직선 구간을 합쳐 경유점을 줄인다
             one_way:  OneWayField 인스턴스. None이면 CONFIG['ONE_WAY']에 따라
                       만든다. False를 주면 일방통행을 끈다. (비교 시험용)
+            goal_relax_cm: 목적지에서 이 거리 안이면 일방통행을 풀어준다.
+                      None이면 CONFIG['ONE_WAY']['GOAL_RELAX_CM'].
         """
         self.lot_map = lot_map
         self.simplify = simplify
@@ -578,6 +598,36 @@ class RoutePlanner:
             one_way = (OneWayField(lot_map)
                        if CONFIG['ONE_WAY']['ENABLE'] else False)
         self.one_way = one_way or None
+
+        self.goal_relax_cm = (CONFIG['ONE_WAY']['GOAL_RELAX_CM']
+                              if goal_relax_cm is None else goal_relax_cm)
+
+    def _relax_radius_cells(self):
+        """목적지 예외 반경을 격자 칸 수로. 0이면 예외 없음."""
+        if not self.goal_relax_cm or self.one_way is None:
+            return 0.0
+        return self.goal_relax_cm / self.lot_map.resolution
+
+    def _make_relaxed(self, goal_cell):
+        """
+        '이 칸은 목적지 근처라 일방통행을 묻지 않는다'를 판정하는 함수를 만든다.
+
+        예외를 두지 않을 때는 None을 돌려주어, 호출부가 판정 자체를 건너뛰게
+        한다. (A* 안쪽 반복문이라 함수 호출 한 번도 아깝다)
+        """
+        radius = self._relax_radius_cells()
+        if radius <= 0.0:
+            return None
+
+        gc, gr = goal_cell
+        r2 = radius * radius
+
+        def relaxed(cell):
+            dc = cell[0] - gc
+            dr = cell[1] - gr
+            return dc * dc + dr * dr <= r2
+
+        return relaxed
 
     def plan(self, start_world, goal_spot_id, spot_status=None):
         """
@@ -607,12 +657,16 @@ class RoutePlanner:
         if start_cell is None or goal_cell is None:
             return None
 
-        cells = self._astar(start_cell, goal_cell)
+        # 목적지 근처에서는 일방통행을 풀어준다.
+        # (CONFIG['ONE_WAY']['GOAL_RELAX_CM'] 주석 참고)
+        relaxed = self._make_relaxed(goal_cell)
+
+        cells = self._astar(start_cell, goal_cell, relaxed)
         if cells is None:
             return None
 
         if self.simplify:
-            cells = self._simplify(cells)
+            cells = self._simplify(cells, relaxed)
 
         # 격자 중심 좌표로 변환하되, 시작점과 끝점은 실제 좌표를 그대로 사용
         route = [self.lot_map.cell_to_world(c) for c in cells]
@@ -620,8 +674,14 @@ class RoutePlanner:
         route[-1] = (float(goal_world[0]), float(goal_world[1]))
         return route
 
-    def _astar(self, start, goal):
-        """A*로 격자 경로를 탐색. 경로가 없으면 None."""
+    def _astar(self, start, goal, relaxed=None):
+        """
+        A*로 격자 경로를 탐색. 경로가 없으면 None.
+
+        Args:
+            relaxed: relaxed(cell) -> bool. True인 칸에서는 일방통행 비용을
+                     묻지 않는다. None이면 주차장 전체에 규칙을 적용한다.
+        """
         if HAS_DIAGONAL:
             def h(c):
                 return math.hypot(c[0] - goal[0], c[1] - goal[1])
@@ -667,8 +727,11 @@ class RoutePlanner:
                 # 그 위에 '차선에서 벗어난 만큼'을 거리에 비례해 더 얹는다.
                 # 벌점이 아니라 인력이라 값이 늘 0 이상이므로, 휴리스틱
                 # (직선거리)은 그대로 하한으로 남는다. (A* 전제 유지)
+                #
+                # 목적지 코앞은 예외다. 거기서까지 규칙을 지키게 하면 몇 cm
+                # 때문에 한 바퀴 도는 경로가 나온다.
                 penalty = 0.0
-                if self.one_way is not None:
+                if self.one_way is not None and not (relaxed and relaxed(current)):
                     penalty = self.one_way.step_penalty(current, dc, dr)
                     if penalty is None:
                         continue
@@ -682,7 +745,7 @@ class RoutePlanner:
 
         return None
 
-    def _simplify(self, cells):
+    def _simplify(self, cells, relaxed=None):
         """
         직선으로 갈 수 있는 구간을 하나로 합쳐 경유점을 줄인다.
         (격자 경로의 계단 모양을 제거)
@@ -691,6 +754,11 @@ class RoutePlanner:
         돌아온 경로라도, 두 점을 직선으로 이으면 그 직선이 역주행 구간을
         가로지를 수 있다. 그러면 계산은 일방통행인데 화면에 그려지는 선과
         차에 주는 안내만 역주행이 된다.
+
+        Args:
+            relaxed: relaxed(cell) -> bool. A*에 넘긴 것과 같은 함수여야 한다.
+                     A*가 예외로 지나온 칸을 여기서 다시 따지면 그 구간만
+                     계단으로 남는다.
         """
         if len(cells) <= 2:
             return cells
@@ -700,7 +768,7 @@ class RoutePlanner:
         if self.one_way is not None:
             prefix = [0.0]
             for cell in cells[1:]:
-                prefix.append(prefix[-1] + self.one_way.lane_cost(cell))
+                prefix.append(prefix[-1] + self._lane_cost(cell, relaxed))
         else:
             prefix = None
 
@@ -709,7 +777,7 @@ class RoutePlanner:
         while i < len(cells) - 1:
             # 현재 지점에서 직선으로 도달 가능한 가장 먼 지점을 찾는다
             j = len(cells) - 1
-            while j > i + 1 and not self._can_shortcut(cells, i, j, prefix):
+            while j > i + 1 and not self._can_shortcut(cells, i, j, prefix, relaxed):
                 j -= 1
             simplified.append(cells[j])
             i = j
@@ -725,9 +793,15 @@ class RoutePlanner:
 
         Returns:
             [(구간 인덱스, 시작점, 끝점), ...]. 비어 있으면 일방통행을 지킨 것.
+            목적지 예외 구역(GOAL_RELAX_CM) 안은 세지 않는다. 계획기가 일부러
+            봐준 곳이므로, 여기서 세면 정상 경로가 실패로 나온다.
         """
         if self.one_way is None or not route or len(route) < 2:
             return []
+
+        # 경로의 끝점이 목적지다. 계획기가 쓴 것과 같은 예외 구역을 만든다.
+        relaxed = self._make_relaxed(
+            self.lot_map.world_to_cell(route[-1], clamp=True))
 
         # 차가 주행 불가 칸(주차 구역이나 여유 영역) 안에 있으면 plan()이
         # 출발점을 가장 가까운 통로 칸으로 옮긴다. 그 결과 첫 구간은 '차의 실제
@@ -764,11 +838,19 @@ class RoutePlanner:
             # 이므로, 도착해서 멈추는(또는 방향을 바꾸는) 칸은 대상이 아니다.
             # 넣으면 차선이 바뀌는 경계에서 멀쩡한 차선 변경이 역주행으로 잡힌다.
             cells = list(bresenham_cells(cell_a, cell_b))[:-1]
+            if relaxed is not None:
+                cells = [c for c in cells if not relaxed(c)]
             if any(self.one_way.is_wrong_way(cell, dc, dr) for cell in cells):
                 bad.append((i, a, b))
         return bad
 
-    def _can_shortcut(self, cells, i, j, prefix=None):
+    def _lane_cost(self, cell, relaxed=None):
+        """차선 인력. 목적지 예외 구역 안이면 0. (A*가 매긴 것과 같아야 한다)"""
+        if relaxed is not None and relaxed(cell):
+            return 0.0
+        return self.one_way.lane_cost(cell)
+
+    def _can_shortcut(self, cells, i, j, prefix=None, relaxed=None):
         """
         경로의 i번째 칸에서 j번째 칸까지를 직선 하나로 대신할 수 있는지.
 
@@ -803,7 +885,7 @@ class RoutePlanner:
         for cell in bresenham_cells(cell_a, cell_b):
             if not self.lot_map.is_free(cell):
                 return False
-            if self.one_way.is_wrong_way(cell, dc, dr):
+            if not (relaxed and relaxed(cell)) and self.one_way.is_wrong_way(cell, dc, dr):
                 return False
             line.append(cell)
 
@@ -811,13 +893,13 @@ class RoutePlanner:
         if prefix is not None:
             lane_before = prefix[j] - prefix[i]
         else:
-            lane_before = sum(self.one_way.lane_cost(c) for c in cells[i + 1:j + 1])
+            lane_before = sum(self._lane_cost(c, relaxed) for c in cells[i + 1:j + 1])
         before = (j - i) + lane_before
 
         # 지름길의 비용. 직선 길이를 지나온 칸 수로 나눠 칸마다 배분한다.
         length = math.hypot(dc, dr)
         per_cell = length / max(len(line) - 1, 1)
-        after = length + sum(self.one_way.lane_cost(c) for c in line[1:]) * per_cell
+        after = length + sum(self._lane_cost(c, relaxed) for c in line[1:]) * per_cell
 
         return after <= before + CONFIG['ONE_WAY']['LANE_SHORTCUT_TOLERANCE_CM']
 
