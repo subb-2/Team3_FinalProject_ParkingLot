@@ -17,6 +17,19 @@ from logic.C02_lot_layout import (
     SPOT_WORLD_POS, GATE1_WORLD_POS, GATE2_WORLD_POS,
     cell_to_world, ONE_WAY_SEGMENTS_WORLD, CONFIG as C02_CONFIG,
 )
+# 차 위치에서 시작하는 남은 경로. 첫 구간을 가로/세로로 펴는 규칙이
+# 화면마다 달라지면 안 되므로 계산은 C01 한 곳에 둔다.
+from logic.C01_path_planner import route_from_position
+
+
+def _lot_map_of(navigator):
+    """
+    계획기가 쓰는 점유 격자. 없으면 None.
+
+    경로를 펼 때 '옮긴 모서리가 벽을 뚫지 않는지' 확인하는 데만 쓴다.
+    단독 테스트처럼 navigator가 없으면 확인 없이 편다.
+    """
+    return getattr(getattr(navigator, "planner", None), "lot_map", None)
 from data.map_data import (
     grid_map, PILL_MARKER_ID, spot_type,
     ROAD, SPOT_CELLS, SPOT1, SPOT2, SPOT3, SPOT4,
@@ -94,33 +107,43 @@ CONFIG = {
 }
 
 # 색상 (BGR)
-COLOR_BG          = (34, 34, 34)     # 배경
-COLOR_PANEL_BG    = (24, 24, 24)     # 패널 배경
-COLOR_GRID        = (54, 54, 54)     # 격자
-COLOR_TEXT        = (235, 235, 235)  # 기본 텍스트
-COLOR_TEXT_DIM    = (150, 150, 150)  # 보조 텍스트
-COLOR_SPOT_EMPTY  = (130, 130, 130)  # 빈자리 테두리
-COLOR_SPOT_FULL   = (70, 70, 200)    # 주차중 (붉은 계열)
-COLOR_SPOT_TARGET = (255, 0, 255)    # 목표 구역 (자홍)
-COLOR_GATE        = (0, 200, 255)    # 입출구 (주황)
+#
+# 밝은 화면이다. 바탕을 흰색에 가깝게 깔고, 눈이 먼저 가야 하는 것
+# (글자, 기둥, 내 차, 경로)만 검정에 가깝게 눌러서 대비로 읽히게 한다.
+# 어두운 화면에서는 밝은 것이 튀지만 여기서는 반대다. 색을 밝게 하면
+# 바탕에 묻히므로, 강조는 '더 밝게'가 아니라 '더 진하게'로 준다.
+#
+# 조명이 밝은 곳에서 프로젝터나 노트북 화면으로 볼 때 어두운 화면은
+# 반사가 심해 아무것도 안 보인다. 시연장이 그런 곳이다.
+COLOR_BG          = (248, 245, 243)  # 배경
+COLOR_PANEL_BG    = (255, 255, 255)  # 패널 배경
+COLOR_GRID        = (231, 226, 221)  # 격자
+COLOR_TEXT        = (31, 26, 24)     # 기본 텍스트 (거의 검정)
+COLOR_TEXT_DIM    = (125, 115, 110)  # 보조 텍스트
+COLOR_TEXT_FAINT  = (170, 162, 158)  # 더 옅은 글자 (값이 없을 때)
+COLOR_SPOT_EMPTY  = (132, 124, 120)  # 빈자리 테두리
+COLOR_SPOT_FULL   = (72, 72, 214)    # 주차중 (붉은 계열)
+COLOR_SPOT_TARGET = (170, 0, 198)    # 목표 구역 (자홍)
+COLOR_GATE        = (0, 140, 214)    # 입출구 (주황)
 # 주차 구역 종류별 빈자리 테두리 색 (BGR).
 # 실제 주차장의 노면 표시 관례를 따라 구분한다.
+# 흰 바닥 위라서 어두운 화면에서 쓰던 파스텔로는 테두리가 보이지 않는다.
 COLOR_SPOT_BY_TYPE = {
-    SPOT1: (130, 130, 130),   # 일반   - 회색
-    SPOT2: (255, 150, 0),     # 장애인 - 파랑
-    SPOT3: (60, 200, 255),    # 대형   - 노랑
-    SPOT4: (120, 220, 120),   # 전기차 - 초록
+    SPOT1: (110, 99, 92),     # 일반   - 회색
+    SPOT2: (214, 98, 15),     # 장애인 - 파랑
+    SPOT3: (0, 90, 138),      # 대형   - 노랑
+    SPOT4: (67, 127, 26),     # 전기차 - 초록
 }
-COLOR_ROAD        = (44, 44, 46)     # 도로 (통로)
-COLOR_PILL        = (74, 80, 92)     # 기둥 - 콘크리트 느낌
-COLOR_PILL_EDGE   = (105, 118, 138)  # 기둥 테두리
-COLOR_PILL_TEXT   = (150, 175, 205)  # 기둥의 마커 ID
-COLOR_VEHICLE     = (0, 230, 0)      # 차량 (번호 매칭됨)
-COLOR_VEHICLE_UNK = (0, 165, 255)    # 차량 (번호 미매칭)
-COLOR_TRAJECTORY  = (0, 220, 220)    # 이동 궤적
-COLOR_GUIDE_LINE  = (0, 255, 255)    # 안내선
-COLOR_ARRIVED     = (0, 255, 0)      # 도착 표시
-COLOR_ONE_WAY     = (110, 105, 70)   # 일방통행 방향 (바닥 표시라 어둡게)
+COLOR_ROAD        = (240, 235, 232)  # 도로 (통로)
+COLOR_PILL        = (70, 62, 58)     # 기둥 - 바닥에서 유일하게 검은 덩어리
+COLOR_PILL_EDGE   = (44, 38, 35)     # 기둥 테두리
+COLOR_PILL_TEXT   = (242, 236, 232)  # 기둥의 마커 ID (기둥이 어두우므로 흰 글자)
+COLOR_VEHICLE     = (60, 150, 20)    # 차량 (번호 매칭됨)
+COLOR_VEHICLE_UNK = (0, 120, 230)    # 차량 (번호 미매칭)
+COLOR_TRAJECTORY  = (150, 150, 0)    # 이동 궤적
+COLOR_GUIDE_LINE  = (220, 110, 20)   # 안내선
+COLOR_ARRIVED     = (60, 140, 16)    # 도착 표시
+COLOR_ONE_WAY     = (120, 150, 165)  # 일방통행 방향 (바닥 표시라 옅게)
 
 # 일방통행 화살표 간격 (cm). 촘촘하면 배경이 지저분해진다.
 ONE_WAY_ARROW_STEP_CM = 25.0
@@ -130,21 +153,34 @@ ONE_WAY_ARROW_STEP_CM = 25.0
 # 이 화면은 관제 화면(1000x620)과 달리 대시보드 오른쪽 아래 칸에 작게
 # 들어간다. 색을 많이 쓰면 축소했을 때 그냥 얼룩으로 보인다. 그래서
 # 바탕은 무채색 한 계열로 눌러 두고, 색은 '경로'와 '목적지'에만 쓴다.
-COLOR_NAV_SKY     = (30, 26, 22)     # 지평선 위 (원근 바깥 영역)
-COLOR_NAV_GROUND  = (34, 32, 30)     # 주차장 바깥 바닥
-COLOR_NAV_ROAD    = (60, 56, 52)     # 통로 (아스팔트)
-COLOR_NAV_PILL    = (76, 78, 82)     # 기둥 (통로보다 밝게 - 솟아 있는 장애물)
-COLOR_NAV_BANNER  = (28, 25, 22)     # 상단 배너 배경
-COLOR_NAV_CARD    = (38, 34, 30)     # 떠 있는 카드 (조감도/상태)
-COLOR_NAV_LINE    = (64, 60, 56)     # 카드 테두리
-COLOR_NAV_ROUTE   = (255, 178, 66)   # 주행 경로 (내비 특유의 하늘색)
-COLOR_NAV_ROUTE_E = (170, 96, 16)    # 경로 테두리 (짙은 파랑)
+#
+# 밝기 순서가 뜻을 나른다. 주차장 바깥 < 통로 < 빈자리 순으로 밝아지고,
+# 갈 수 없는 곳(주차중인 자리)과 기둥만 어둡다.
+COLOR_NAV_SKY     = (245, 241, 238)  # 지평선 위 (원근 바깥 영역)
+COLOR_NAV_GROUND  = (236, 231, 228)  # 주차장 바깥 바닥
+COLOR_NAV_ROAD    = (221, 213, 208)  # 통로 (아스팔트)
+COLOR_NAV_PILL    = (84, 75, 70)     # 기둥 (솟아 있는 장애물 - 어둡게)
+COLOR_NAV_BANNER  = (255, 255, 255)  # 상단 배너 배경
+COLOR_NAV_CARD    = (253, 252, 252)  # 떠 있는 카드 (조감도/상태)
+COLOR_NAV_LINE    = (218, 210, 205)  # 카드 테두리
+COLOR_NAV_TILE    = (240, 236, 233)  # 배너의 방향 아이콘 타일 바탕
+COLOR_NAV_ROUTE   = (225, 110, 20)   # 주행 경로 (내비 특유의 파랑)
+COLOR_NAV_ROUTE_E = (150, 70, 10)    # 경로 테두리 (짙은 파랑)
 # 계획된 경로가 아니라 '목적지 방향'만 가리키는 직선. 통로도 일방통행도
 # 지키지 않은 선이므로 경로와 같은 색으로 그리면 안 된다. (_route_points)
-COLOR_NAV_ROUTE_HINT = (130, 126, 122)
-COLOR_NAV_CAR     = (245, 245, 245)  # 내 차량 (흰 화살표)
-COLOR_NAV_HALO    = (200, 130, 40)   # 내 차량 주변 후광
-COLOR_NAV_ACCENT  = (255, 210, 120)  # 강조 (거리 숫자)
+COLOR_NAV_ROUTE_HINT = (162, 155, 150)
+COLOR_NAV_CAR     = (33, 28, 26)     # 내 차량 (검은 화살표)
+COLOR_NAV_CAR_E   = (255, 255, 255)  # 내 차량 테두리 (바닥에서 떼어 놓는다)
+COLOR_NAV_HALO    = (240, 180, 120)  # 내 차량 주변 후광
+COLOR_NAV_ACCENT  = (200, 90, 10)    # 강조 (거리 숫자)
+COLOR_NAV_NORTH   = (60, 60, 220)    # 나침반 바늘 (북쪽)
+
+# 노면에 그리는 자리 사각형의 채움색.
+# 테두리 색은 위의 COLOR_SPOT_* 를 그대로 쓰고, 채움만 여기서 정한다.
+COLOR_NAV_SPOT_FILL      = (252, 250, 250)  # 빈자리 (통로보다 밝게)
+COLOR_NAV_SPOT_FULL      = (196, 188, 186)  # 주차중 (통로보다 어둡게)
+COLOR_NAV_SPOT_FULL_EDGE = (160, 145, 150)
+COLOR_NAV_SPOT_TARGET    = (246, 228, 250)  # 목적지 (자홍 테두리 안쪽)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -726,12 +762,12 @@ class NavigationView:
         # 안내 중일 때와 같은 자리에 같은 크기로 둔다. 대기 화면만 배치가
         # 다르면 차가 잡히는 순간 화면이 통째로 갈아 끼워진 것처럼 보인다.
         tile = self.banner_h - 32
-        _rounded_rect(canvas, (16, 16), (16 + tile, 16 + tile), 14, (44, 39, 34), -1)
+        _rounded_rect(canvas, (16, 16), (16 + tile, 16 + tile), 14, COLOR_NAV_TILE, -1)
         self._draw_maneuver_icon(canvas, (16 + tile // 2, 16 + tile // 2),
                                  GUIDE_UNKNOWN, COLOR_NAV_ACCENT, tile)
         _text(canvas, "SEARCHING", (16 + tile + 22, 74), 0.82, COLOR_TEXT_DIM, 2)
         _text(canvas, "no vehicle to guide", (self.width // 2, self.height // 2),
-              0.7, (96, 92, 88), 1, anchor="c")
+              0.7, COLOR_TEXT_DIM, 1, anchor="c")
         self._draw_status(canvas, None, fps, extra_info)
         return canvas
 
@@ -791,22 +827,23 @@ class NavigationView:
             pts = self._quad(sx, sy, hw, hh, car_pos, heading)
 
             if spot_id == target:
-                cv2.fillPoly(layer, [pts], (92, 46, 96))
+                cv2.fillPoly(layer, [pts], COLOR_NAV_SPOT_TARGET)
                 cv2.polylines(layer, [pts], True, COLOR_SPOT_TARGET, 3, cv2.LINE_AA)
             elif spot_status.get(spot_id) == "full":
                 # 이미 차 있는 자리. 갈 수 없는 곳이니 통로보다 어둡게 눌러
                 # 둔다. 빈자리와의 차이가 밝기로 먼저 보여야 한눈에 갈린다.
-                cv2.fillPoly(layer, [pts], (40, 36, 38))
-                cv2.polylines(layer, [pts], True, (74, 68, 88), 1, cv2.LINE_AA)
+                cv2.fillPoly(layer, [pts], COLOR_NAV_SPOT_FULL)
+                cv2.polylines(layer, [pts], True, COLOR_NAV_SPOT_FULL_EDGE, 1, cv2.LINE_AA)
             else:
                 # 빈자리는 구역 종류(일반/장애인/대형/전기차)에 따라 색을 나눈다
                 color = COLOR_SPOT_BY_TYPE.get(spot_type.get(spot_id), COLOR_SPOT_EMPTY)
-                cv2.fillPoly(layer, [pts], (54, 52, 50))
+                cv2.fillPoly(layer, [pts], COLOR_NAV_SPOT_FILL)
                 cv2.polylines(layer, [pts], True, color, 2, cv2.LINE_AA)
 
-    def _route_points(self, nav):
+    def _route_points(self, nav, car_pos):
         """
         내 차에서 목적지까지 이어 그릴 점들과 그것이 '계획된 경로'인지 여부.
+        (차의 현재 위치가 첫 점이다)
 
         경로 계획(C01)이 있으면 남은 경유점을 따라가고, 없으면 목적지까지
         직선으로 잇는다. 픽셀 모드에는 경로 계획이 없어 목적지가 정해져 있는데도
@@ -823,11 +860,13 @@ class NavigationView:
         """
         route = nav.get("route")
         if route and len(route) >= 2:
-            idx = min(nav.get("route_index", 1), len(route) - 1)
-            return list(route[idx:]), True
+            # 첫 구간이 비스듬해지지 않도록 C01이 모서리를 차에 맞춰 준다.
+            return route_from_position(
+                route, nav.get("route_index", 1), car_pos,
+                lot_map=_lot_map_of(self.navigator)), True
 
         target = nav.get("target_world")
-        return ([target], False) if target is not None else (None, False)
+        return ([car_pos, target], False) if target is not None else (None, False)
 
     def _draw_ground_route(self, layer, car_pos, heading, nav):
         """
@@ -840,13 +879,12 @@ class NavigationView:
         같은 파란 띠로 그리면 통로도 일방통행도 안 지킨 선이 계획 결과처럼
         보인다. (_route_points 주석 참고)
         """
-        rest, planned = self._route_points(nav)
+        rest, planned = self._route_points(nav, car_pos)
         if not rest:
             return
 
-        pts = [self._world_to_flat(car_pos, car_pos, heading)]
-        pts += [self._world_to_flat(p, car_pos, heading) for p in rest]
-        arr = np.array(pts, dtype=np.int32)
+        arr = np.array([self._world_to_flat(p, car_pos, heading) for p in rest],
+                       dtype=np.int32)
 
         if not planned:
             _dashed_polyline(layer, arr, COLOR_NAV_ROUTE_HINT, 4, dash=18, gap=14)
@@ -894,7 +932,7 @@ class NavigationView:
             xy = self._screen_of(pos, car_pos, heading, top=top)
             if xy is None:
                 continue
-            _text(canvas, spot_id, (xy[0], xy[1] + 4), 0.46, (150, 146, 142),
+            _text(canvas, spot_id, (xy[0], xy[1] + 4), 0.46, COLOR_TEXT_DIM,
                   1, anchor="c")
 
     def _draw_destination_pin(self, canvas, car_pos, heading, nav):
@@ -918,7 +956,7 @@ class NavigationView:
 
         spot = nav.get("target_spot")
         if spot:
-            _text(canvas, str(spot), (x, y - 46), 0.5, (255, 255, 255), 2, anchor="c")
+            _text(canvas, str(spot), (x, y - 46), 0.5, COLOR_TEXT, 2, anchor="c")
 
     def _draw_car(self, canvas, screen_heading_deg=0.0):
         """
@@ -947,7 +985,7 @@ class NavigationView:
              for x, y in shape], dtype=np.int32)
 
         cv2.fillPoly(canvas, [pts], COLOR_NAV_CAR, cv2.LINE_AA)
-        cv2.polylines(canvas, [pts], True, (60, 52, 44), 2, cv2.LINE_AA)
+        cv2.polylines(canvas, [pts], True, COLOR_NAV_CAR_E, 2, cv2.LINE_AA)
 
     # ---------- 상단 배너 ----------
     def _draw_banner(self, canvas, nav):
@@ -988,7 +1026,7 @@ class NavigationView:
 
         # 왼쪽 : 방향 아이콘을 둥근 타일에 넣는다
         tile = bh - 32
-        _rounded_rect(canvas, (16, 16), (16 + tile, 16 + tile), 14, (44, 39, 34), -1)
+        _rounded_rect(canvas, (16, 16), (16 + tile, 16 + tile), 14, COLOR_NAV_TILE, -1)
         self._draw_maneuver_icon(canvas, (16 + tile // 2, 16 + tile // 2), maneuver,
                                  accent, tile)
 
@@ -1005,15 +1043,15 @@ class NavigationView:
         rx = w - 20
         spot = nav.get("target_spot") or parked_spot
         head = "PARKED AT" if parked_spot else "DESTINATION"
-        _text(canvas, head, (rx, 36), 0.42, (128, 124, 120), 1, anchor="r")
+        _text(canvas, head, (rx, 36), 0.42, COLOR_TEXT_DIM, 1, anchor="r")
         _text(canvas, str(spot) if spot else "NOT ASSIGNED", (rx, 74),
               1.1 if spot else 0.6,
               (COLOR_ARRIVED if parked_spot else COLOR_SPOT_TARGET) if spot
-              else (110, 106, 102), 2, anchor="r")
+              else COLOR_TEXT_FAINT, 2, anchor="r")
         # 남은 거리는 배너 왼쪽 숫자와 다를 때만 적는다.
         # 같은 값을 두 번 적으면 어느 쪽이 무엇인지 헷갈린다.
         if remain is not None and (dist is None or abs(remain - dist) >= 1.0):
-            _text(canvas, f"{remain:.0f}cm left", (rx, 98), 0.5, (128, 124, 120),
+            _text(canvas, f"{remain:.0f}cm left", (rx, 98), 0.5, COLOR_TEXT_DIM,
                   1, anchor="r")
 
     def _draw_maneuver_icon(self, canvas, center, maneuver, color, size):
@@ -1044,10 +1082,10 @@ class NavigationView:
             cv2.circle(canvas, (cx, cy), int(8 * u), color, -1, cv2.LINE_AA)
         elif maneuver == GUIDE_UNKNOWN:
             # 아직 목표를 못 잡은 상태. 방향을 단정하면 안 된다.
-            cv2.circle(canvas, (cx, cy), int(20 * u), (110, 106, 102),
+            cv2.circle(canvas, (cx, cy), int(20 * u), COLOR_TEXT_FAINT,
                        max(3, int(4 * u)), cv2.LINE_AA)
             _text(canvas, "?", (cx, cy + int(11 * u)), 0.9 * u * 1.4,
-                  (150, 146, 142), 2, anchor="c")
+                  COLOR_TEXT_DIM, 2, anchor="c")
         else:
             cv2.arrowedLine(canvas, (cx, cy + b), (cx, cy - b), color, t,
                             cv2.LINE_AA, tipLength=0.4)
@@ -1072,11 +1110,11 @@ class NavigationView:
         dx, dy = math.sin(rad), -math.cos(rad)
         tip = (int(cx + dx * (r - 7)), int(cy + dy * (r - 7)))
         tail = (int(cx - dx * (r - 11)), int(cy - dy * (r - 11)))
-        cv2.line(canvas, tail, (cx, cy), (120, 116, 112), 3, cv2.LINE_AA)
-        cv2.arrowedLine(canvas, (cx, cy), tip, (90, 90, 235), 3, cv2.LINE_AA,
+        cv2.line(canvas, tail, (cx, cy), COLOR_TEXT_FAINT, 3, cv2.LINE_AA)
+        cv2.arrowedLine(canvas, (cx, cy), tip, COLOR_NAV_NORTH, 3, cv2.LINE_AA,
                         tipLength=0.55)
         _text(canvas, "N", (int(cx + dx * (r + 9)), int(cy + dy * (r + 9)) + 4),
-              0.4, (150, 146, 142), 1, anchor="c")
+              0.4, COLOR_TEXT_DIM, 1, anchor="c")
 
     def _draw_status(self, canvas, nav, fps, extra_info):
         """
@@ -1114,9 +1152,9 @@ class NavigationView:
         if label:
             _text(canvas, label, (x1 + pad, y1 + 26), 0.62, COLOR_TEXT, 2)
             if sub_text:
-                _text(canvas, sub_text, (x1 + pad, y1 + 46), 0.44, (128, 124, 120), 1)
+                _text(canvas, sub_text, (x1 + pad, y1 + 46), 0.44, COLOR_TEXT_DIM, 1)
         else:
-            _text(canvas, sub_text, (x1 + pad, y1 + 23), 0.44, (128, 124, 120), 1)
+            _text(canvas, sub_text, (x1 + pad, y1 + 23), 0.44, COLOR_TEXT_DIM, 1)
 
     def _draw_minimap(self, canvas, car_pos, nav, spot_status):
         """
@@ -1170,15 +1208,14 @@ class NavigationView:
             if spot_id == target:
                 color = COLOR_SPOT_TARGET
             elif spot_status.get(spot_id) == "full":
-                color = (74, 68, 88)
+                color = COLOR_NAV_SPOT_FULL_EDGE
             else:
-                color = (128, 124, 120)
+                color = COLOR_SPOT_EMPTY
             cv2.rectangle(canvas, p1, p2, color, -1)
 
-        rest, planned = self._route_points(nav)
+        rest, planned = self._route_points(nav, car_pos)
         if rest:
-            pts = np.array([to_mini(car_pos)] + [to_mini(p) for p in rest],
-                           dtype=np.int32)
+            pts = np.array([to_mini(p) for p in rest], dtype=np.int32)
             cv2.polylines(canvas, [pts], False,
                           COLOR_NAV_ROUTE if planned else COLOR_NAV_ROUTE_HINT,
                           2, cv2.LINE_AA)
@@ -1585,7 +1622,7 @@ class NavigationMapUI:
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_FULL, -1)
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_EMPTY, 1)
             else:
-                cv2.rectangle(canvas, p1, p2, (30, 34, 30), -1)
+                cv2.rectangle(canvas, p1, p2, COLOR_PANEL_BG, -1)
                 cv2.rectangle(canvas, p1, p2, COLOR_SPOT_EMPTY, 1)
 
             # 목표 구역은 굵은 자홍 테두리로 강조
@@ -1625,9 +1662,11 @@ class NavigationMapUI:
 
             route = nav.get("route")
             if route and len(route) >= 2:
-                # 현재 위치에서 남은 경유점까지만 이어서 그린다
-                idx = min(nav.get("route_index", 1), len(route) - 1)
-                pts = [start] + [self.world_to_map(p) for p in route[idx:]]
+                # 현재 위치에서 남은 경유점까지만 이어서 그린다.
+                # (첫 구간이 비스듬해지지 않게 C01이 모서리를 맞춰 준다)
+                pts = [self.world_to_map(p) for p in route_from_position(
+                    route, nav.get("route_index", 1), nav["world_pos"],
+                    lot_map=_lot_map_of(self.navigator))]
                 for a, b in zip(pts[:-1], pts[1:]):
                     cv2.line(canvas, a, b, COLOR_GUIDE_LINE, 2, cv2.LINE_AA)
                 # 경유점 표시 (목적지 제외)
@@ -1671,7 +1710,7 @@ class NavigationMapUI:
             color = COLOR_VEHICLE if nav["car_id"] else COLOR_VEHICLE_UNK
 
             cv2.circle(canvas, (cx, cy), radius, color, -1)
-            cv2.circle(canvas, (cx, cy), radius, (255, 255, 255), 1)
+            cv2.circle(canvas, (cx, cy), radius, COLOR_TEXT, 1)
 
             # 진행 방향 화살표 (정지 상태면 생략)
             heading = nav.get("heading_deg")
@@ -1679,7 +1718,7 @@ class NavigationMapUI:
                 rad = math.radians(heading)
                 hx = int(cx + math.cos(rad) * radius * 2.4)
                 hy = int(cy + math.sin(rad) * radius * 2.4)
-                cv2.arrowedLine(canvas, (cx, cy), (hx, hy), (255, 255, 255), 2, tipLength=0.35)
+                cv2.arrowedLine(canvas, (cx, cy), (hx, hy), COLOR_TEXT, 2, tipLength=0.35)
 
             label = nav["car_id"] if nav["car_id"] else f"#{nav['track_id']}"
             (tw, _), _ = cv2.getTextSize(label, FONT, 0.5, 2)
@@ -1690,7 +1729,7 @@ class NavigationMapUI:
         """오른쪽에 차량별 안내 정보를 표 형태로 표시."""
         x0 = self.map_w
         cv2.rectangle(canvas, (x0, 0), (self.width, self.height), COLOR_PANEL_BG, -1)
-        cv2.line(canvas, (x0, 0), (x0, self.height), (70, 70, 70), 1)
+        cv2.line(canvas, (x0, 0), (x0, self.height), COLOR_GRID, 1)
 
         pad = 14
         y = 32
@@ -1701,7 +1740,7 @@ class NavigationMapUI:
             cv2.putText(canvas, f"FPS {fps:.1f}", (x0 + pad, y),
                         FONT, 0.45, COLOR_TEXT_DIM, 1, cv2.LINE_AA)
         y += 14
-        cv2.line(canvas, (x0 + pad, y), (self.width - pad, y), (70, 70, 70), 1)
+        cv2.line(canvas, (x0 + pad, y), (self.width - pad, y), COLOR_GRID, 1)
         y += 22
 
         if not nav_results:
@@ -1741,7 +1780,7 @@ class NavigationMapUI:
         # 추가 정보 (FIFO 대기열, 호모그래피 상태 등)
         if extra_info:
             y = min(y + 6, self.height - 20)
-            cv2.line(canvas, (x0 + pad, y), (self.width - pad, y), (70, 70, 70), 1)
+            cv2.line(canvas, (x0 + pad, y), (self.width - pad, y), COLOR_GRID, 1)
             y += 20
             for line in extra_info:
                 if y > self.height - 12:

@@ -35,6 +35,17 @@ CONFIG = {
     # 경로 단순화: 직선으로 갈 수 있는 구간을 하나의 경유점으로 합친다.
     "SIMPLIFY_PATH": True,
 
+    # 경로를 가로/세로 구간으로만 낸다.
+    #
+    # A*와 단순화는 이미 4방향만 쓰므로 격자 경로 자체는 가로/세로뿐이다.
+    # 그런데 마지막에 첫 점을 '차의 실제 위치'로, 끝 점을 '자리 중심'으로
+    # 바꿔치기하기 때문에, 차가 차선 한가운데에서 몇 cm만 벗어나 있어도
+    # 그 구간만 비스듬한 선이 된다. 화면에서는 통로를 대각선으로 가로지르는
+    # 것처럼 보이고, 차가 움직일 때마다 그 선의 기울기가 계속 흔들린다.
+    #
+    # 켜면 그 두 구간을 모서리 경유점을 옮겨서 편다. 경유점 개수는 그대로다.
+    "STRAIGHT_LEGS_ONLY": True,
+
     # 경로에서 이 거리 이상 벗어나면 다시 계획한다 (cm).
     "REPLAN_TOLERANCE_CM": 12.0,
 
@@ -672,6 +683,9 @@ class RoutePlanner:
         route = [self.lot_map.cell_to_world(c) for c in cells]
         route[0] = (float(start_world[0]), float(start_world[1]))
         route[-1] = (float(goal_world[0]), float(goal_world[1]))
+
+        if CONFIG['STRAIGHT_LEGS_ONLY']:
+            route = self._straighten(route)
         return route
 
     def _astar(self, start, goal, relaxed=None):
@@ -783,6 +797,123 @@ class RoutePlanner:
             i = j
 
         return simplified
+
+    def _straighten(self, route):
+        """
+        비스듬한 구간을 없애고 가로/세로 구간만 남긴다.
+
+        격자 경로는 원래 가로/세로뿐인데, plan()이 첫 점을 차의 실제 위치로,
+        끝 점을 자리 중심으로 바꿔치기하면서 그 두 구간만 비스듬해진다.
+        차가 차선 한가운데에서 벗어난 만큼 기울기가 생기고, 차가 움직일
+        때마다 그 값이 바뀌므로 화면의 선이 계속 흔들린다.
+
+        경유점을 새로 끼우지 않고 '모서리를 옆으로 옮겨서' 편다. 끼우면
+        3cm짜리 구간이 하나 생기고, C00이 그것도 하나의 구간으로 세어
+        "3cm 앞에서 좌회전" 같은 안내가 나온다. 모서리를 옮기면 구간 수가
+        그대로라 안내도 그대로다.
+
+        옮긴 모서리는 차선 중심에서 차가 벗어난 만큼(보통 몇 cm) 어긋나지만,
+        그 자리는 차가 실제로 지나온 곳이므로 통로 안이다. 그래도 옮긴 두
+        구간이 막히지 않는지는 확인하고, 막히면 원래대로 둔다.
+        """
+        if len(route) < 3:
+            # 모서리가 없으면 옮길 것도 없다. 이런 경로는 자리 코앞에서
+            # 시작한 경우뿐이라 비스듬해도 몇 cm짜리다.
+            return route
+
+        r = [(float(x), float(y)) for x, y in route]
+
+        if len(r) == 3:
+            # 모서리가 하나뿐이면 양 끝이 그 하나를 같이 쓴다.
+            # 한쪽을 맞추면 다른 쪽이 틀어지므로 따로 다룬다.
+            r[1] = self._corner_between(r[0], r[2], r[1])
+        else:
+            r[1] = self._snap_corner(r[0], r[1], r[2])
+            r[-2] = self._snap_corner(r[-1], r[-2], r[-3])
+
+        return self._drop_tiny(r)
+
+    def _clear(self, a, b):
+        """두 실좌표 사이가 뚫려 있는지. (격자 점유만 본다)"""
+        return self.lot_map.line_of_sight(
+            self.lot_map.world_to_cell(a, clamp=True),
+            self.lot_map.world_to_cell(b, clamp=True))
+
+    def _snap_corner(self, anchor, corner, other):
+        """
+        anchor -> corner 구간이 가로나 세로가 되도록 corner를 옮긴다.
+
+        Args:
+            anchor: 옮길 수 없는 끝점 (차의 위치나 자리 중심)
+            corner: 옮길 모서리 경유점
+            other:  모서리 반대쪽 경유점. 이쪽 구간의 방향은 유지해야 한다.
+
+        Returns:
+            옮긴 모서리. 옮길 수 없으면 원래 값.
+        """
+        eps = self.lot_map.resolution
+        dx = corner[0] - anchor[0]
+        dy = corner[1] - anchor[1]
+        if abs(dx) < eps or abs(dy) < eps:
+            return corner       # 이미 가로/세로다
+
+        # 반대쪽 구간이 세로면 모서리의 x를, 가로면 y를 지켜야 한다.
+        # 그래야 그 구간까지 같이 틀어지지 않는다.
+        keep_x = abs(other[0] - corner[0]) < eps
+        keep_y = abs(other[1] - corner[1]) < eps
+        if keep_x and not keep_y:
+            first = (corner[0], anchor[1])
+        elif keep_y and not keep_x:
+            first = (anchor[0], corner[1])
+        else:
+            # 반대쪽도 비스듬하면(있을 수 없지만) 긴 축을 진행 방향으로 본다.
+            first = ((corner[0], anchor[1]) if abs(dx) >= abs(dy)
+                     else (anchor[0], corner[1]))
+
+        # 원래 구간이 이미 막혀 있었다면(차가 자리나 여유 영역 안에 서 있는
+        # 경우다) 뚫림을 따지지 않는다. 어차피 더 나빠질 것이 없다.
+        strict = self._clear(anchor, corner)
+        second = ((anchor[0], corner[1]) if first[0] == corner[0]
+                  else (corner[0], anchor[1]))
+        for cand in (first, second):
+            if not strict or (self._clear(anchor, cand) and self._clear(cand, other)):
+                return cand
+        return corner
+
+    def _corner_between(self, a, b, prefer):
+        """
+        a와 b를 가로 한 번, 세로 한 번으로 잇는 모서리 점.
+        원래 모서리(prefer)에 가까운 쪽을 먼저 쓰고, 막혀 있으면 반대쪽.
+        """
+        eps = self.lot_map.resolution
+        if abs(b[0] - a[0]) < eps or abs(b[1] - a[1]) < eps:
+            return prefer       # a-b가 이미 한 직선이면 모서리를 건드리지 않는다
+
+        cands = [(b[0], a[1]), (a[0], b[1])]
+        cands.sort(key=lambda c: math.hypot(c[0] - prefer[0], c[1] - prefer[1]))
+
+        strict = self._clear(a, prefer) and self._clear(prefer, b)
+        for cand in cands:
+            if not strict or (self._clear(a, cand) and self._clear(cand, b)):
+                return cand
+        return prefer
+
+    def _drop_tiny(self, route):
+        """
+        모서리를 옮기면서 길이가 0에 가까워진 구간을 지운다.
+        양 끝점은 남긴다. (차의 위치와 자리 중심이라 바꿀 수 없다)
+        """
+        eps = self.lot_map.resolution
+        out = [route[0]]
+        for pt in route[1:-1]:
+            if math.hypot(pt[0] - out[-1][0], pt[1] - out[-1][1]) >= eps:
+                out.append(pt)
+        last = route[-1]
+        while len(out) > 1 and math.hypot(last[0] - out[-1][0],
+                                          last[1] - out[-1][1]) < eps:
+            out.pop()
+        out.append(last)
+        return out
 
     def wrong_way_legs(self, route):
         """
@@ -905,6 +1036,84 @@ class RoutePlanner:
 
 
 # 경로 유틸리티
+def route_from_position(route, index, position, straight=None, lot_map=None):
+    """
+    차의 현재 위치에서 시작하는 '남은 경로'를 만든다. (화면에 그릴 선)
+
+    이미 지나온 경유점을 빼고 남은 것만 이어야 차 뒤로 선이 남지 않는다.
+    그런데 그냥 앞에 차 위치를 끼우면, 차가 차선 한가운데에서 벗어난 만큼
+    첫 구간이 비스듬해진다. 차는 계속 조금씩 움직이므로 그 기울기가 매
+    프레임 바뀌어, 통로를 대각선으로 가로지르는 선이 흔들리며 따라다닌다.
+
+    그래서 첫 구간이 비스듬하면 다음 모서리를 옆으로 옮겨 가로/세로로 편다.
+    옮기는 거리는 차가 차선에서 벗어난 만큼(보통 몇 cm)이고, 그 자리는 차가
+    지금 서 있는 통로 안이다. 선은 '앞으로 직진, 저 앞에서 좌회전' 모양으로
+    떨어진다.
+
+    Args:
+        route:    경유점 리스트 (cm)
+        index:    지금 향하고 있는 경유점 인덱스
+        position: 차의 현재 실좌표 (cm). None이면 경로만 잘라서 돌려준다.
+        straight: 가로/세로로 펼지 여부. None이면 CONFIG를 따른다.
+        lot_map:  ParkingLotMap. 주면 옮긴 모서리가 벽이나 자리를 뚫지 않는지
+                  확인한다. 차가 경유점 바로 뒤에 있는 보통의 경우에는 몇 cm
+                  옆으로 옮기는 것이라 늘 통로 안이지만, 무슨 이유로 차가
+                  경유점에서 멀리 떨어져 있으면 옮긴 모서리가 주차장을
+                  가로지를 수 있다. 그때는 펴지 않고 원래 선을 그린다.
+
+    Returns:
+        [(x, y), ...] 차 위치에서 시작하는 점 목록.
+    """
+    if straight is None:
+        straight = CONFIG['STRAIGHT_LEGS_ONLY']
+
+    rest = [] if not route else [
+        (float(p[0]), float(p[1]))
+        for p in route[min(max(index, 0), len(route) - 1):]
+    ]
+    if position is None:
+        return rest
+
+    pts = [(float(position[0]), float(position[1]))] + rest
+    if not straight or len(pts) < 2:
+        return pts
+
+    eps = CONFIG['GRID_RESOLUTION_CM']
+    a, corner = pts[0], pts[1]
+    dx, dy = corner[0] - a[0], corner[1] - a[1]
+    if abs(dx) < eps or abs(dy) < eps:
+        return pts          # 이미 가로/세로다
+
+    def blocked(p, q):
+        if lot_map is None:
+            return False
+        return not lot_map.line_of_sight(lot_map.world_to_cell(p, clamp=True),
+                                         lot_map.world_to_cell(q, clamp=True))
+
+    # 다음 구간의 방향은 지켜야 한다. 세로로 이어지는 모서리면 x를,
+    # 가로로 이어지는 모서리면 y를 그대로 두고 나머지를 차에 맞춘다.
+    nxt = pts[2] if len(pts) > 2 else None
+    if nxt is not None:
+        if abs(nxt[0] - corner[0]) < eps:
+            moved = (corner[0], a[1])
+        elif abs(nxt[1] - corner[1]) < eps:
+            moved = (a[0], corner[1])
+        else:
+            moved = None
+        if moved is not None:
+            if blocked(a, moved) or blocked(moved, corner):
+                return pts      # 펴면 뚫고 지나간다. 원래 선을 그린다.
+            pts[1] = moved
+            return pts
+
+    # 남은 것이 마지막 한 점(자리로 들어가는 구간)뿐이라 지킬 방향이 없다.
+    # 긴 축으로 먼저 가고 짧은 축으로 꺾는다. 모서리를 하나 끼운다.
+    elbow = (corner[0], a[1]) if abs(dx) >= abs(dy) else (a[0], corner[1])
+    if blocked(a, elbow) or blocked(elbow, corner):
+        return pts
+    return [a, elbow] + pts[1:]
+
+
 def route_length(route, from_index=0, current_pos=None):
     """
     경로의 남은 총 길이(cm)를 계산.

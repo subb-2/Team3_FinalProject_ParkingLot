@@ -57,6 +57,9 @@ from logic.B02_car_mot import CONFIG as B02_CONFIG
 # 영상 위 상태 글자 on/off는 C_main이 들고 있다. 화면은 그 값을 읽기만 한다.
 from logic.C_main import CONFIG as C_MAIN_CONFIG
 from logic.C02_lot_layout import CONFIG as C02_CONFIG, SPOT_WORLD_POS
+# 차 위치에서 시작하는 남은 경로. 4번 화면(D00)과 같은 선을 그려야 하므로
+# 계산은 C01 한 곳에서 가져다 쓴다.
+from logic.C01_path_planner import route_from_position
 
 
 # 설정 (Configuration)
@@ -103,11 +106,12 @@ CONFIG = {
 
 
 # 구역 종류별 색 (CSS). D00의 COLOR_SPOT_BY_TYPE와 같은 구분을 쓴다.
+# 흰 바탕에 올리는 색이라 어두운 화면에서 쓰던 파스텔보다 진하게 잡는다.
 SPOT_TYPE_CSS = {
-    SPOT1: "#8a8a8a",   # 일반   - 회색
-    SPOT2: "#2f8fff",   # 장애인 - 파랑
-    SPOT3: "#ffc83c",   # 대형   - 노랑
-    SPOT4: "#78dc78",   # 전기차 - 초록
+    SPOT1: "#5c636e",   # 일반   - 회색
+    SPOT2: "#0f62d6",   # 장애인 - 파랑
+    SPOT3: "#8a5a00",   # 대형   - 노랑
+    SPOT4: "#1a7f43",   # 전기차 - 초록
 }
 
 # 격자 칸 종류 -> 브라우저가 쓸 짧은 이름
@@ -397,7 +401,7 @@ def build_lot_layout():
                 entry["kind"] = "spot"
                 entry["spot"] = coord_to_spot.get((r, c))
                 entry["type_name"] = SPOT_TYPE_NAME.get(cell_type, "?")
-                entry["color"] = SPOT_TYPE_CSS.get(cell_type, "#8a8a8a")
+                entry["color"] = SPOT_TYPE_CSS.get(cell_type, "#5c636e")
             elif cell_type == PILL:
                 entry["marker"] = PILL_MARKER_ID.get((r, c))
 
@@ -421,7 +425,7 @@ def build_lot_layout():
         # 박아두면 CONFIG를 고쳤을 때 화면만 옛 값으로 남는다.
         "aspect": lot_aspect(rows, cols),
         "legend": [
-            {"name": name, "color": SPOT_TYPE_CSS.get(t, "#8a8a8a")}
+            {"name": name, "color": SPOT_TYPE_CSS.get(t, "#5c636e")}
             for t, name in SPOT_TYPE_NAME.items()
         ],
     }
@@ -644,15 +648,15 @@ def _build_route_on_map(pipeline, follow_car=None):
         return None
 
     # 남은 구간만 그린다. 이미 지나온 경유점까지 그리면 차 뒤로 선이 남는다.
-    idx = min(nav.get("route_index", 1), len(route_cm) - 1)
-    points = list(route_cm[idx:])
-
     # 선은 차의 현재 위치에서 시작해야 한다. 다음 경유점부터 그리면
     # 차와 선이 떨어져 있어 어디로 가라는 것인지 읽히지 않는다.
+    # 그 첫 구간이 비스듬해지지 않게 C01이 모서리를 차에 맞춰 준다.
     pos = nav.get("world_pos")
     if pos is not None:
-        start = pipeline.navigator.mapper.pixel_to_cm(pos) or pos
-        points.insert(0, start)
+        pos = pipeline.navigator.mapper.pixel_to_cm(pos) or pos
+    points = route_from_position(
+        route_cm, nav.get("route_index", 1), pos,
+        lot_map=getattr(pipeline.navigator.planner, "lot_map", None))
 
     cells = []
     for pt in points:
@@ -788,10 +792,17 @@ FINAL_UI_HTML = r"""
 <html><head><meta charset="utf-8">
 <title>주차 관제 - 최종 화면</title>
 <style>
+ /* 밝은 화면이다. 바탕을 흰색 계열로 깔고, 눈이 먼저 가야 하는 것
+    (글자, 기둥, 차량 점, 경로)만 검정에 가깝게 눌러 대비로 읽히게 한다.
+    어두운 화면에서는 밝은 것이 튀지만 여기서는 반대라, 강조를
+    '더 밝게'가 아니라 '더 진하게'로 준다. 파스텔은 흰 바탕에 묻히므로
+    색도 전부 채도를 올려 잡았다. (D00의 COLOR_* 와 같은 규칙) */
  :root{
-   --bg:#141416; --panel:#1c1c20; --line:#2e2e34;
-   --text:#e8e8ea; --dim:#8a8a93; --accent:#3fa9ff;
-   --ok:#4ccf6a; --warn:#ffb03a; --bad:#ff4d4d;
+   --bg:#eef0f4; --panel:#ffffff; --line:#d9dde3;
+   --text:#14161a; --dim:#666e7a; --accent:#0f62d6;
+   --ok:#1a7f43; --warn:#a35a00; --bad:#c62828;
+   --sunken:#f6f7f9;              /* 패널 안에 한 겹 들어간 상자 */
+   --media:#e7eaef;               /* 영상이 놓이는 바닥 */
  }
  *{box-sizing:border-box}
  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
@@ -821,7 +832,7 @@ FINAL_UI_HTML = r"""
            justify-content:space-between;align-items:center}
  .num{display:inline-block;width:20px;height:20px;line-height:20px;
       text-align:center;border-radius:5px;background:var(--accent);
-      color:#06121e;font-size:12px;font-weight:700;margin-right:8px}
+      color:#fff;font-size:12px;font-weight:700;margin-right:8px}
  .sub{font-size:11px;color:var(--dim);font-weight:400}
  .body{flex:1;overflow:auto;padding:10px 12px;min-height:0}
 
@@ -831,13 +842,13 @@ FINAL_UI_HTML = r"""
  /* 세로를 넉넉히 준다. 좁으면 대기열 카드와 안내문이 눌려 읽기 어렵다. */
  #pipe{display:flex;align-items:stretch;gap:0;padding:12px;
        min-height:200px;overflow:hidden}
- .stg{background:#232329;border:1px solid var(--line);border-radius:8px;
+ .stg{background:var(--sunken);border:1px solid var(--line);border-radius:8px;
       padding:10px 13px;display:flex;flex-direction:column;min-width:0;
       justify-content:flex-start}
  .stg > .cap{font-size:11px;color:var(--dim);margin-bottom:8px;white-space:nowrap;
              display:flex;justify-content:space-between;gap:8px;align-items:baseline}
  .stg.rxbox{flex:0 0 230px}
- .stg.queue{flex:1;min-width:0;border-color:#3a5a72;background:#1e242b}
+ .stg.queue{flex:1;min-width:0;border-color:#a8c6e8;background:#eef5fd}
  /* '안내 중'과 '주차 완료'는 글이 길어 좁으면 줄이 잘린다.
     안내문은 두 줄(자리 + 사유)이 다 보여야 한다. */
  .stg.act  {flex:0 0 250px}
@@ -847,17 +858,17 @@ FINAL_UI_HTML = r"""
  .flowarw{flex:0 0 62px;display:flex;flex-direction:column;align-items:center;
           justify-content:center;color:var(--dim);font-size:10px;gap:2px}
  .flowarw b{font-size:11px;color:var(--accent);font-weight:700}
- .flowarw .ln{width:100%;height:0;border-top:1px solid #3f3f48;position:relative}
+ .flowarw .ln{width:100%;height:0;border-top:1px solid #c2c8d0;position:relative}
  .flowarw .ln::after{content:"";position:absolute;right:0;top:-4px;
-                     border-left:7px solid #3f3f48;
+                     border-left:7px solid #c2c8d0;
                      border-top:4px solid transparent;border-bottom:4px solid transparent}
 
  /* 대기열 카드. 왼쪽 끝이 front(다음에 매칭될 차)다. */
  .qrow{display:flex;align-items:center;gap:8px;overflow-x:auto;flex:1;min-height:0}
- .qcard{flex:0 0 auto;border:1px solid #3f6f92;border-radius:8px;background:#22303b;
+ .qcard{flex:0 0 auto;border:1px solid #b7cde6;border-radius:8px;background:#eaf2fb;
         padding:9px 15px;text-align:center}
- .qcard.front{border-color:var(--accent);background:#1d3d55;
-              box-shadow:0 0 0 2px rgba(63,169,255,.22)}
+ .qcard.front{border-color:var(--accent);background:#d8e9fd;
+              box-shadow:0 0 0 2px rgba(15,98,214,.20)}
  .qcard .no{font-size:22px;font-weight:700;letter-spacing:2px;
             font-variant-numeric:tabular-nums;line-height:1.25}
  .qcard .mk{font-size:10px;color:var(--accent);letter-spacing:0;margin-top:2px}
@@ -865,7 +876,7 @@ FINAL_UI_HTML = r"""
 
  /* 최근 수신 (가로 띠라 최근 두 건만 보인다) */
  .rx{border:1px solid var(--line);border-left:3px solid var(--accent);
-     border-radius:6px;padding:5px 8px;margin-bottom:5px;background:#1e1e23}
+     border-radius:6px;padding:5px 8px;margin-bottom:5px;background:var(--sunken)}
  .rx.exit{border-left-color:var(--warn)}
  .rx.fail{border-left-color:var(--bad)}
  .rx-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
@@ -878,7 +889,7 @@ FINAL_UI_HTML = r"""
  .empty{color:var(--dim);font-size:12px;text-align:center;padding:14px 8px;line-height:1.6}
 
  /* 안내 중인 차 */
- .actcar{font-size:26px;font-weight:700;letter-spacing:2px;color:#ffd964;
+ .actcar{font-size:26px;font-weight:700;letter-spacing:2px;color:var(--text);
          font-variant-numeric:tabular-nums;line-height:1.3}
  .actto{font-size:13px;color:var(--dim);margin-top:5px}
  .actto b{color:var(--ok)}
@@ -900,50 +911,55 @@ FINAL_UI_HTML = r"""
  /* 안내 경로. 일방통행 화살표 위, 차량 점 아래에 깐다.
     4번 구간이 그리는 것과 같은 선이므로 색도 그쪽 파랑에 맞춘다. */
  #route{position:absolute;inset:0;pointer-events:none;overflow:visible}
- #route .rt{stroke:#42b2ff;stroke-width:5;fill:none;
+ #route .rt{stroke:#0f62d6;stroke-width:5;fill:none;
             stroke-linejoin:round;stroke-linecap:round;opacity:.9}
- #route .rt.bad{stroke:#ff5a5a}
- #route .goal{fill:#42b2ff}
- #route .goal.bad{fill:#ff5a5a}
+ #route .rt.bad{stroke:#d32f2f}
+ #route .goal{fill:#0f62d6}
+ #route .goal.bad{fill:#d32f2f}
  /* 3번 제목줄에 지금 그려진 경로가 누구 것인지 적는다.
     4번과 같은 차를 고르므로 두 화면을 짝지어 읽을 수 있다. */
- #lotroute{color:#42b2ff;margin-right:8px}
- #lotroute.bad{color:#ff5a5a}
+ #lotroute{color:#0f62d6;margin-right:8px}
+ #lotroute.bad{color:#d32f2f}
  #cars{position:absolute;inset:0;pointer-events:none}
- .car{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
-      border-radius:50%;background:var(--accent);border:2px solid #0b0b0d;
-      box-shadow:0 0 0 2px rgba(63,169,255,.35);
+ /* 반드시 #cars로 한정한다. 2번 구간의 트랙 목록에도 .car(차량번호 글자)가
+    있어서, 여기를 .car로 열어 두면 그 글자까지 11px 동그라미가 된다. */
+ #cars .car{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+      border-radius:50%;background:var(--accent);border:2px solid #fff;
+      box-shadow:0 0 0 2px rgba(15,98,214,.45);
       transition:left .4s linear, top .4s linear}
- .car.parked{background:var(--ok);box-shadow:0 0 0 2px rgba(76,207,106,.3)}
- .car.unknown{background:var(--warn);box-shadow:0 0 0 2px rgba(255,176,58,.3)}
- .car > span{position:absolute;left:13px;top:-5px;font-size:10px;font-weight:700;
-             color:var(--text);text-shadow:0 0 4px #000,0 0 4px #000;
+ #cars .car.parked{background:var(--ok);box-shadow:0 0 0 2px rgba(26,127,67,.4)}
+ #cars .car.unknown{background:var(--warn);box-shadow:0 0 0 2px rgba(163,90,0,.4)}
+ #cars .car > span{position:absolute;left:13px;top:-5px;font-size:10px;font-weight:700;
+             color:var(--text);text-shadow:0 0 4px #fff,0 0 4px #fff;
              white-space:nowrap;font-variant-numeric:tabular-nums}
- .cell.road{background:#212125}
- .cell.gate1,.cell.gate2{background:#2b3b2b;border:1px solid #4f7a4f}
- .cell.pill{background:#3a3f49;border:1px solid #58606f}
+ .cell.road{background:#e9ecf1}
+ .cell.gate1,.cell.gate2{background:#dff0df;border:1px solid #7fae7f}
+ /* 기둥은 바닥에서 유일한 검은 덩어리다. 이것이 기준점이 되어
+    격자 어디쯤을 보고 있는지가 한눈에 잡힌다. */
+ .cell.pill{background:#343a44;border:1px solid #232830}
  .cell.gate1::after,.cell.gate2::after,.cell.pill::after{
    content:attr(data-lbl);position:absolute;inset:0;display:flex;
-   align-items:center;justify-content:center;font-size:9px;color:#9aa6b8}
- .cell.spot{border:1.5px solid var(--c,#8a8a8a);background:#1e1e22;
+   align-items:center;justify-content:center;font-size:9px;color:#4a5360}
+ .cell.pill::after{color:#dfe4ec}
+ .cell.spot{border:1.5px solid var(--c,#5c636e);background:#fff;
             display:flex;align-items:center;justify-content:center;
-            font-size:clamp(6px,1.3vh,11px);color:var(--c,#8a8a8a);
+            font-size:clamp(6px,1.3vh,11px);color:var(--c,#5c636e);
             font-weight:600;overflow:hidden}
- .cell.spot.full{background:rgba(255,77,77,.20);border-color:#ff6b6b;color:#ffbcbc}
+ .cell.spot.full{background:rgba(198,40,40,.13);border-color:#d84a4a;color:#a02020}
  .cell.spot.pending{border-color:var(--bad);border-width:2px}
  /* 배정된 자리에서 깜빡이는 빨간 점 */
  .dot{position:absolute;top:50%;left:50%;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;
       border-radius:50%;background:var(--bad);animation:blink 1s infinite}
  @keyframes blink{
-   0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(255,77,77,.75)}
-   50%    {opacity:.25;box-shadow:0 0 0 7px rgba(255,77,77,0)}
+   0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(198,40,40,.7)}
+   50%    {opacity:.25;box-shadow:0 0 0 7px rgba(198,40,40,0)}
  }
  /* 여러 칸짜리 자리(대형)는 위쪽 칸에만 이름을 쓴다 */
  .cell.spot.cont{border-top:none;border-top-left-radius:0;border-top-right-radius:0}
  .cell.spot.head{border-bottom:none;border-bottom-left-radius:0;border-bottom-right-radius:0}
 
  #avail{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px}
- .av{flex:1;min-width:62px;background:#232329;border:1px solid var(--line);
+ .av{flex:1;min-width:62px;background:var(--sunken);border:1px solid var(--line);
      border-radius:6px;padding:6px 8px;text-align:center}
  .av .n{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
  .av .l{font-size:10px;color:var(--dim);margin-top:1px}
@@ -958,7 +974,7 @@ FINAL_UI_HTML = r"""
           color:var(--dim);margin-bottom:6px;gap:10px}
  .nt-line{font-size:14px;font-weight:600;line-height:1.5}
  #notice.ok .nt-line{color:var(--ok)}
- #notice.bad .nt-line{color:#ff9b9b}
+ #notice.bad .nt-line{color:var(--bad)}
  #notice.warn .nt-line{color:var(--warn)}
  .nt-note{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
  .nt-idle{font-size:13px;color:var(--dim)}
@@ -967,7 +983,7 @@ FINAL_UI_HTML = r"""
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
     min-height:0이 없으면 flex 자식이 콘텐츠 크기만큼 밀어내 패널이 넘친다. */
  #camwrap{flex:1;display:flex;align-items:center;justify-content:center;
-          background:#0e0e10;min-height:0;min-width:0;padding:6px;position:relative}
+          background:var(--media);min-height:0;min-width:0;padding:6px;position:relative}
  #camimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
  #caminfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
           color:var(--dim);display:flex;justify-content:space-between;gap:10px;
@@ -979,14 +995,14 @@ FINAL_UI_HTML = r"""
  /* 영상 아래 버튼 두 개 (기둥 보정 / 디버그).
     보정 버튼이 화면에 없으면 저장된 보정이 불려온 뒤로는 다시 찍을 방법이
     /recalibrate 주소를 직접 치는 것뿐이다. 실제로 그래서 '보정이 실행 안 된다'가 됐다. */
- #caminfo button{background:#2a2a31;color:var(--dim);border:1px solid var(--line);
+ #caminfo button{background:var(--sunken);color:var(--dim);border:1px solid var(--line);
          border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;
          font-family:inherit;white-space:nowrap;flex:0 0 auto}
- #caminfo button:hover{background:#34343d;color:var(--text)}
- #dbgbtn.on{background:#1d3d55;border-color:var(--accent);color:var(--accent)}
+ #caminfo button:hover{background:#e4e8ee;color:var(--text)}
+ #dbgbtn.on{background:#dcebfd;border-color:var(--accent);color:var(--accent)}
  /* 좌표계가 아직 없으면 보정 버튼이 눈에 띄어야 한다. 그 상태에서는
     자리 위치도 경로도 나오지 않으므로 이것이 첫 번째로 할 일이다. */
- #calbtn.need{background:#4a1d1d;border-color:var(--bad);color:#ff9b9b;
+ #calbtn.need{background:#fdeaea;border-color:var(--bad);color:var(--bad);
               font-weight:700}
 
  /* 트랙 목록. 영상 위에 겹친다.
@@ -995,27 +1011,27 @@ FINAL_UI_HTML = r"""
  #tracks{position:absolute;top:12px;left:12px;display:flex;flex-direction:column;
          gap:4px;pointer-events:none;max-height:calc(100% - 24px);overflow:hidden}
  .trk{display:flex;align-items:center;gap:7px;padding:4px 9px;border-radius:6px;
-      background:rgba(14,14,16,.82);border:1px solid #33333b;
+      background:rgba(255,255,255,.9);border:1px solid #d0d5dc;
       font-size:12px;white-space:nowrap;backdrop-filter:blur(2px)}
  .trk .tid{color:var(--dim);font-variant-numeric:tabular-nums}
  .trk .car{font-weight:700;letter-spacing:1px;font-variant-numeric:tabular-nums}
  .trk .st{font-size:10px;padding:1px 6px;border-radius:4px}
  /* 영상 위 박스 색과 맞춘다. B02의 COLOR_* 와 같은 구분이라
     영상에서 노란 박스를 찾으면 여기 '안내중'과 짝이 맞는다. */
- .trk.active  {border-color:#c8c800}
- .trk.active  .st{background:#4a4a00;color:#ffff64}   /* 영상: 노랑 */
- .trk.parked  .st{background:#0e3a17;color:#4ccf6a}   /* 영상: 초록 */
- .trk.guided  .st{background:#0e2e3a;color:#5cc8ff}
- .trk.waiting .st{background:#3d2a0a;color:#ffa53c}   /* 영상: 주황 */
+ .trk.active  {border-color:#c9a200}
+ .trk.active  .st{background:#fff3bf;color:#6b5a00}   /* 영상: 노랑 */
+ .trk.parked  .st{background:#dff3e4;color:#146c38}   /* 영상: 초록 */
+ .trk.guided  .st{background:#dceafb;color:#0f62d6}
+ .trk.waiting .st{background:#fdeacd;color:#8a4b00}   /* 영상: 주황 */
  .trk .sp{color:var(--dim);font-size:11px}
 
  /* ---- 4번 구간 : 실시간 안내 ---- */
  #navwrap{flex:1;display:flex;align-items:center;justify-content:center;
-          background:#0e0e10;min-height:0;min-width:0;padding:6px}
+          background:var(--media);min-height:0;min-width:0;padding:6px}
  #navimg{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
  #navinfo{border-top:1px solid var(--line);padding:9px 14px;font-size:12px;
           color:var(--dim);display:flex;justify-content:space-between;gap:10px}
- .pill{padding:2px 7px;border-radius:4px;background:#232329;font-size:11px}
+ .pill{padding:2px 7px;border-radius:4px;background:var(--sunken);font-size:11px}
  .pill.ok{color:var(--ok)} .pill.bad{color:var(--bad)} .pill.warn{color:var(--warn)}
 </style></head><body>
 <div id="app">
