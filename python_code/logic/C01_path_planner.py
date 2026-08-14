@@ -166,6 +166,18 @@ CONFIG = {
         # 0으로 두면 예전 동작(주차장 전체에 규칙 적용)으로 돌아간다.
         "GOAL_RELAX_CM": 25.0,
 
+        # 계획이 끝난 경로를 차선 위로 붙일 때, 이 거리(cm) 안의 차선까지
+        # 끌어당긴다. (SNAP_TO_CELL_CENTERS)
+        #
+        # 위의 LANE_FREE_CM(차선 폭)보다 훨씬 넉넉해야 한다. 그쪽은 A*가
+        # 계획할 때 '이 정도는 벗어나도 공짜'라고 봐주는 폭이고, 이쪽은 그렇게
+        # 벗어나서 나온 선을 화면에 그리기 전에 되돌리는 거리다. A*는 모서리를
+        # 안쪽으로 질러 가므로 코너 부근에서 한두 칸까지 벌어진다.
+        #
+        # 너무 키우면 통로 하나를 건너뛰어 엉뚱한 차선에 붙으므로, 통로 폭
+        # (네 칸, 40cm)의 절반쯤인 20cm로 둔다.
+        "LANE_SNAP_CM": 20.0,
+
         # 경로 단순화가 지름길을 낼 때 봐줄 비용 차이 (cm).
         #
         # 단순화는 격자의 계단 모양을 없애려는 것이지 더 싼 길을 찾는 것이
@@ -881,26 +893,34 @@ class RoutePlanner:
         eps = self.lot_map.resolution
         base = cell_to_world((0, 0))
         cell = (self.lot_map.cell_w, self.lot_map.cell_h)
-        pts = [list(p) for p in route]
+        pts = self._drop_inside_spot([list(p) for p in route])
+        # 층계는 옮기기 전에 편다. A*가 남긴 한 칸짜리 층계를 그대로 두고
+        # 구간을 차선에 붙이면, 층계 양쪽이 서로 다른 줄에 앉아 오히려
+        # 눈에 띄는 계단이 된다.
+        pts = self._merge_stairs(pts, len(self.wrong_way_legs(
+            [tuple(q) for q in pts])))
         last = len(pts) - 1
 
-        def snapped(value, axis):
+        def snapped(a, b, axis):
             """
-            축 위의 값을 붙일 자리.
+            구간을 붙일 자리.
 
-            차선 폭 안이면 순환 차선의 중심으로 붙인다. 순환선은 칸으로
-            정의되어 있으므로(data/map_data.py의 ONE_WAY_LOOP) 그 값도 칸
-            중심이고, 바닥에 붙은 화살표 바로 위가 된다. 가장 가까운 칸으로만
-            붙이면 A*가 안쪽으로 붙어 돈 만큼 한 칸 안쪽 열이 뽑혀서, 화살표
-            옆줄로 달리라는 그림이 된다.
-
-            차선에서 먼 구간(중앙 섬으로 들어가는 길 등)은 그냥 가장 가까운
-            칸 중심으로 붙인다.
+            1) 나란한 순환 차선이 가까이 있으면 그 위. 차선은 통로 한가운데를
+               지나므로(data/map_data.py의 ONE_WAY_LOOP) 이것이 곧 길 중앙이다.
+               A*는 최단거리를 따라 모서리를 안쪽으로 질러 가므로 차선에서
+               한두 칸 벗어난 채로 나오는데, 그 어긋남을 여기서 되돌린다.
+            2) 차선이 없는 곳(섬으로 들어가는 길 등)은 그 구간이 지나는
+               통로의 한가운데 칸.
+            3) 둘 다 아니면 가장 가까운 칸 중심.
             """
-            lane = self._lane_coord(value, axis)
+            lane = self._lane_coord(a, b, axis)
             if lane is not None:
                 return lane
+            middle = self._corridor_center(a, b, axis)
+            if middle is not None:
+                return middle
             size = cell[axis]
+            value = (a[axis] + b[axis]) / 2.0
             return base[axis] + round((value - base[axis]) / size) * size
 
         def leg_ok(i):
@@ -909,7 +929,15 @@ class RoutePlanner:
                 return True
             return self._clear(pts[i], pts[i + 1])
 
-        for i in range(1, last):
+        # 옮기다가 역주행을 만들면 안 된다. 차선을 통로 한가운데로 옮겼으므로
+        # 자리로 들어가는 구간이 그만큼 길어졌고, 그 구간이 목적지 예외 구역
+        # (GOAL_RELAX_CM)을 벗어나면 역주행으로 잡힌다. 계획 결과보다 나빠지면
+        # 그 구간만 되돌린다.
+        wrong_before = len(self.wrong_way_legs([tuple(p) for p in pts]))
+
+        # 구간은 0번부터 last-1번까지다. 0번은 차에, last-1번은 자리에 닿아
+        # 있으므로 건드리지 않는다. 그 사이만 옮긴다.
+        for i in range(1, last - 1):
             a, b = pts[i], pts[i + 1]
             vertical = abs(b[0] - a[0]) < eps
             horizontal = abs(b[1] - a[1]) < eps
@@ -919,37 +947,216 @@ class RoutePlanner:
                 continue
 
             axis = 0 if vertical else 1
-            value = snapped((a[axis] + b[axis]) / 2.0, axis)
+            value = snapped(a, b, axis)
             before = (a[axis], b[axis])
             if abs(value - before[0]) < eps and abs(value - before[1]) < eps:
                 continue
 
             a[axis] = b[axis] = value
-            if not (leg_ok(i - 1) and leg_ok(i) and leg_ok(i + 1)):
+            ok = (leg_ok(i - 1) and leg_ok(i) and leg_ok(i + 1)
+                  and len(self.wrong_way_legs([tuple(p) for p in pts]))
+                  <= wrong_before)
+            if not ok:
                 a[axis], b[axis] = before      # 되돌린다
 
+        pts = self._align_goal_leg(pts)
         return self._drop_straight([tuple(p) for p in pts])
 
-    def _lane_coord(self, value, axis):
+    def _merge_stairs(self, pts, wrong_before):
         """
-        이 값이 순환 차선의 폭 안이면 그 차선의 중심 좌표, 아니면 None.
+        계단으로 남은 세 구간을 'ㄱ'자 두 구간으로 합친다.
+
+        A*가 통로에서 자리 쪽으로 빠질 때 한 칸짜리 층계가 섞여 나오는 일이
+        있다. 단순화가 그것을 못 펴는 이유는 차선 비용 때문인데(지름길이
+        차선에서 멀어지면 비싸다고 본다), 칸 중심으로 옮기고 나면 그 층계가
+        '통로를 따라가다 한 칸 옆으로 비켰다가 다시 가는' 눈에 띄는 군더더기가
+        된다. C-1로 갈 때 오른쪽 통로에서 한 칸 왼쪽으로 비켰다가 올라가는
+        경로가 그것이었다.
+
+        양쪽 끝점은 그대로 두고 가운데 두 점을 모서리 하나로 바꾼다. 끝점이
+        칸 중심이므로 새 모서리도 칸 중심이다.
+
+        '차선에서 더 멀어지지 않을 것'을 조건으로 단다. 이것이 없으면 층계를
+        편다면서 통로 자체를 질러 버린다. 실제로 입구에서 A-1까지가 통로를
+        도는 대신 주차장 한복판을 곧장 가로지르는 두 구간으로 접혔다.
+        방향장으로는 역주행이 아니라서(가운데도 오른쪽 통로가 제일 가깝다)
+        그 검사만으로는 걸리지 않는다. A*가 그 길을 안 고른 이유가 차선
+        비용이었으므로, 같은 잣대를 여기서도 쓴다.
+        """
+        tolerance = CONFIG['ONE_WAY']['LANE_SHORTCUT_TOLERANCE_CM']
+        i = 0
+        while i + 3 < len(pts):
+            p0, p1, p2, p3 = pts[i:i + 4]
+            before = (self._lane_cost_of(p0, p1) + self._lane_cost_of(p1, p2)
+                      + self._lane_cost_of(p2, p3))
+            for corner in ([p3[0], p0[1]], [p0[0], p3[1]]):
+                if not (self._clear(p0, corner) and self._clear(corner, p3)):
+                    continue
+                after = (self._lane_cost_of(p0, corner)
+                         + self._lane_cost_of(corner, p3))
+                if after > before + tolerance:
+                    continue
+                trial = pts[:i + 1] + [corner] + pts[i + 3:]
+                if len(self.wrong_way_legs([tuple(p) for p in trial])) > wrong_before:
+                    continue
+                pts = trial
+                break
+            else:
+                i += 1
+        return pts
+
+    def _lane_cost_of(self, p, q):
+        """구간 하나가 차선에서 벗어난 값 (cm 환산). A*가 매기는 것과 같다."""
+        if self.one_way is None:
+            return 0.0
+        cells = list(bresenham_cells(self.lot_map.world_to_cell(p, clamp=True),
+                                     self.lot_map.world_to_cell(q, clamp=True)))
+        if len(cells) < 2:
+            return 0.0
+        per_cell = math.hypot(q[0] - p[0], q[1] - p[1]) / (len(cells) - 1)
+        return sum(self.one_way.lane_cost(c) for c in cells[1:]) * per_cell
+
+    def _in_spot_cell(self, point):
+        """이 점이 주차 구역 칸 안에 있는지. (목적지 구역도 포함)"""
+        col = int(round((point[0] - cell_to_world((0, 0))[0]) / self.lot_map.cell_w))
+        row = int(round((point[1] - cell_to_world((0, 0))[1]) / self.lot_map.cell_h))
+        if not (0 <= row < get_rows() and 0 <= col < get_cols()):
+            return False
+        return grid_map[row][col] in SPOT_CELLS
+
+    def _drop_inside_spot(self, pts):
+        """
+        자리 안에서 몇 cm 움직이는 토막을 지운다.
+
+        A*는 자리 칸에 닿자마자 멈추므로 진입이 자리 중심이 아니라 칸 모서리
+        쪽에서 끝난다. 그래서 '자리 앞에서 꺾어 들어간 다음 자리 안에서 한 번
+        더 꺾어 중심으로 가는' 토막이 남는다. 화면에서는 자리 앞에서 두 번
+        꺾이는 모양이라 어디에 세우라는 것인지 흐려진다.
+
+        지우고 나면 마지막 구간이 '통로에서 자리 중심으로'가 되어, 아래
+        _align_goal_leg가 그것을 자리 중심에 맞출 수 있다.
+
+        통로에서 들어오는 구간 하나는 반드시 남긴다. 목적지와 차 위치만
+        남으면 방향을 알 수 없다.
+        """
+        while len(pts) > 3 and self._in_spot_cell(pts[-2]):
+            del pts[-2]
+        return pts
+
+    def _align_goal_leg(self, pts):
+        """
+        자리로 들어가는 마지막 구간을 자리 중심에 맞춘다.
+
+        자리 중심은 그 자체로 칸 중심이므로, 진입 구간을 거기에 맞추면
+        '통로를 따라가다 자리 앞에서 한 번 꺾어 그대로 들어간다'가 된다.
+
+        통로 구간을 차선 위로 옮긴 뒤에 부른다. 어느 축으로 들어가는지를
+        구간의 긴 쪽으로 정하는데, 옮기기 전에는 그 길이가 A*가 자리 칸
+        모서리에 걸쳐 놓은 값이라 축이 뒤집혀 나온다.
+        """
+        if len(pts) < 3:
+            return pts
+
+        goal, corner = pts[-1], pts[-2]
+        dx, dy = goal[0] - corner[0], goal[1] - corner[1]
+        axis = 1 if abs(dx) >= abs(dy) else 0    # 긴 쪽이 진행 방향
+        before = corner[axis]
+        if goal[axis] == before:
+            return pts          # 이미 맞다
+
+        # 여기서는 격자 한 칸(1cm)을 봐주지 않는다. 0.2cm만 어긋나도 자리
+        # 앞에서 선이 살짝 기운 것이 보이고, 그 구간이 짧아서 더 도드라진다.
+
+        corner[axis] = goal[axis]
+        if not (self._clear(corner, goal) and self._clear(pts[-3], corner)
+                and not self.wrong_way_legs([tuple(p) for p in pts])):
+            corner[axis] = before
+        return pts
+
+    def _lane_coord(self, a, b, axis):
+        """
+        이 구간과 나란히 붙어 있는 순환 차선의 좌표. 없으면 None.
+
+        차선은 통로 한가운데를 지나므로 여기에 붙이는 것이 곧 '길 중앙으로
+        붙이기'다. 찾는 조건은 둘이다.
+          - 구간과 나란할 것 (세로 구간이면 세로 차선)
+          - 구간이 그 차선을 옆에서 지나가는 중일 것. 차선의 시작과 끝
+            사이를 지나야 하고, 옆으로 벌어진 거리가 LANE_SNAP_CM 안이어야
+            한다. 이 조건이 없으면 저 멀리 있는 차선에 끌려간다.
 
         Args:
-            value: 구간이 서 있는 좌표 (세로 구간이면 x, 가로 구간이면 y)
-            axis:  0이면 x, 1이면 y
+            a, b: 구간의 두 끝점 (실좌표)
+            axis: 0이면 세로 구간(x를 옮긴다), 1이면 가로 구간(y를 옮긴다)
         """
         if self.one_way is None:
             return None
 
-        best, best_d = None, self.one_way.lane_free_cm
-        for a, b in self.one_way.segments:
-            # 구간과 나란한 차선만 본다. 세로 구간은 세로 차선에 붙인다.
-            if abs(a[axis] - b[axis]) > self.lot_map.resolution:
+        along = 1 - axis            # 구간이 뻗어 있는 축
+        lo, hi = sorted((a[along], b[along]))
+        best, best_d = None, CONFIG['ONE_WAY']['LANE_SNAP_CM']
+
+        for p, q in self.one_way.segments:
+            if abs(p[axis] - q[axis]) > self.lot_map.resolution:
+                continue        # 나란하지 않다
+            # 겹치는 구간이 있어야 '옆에 나란히 있는' 차선이다
+            s_lo, s_hi = sorted((p[along], q[along]))
+            if min(hi, s_hi) < max(lo, s_lo):
                 continue
-            d = abs(a[axis] - value)
+            d = abs(p[axis] - (a[axis] + b[axis]) / 2.0)
             if d <= best_d:
-                best, best_d = a[axis], d
+                best, best_d = p[axis], d
         return best
+
+    def _corridor_center(self, a, b, axis):
+        """
+        이 구간이 지나는 통로의 한가운데 칸. 옮길 곳이 없으면 None.
+
+        구간을 옆 칸으로 통째로 밀어 보면서, 끝에서 끝까지 뚫려 있는 칸이
+        어디까지인지 양쪽으로 넓혀 본다. 그렇게 나온 칸의 범위가 지금 지나는
+        통로이고, 그 한가운데로 옮긴다.
+
+        통로 폭을 미리 표로 두지 않고 매번 재는 이유: 이 주차장은 자리
+        배치에 따라 통로 폭이 자리마다 다르다. 오른쪽은 섬과 D열 사이 네 칸,
+        섬 사이는 한 칸이다. 격자를 고치면 폭도 따라 바뀌어야 한다.
+
+        Args:
+            a, b: 구간의 두 끝점 (실좌표)
+            axis: 0이면 세로 구간(x를 옮긴다), 1이면 가로 구간(y를 옮긴다)
+        """
+        base = cell_to_world((0, 0))[axis]
+        size = (self.lot_map.cell_w, self.lot_map.cell_h)[axis]
+        limit = get_cols() if axis == 0 else get_rows()
+
+        def clear_at(k):
+            """구간을 k번째 칸의 중심으로 옮겨도 뚫려 있는지."""
+            p, q = list(a), list(b)
+            p[axis] = q[axis] = base + k * size
+            return self._clear(p, q)
+
+        here = int(round((a[axis] - base) / size))
+        if not clear_at(here):
+            return None         # 칸 중심으로는 아예 못 옮기는 구간
+
+        lo = hi = here
+        while lo - 1 >= 0 and clear_at(lo - 1):
+            lo -= 1
+        while hi + 1 < limit and clear_at(hi + 1):
+            hi += 1
+
+        # 통로가 짝수 칸이면 한가운데가 두 칸 사이에 있다. 주차장 중심에
+        # 가까운 쪽을 고른다. 바깥쪽을 고르면 자리에 바짝 붙어 달리게 된다.
+        center = (limit - 1) / 2.0
+        middle = (lo + hi) / 2.0
+
+        # 옮기는 폭은 한 칸까지다. 짧은 구간은 옆으로 넓게 열려 있는 일이
+        # 흔해서(아랫줄 한 토막은 위로 주차장 끝까지 뚫려 있다) 폭을 두지
+        # 않으면 '통로의 한가운데'가 주차장 한복판이 되어, 계획한 길과 전혀
+        # 다른 곳으로 선이 날아간다. 한 칸이면 가장자리에서 떼어 놓기에
+        # 충분하고 경로 모양은 그대로 남는다.
+        near = [k for k in (here - 1, here, here + 1)
+                if 0 <= k < limit and clear_at(k)]
+        k = min(near, key=lambda c: (abs(c - middle), abs(c - center)))
+        return base + k * size
 
     def _drop_straight(self, route):
         """
