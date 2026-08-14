@@ -15,7 +15,7 @@ from logic.C00_navigation import (
 )
 from logic.C02_lot_layout import (
     SPOT_WORLD_POS, GATE1_WORLD_POS, GATE2_WORLD_POS,
-    cell_to_world, ONE_WAY_SEGMENTS_WORLD, CONFIG as C02_CONFIG,
+    cell_to_world, CONFIG as C02_CONFIG,
 )
 # 차 위치에서 시작하는 남은 경로. 첫 구간을 가로/세로로 펴는 규칙이
 # 화면마다 달라지면 안 되므로 계산은 C01 한 곳에 둔다.
@@ -143,10 +143,6 @@ COLOR_VEHICLE_UNK = (0, 120, 230)    # 차량 (번호 미매칭)
 COLOR_TRAJECTORY  = (150, 150, 0)    # 이동 궤적
 COLOR_GUIDE_LINE  = (220, 110, 20)   # 안내선
 COLOR_ARRIVED     = (60, 140, 16)    # 도착 표시
-COLOR_ONE_WAY     = (120, 150, 165)  # 일방통행 방향 (바닥 표시라 옅게)
-
-# 일방통행 화살표 간격 (cm). 촘촘하면 배경이 지저분해진다.
-ONE_WAY_ARROW_STEP_CM = 25.0
 
 # 차량 시점 화면 색상 (BGR)
 #
@@ -1483,8 +1479,11 @@ class NavigationMapUI:
 
         self._draw_grid(canvas)
         self._draw_layout(canvas)
-        # 통행 방향은 바닥 표시다. 배치 위, 자리/경로 아래에 깐다.
-        self._draw_one_way(canvas)
+        # 일방통행 화살표는 그리지 않는다. 목업 바닥에 실물이 붙어 있고
+        # CCTV 화면에도 그것이 보이므로, 여기 또 그리면 같은 정보가 두 겹이
+        # 되고 안내선과 겹쳐 어느 것이 지금 가야 할 길인지 읽기 어려워진다.
+        # (3번 구간(E00)도 같은 이유로 그리지 않는다)
+        # 방향 데이터는 C02의 ONE_WAY_SEGMENTS_WORLD에 그대로 있다.
         self._draw_gate(canvas)
         self._draw_spots(canvas, spot_status, target_spots)
         self._draw_guide_lines(canvas, nav_results)
@@ -1567,27 +1566,6 @@ class NavigationMapUI:
                             cv2.putText(canvas, text,
                                         (cx - tw // 2, cy + th // 2),
                                         FONT, 0.4, COLOR_PILL_TEXT, 1, cv2.LINE_AA)
-
-    def _draw_one_way(self, canvas):
-        """
-        일방통행 순환 방향을 바닥 화살표로 그린다.
-
-        안내선이 왜 한 바퀴 도는지가 이 화살표로 설명된다. 없으면 경로가
-        엉뚱하게 도는 것처럼 보인다.
-        """
-        for (ax, ay), (bx, by) in ONE_WAY_SEGMENTS_WORLD:
-            length = math.hypot(bx - ax, by - ay)
-            if length == 0:
-                continue
-
-            steps = max(int(length / ONE_WAY_ARROW_STEP_CM), 1)
-            for i in range(steps):
-                t0 = i / steps
-                t1 = (i + 1) / steps
-                p0 = self.world_to_map((ax + (bx - ax) * t0, ay + (by - ay) * t0))
-                p1 = self.world_to_map((ax + (bx - ax) * t1, ay + (by - ay) * t1))
-                cv2.arrowedLine(canvas, p0, p1, COLOR_ONE_WAY, 1,
-                                cv2.LINE_AA, tipLength=0.3)
 
     def _draw_gate(self, canvas):
         """입구(GATE1)와 출구(GATE2)를 구분해서 표시."""
