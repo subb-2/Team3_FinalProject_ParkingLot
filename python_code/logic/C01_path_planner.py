@@ -51,6 +51,25 @@ CONFIG = {
     # 가로/세로로 떨어진다.
     "STRAIGHT_LEGS_ONLY": True,
 
+    # 꼭지점을 격자 칸 중심에 맞춘다.
+    #
+    # A*는 1cm 격자에서 최단거리를 찾으므로 통로 한가운데가 아니라 안쪽
+    # 가장자리에 붙어서 돈다. 차선 인력에는 폭(LANE_FREE_CM)이 있어서
+    # 그 안이면 어디에 있든 공짜이기 때문이다. 실제로 오른쪽 통로를 지날 때
+    # 경로가 통로 중심(x=110)이 아니라 x=104.5에 섰다.
+    #
+    # 몇 cm 차이지만 화면에서는 그 칸의 한복판이 아니라 칸 경계에 걸친 선으로
+    # 보인다. 화면이 격자로 그려져 있으니 선도 칸을 따라야 어느 통로로
+    # 가라는 것인지 읽힌다.
+    #
+    # 켜면 구간마다 축을 하나씩 맞춘다. 세로 구간은 x를 그 칸 열의 중심으로,
+    # 가로 구간은 y를 그 칸 행의 중심으로 옮긴다. 꼭지점의 x는 세로 구간이,
+    # y는 가로 구간이 정하므로 둘이 다툴 일이 없고 직각도 그대로 유지된다.
+    #
+    # 차와 자리에 닿는 양 끝 구간은 건드리지 않는다. 그 좌표는 차의 실제
+    # 위치와 자리 중심이라 옮길 수 없다.
+    "SNAP_TO_CELL_CENTERS": True,
+
     # 경로에서 이 거리 이상 벗어나면 다시 계획한다 (cm).
     "REPLAN_TOLERANCE_CM": 12.0,
 
@@ -691,6 +710,8 @@ class RoutePlanner:
 
         if CONFIG['STRAIGHT_LEGS_ONLY']:
             route = self._straighten(route)
+        if CONFIG['SNAP_TO_CELL_CENTERS']:
+            route = self._snap_to_cells(route)
         return route
 
     def _astar(self, start, goal, relaxed=None):
@@ -837,6 +858,119 @@ class RoutePlanner:
             r[-2] = self._snap_corner(r[-1], r[-2], r[-3])
 
         return self._drop_tiny(r)
+
+    def _snap_to_cells(self, route):
+        """
+        구간을 격자 칸의 중심선에 맞춘다.
+
+        세로 구간은 x를 그 칸 열의 중심으로, 가로 구간은 y를 그 칸 행의
+        중심으로 옮긴다. 꼭지점 하나를 놓고 보면 x는 세로 구간이, y는 가로
+        구간이 정하는 셈이라 두 구간이 서로 다툴 일이 없고, 옮긴 뒤에도
+        직각이 그대로 남는다. (CONFIG['SNAP_TO_CELL_CENTERS'] 주석 참고)
+
+        양 끝 구간은 건드리지 않는다. 차의 실제 위치와 자리 중심은 옮길 수
+        없는 값이고, 그 구간의 축을 맞추려면 그것부터 옮겨야 하기 때문이다.
+
+        구간 하나를 옮길 때마다 그 구간과 양옆 구간이 여전히 뚫려 있는지
+        확인하고, 막히면 그 구간만 되돌린다. 통로를 벗어나는 자리로 옮기느니
+        몇 cm 어긋난 채로 두는 편이 낫다.
+        """
+        if len(route) < 3:
+            return route
+
+        eps = self.lot_map.resolution
+        base = cell_to_world((0, 0))
+        cell = (self.lot_map.cell_w, self.lot_map.cell_h)
+        pts = [list(p) for p in route]
+        last = len(pts) - 1
+
+        def snapped(value, axis):
+            """
+            축 위의 값을 붙일 자리.
+
+            차선 폭 안이면 순환 차선의 중심으로 붙인다. 순환선은 칸으로
+            정의되어 있으므로(data/map_data.py의 ONE_WAY_LOOP) 그 값도 칸
+            중심이고, 바닥에 붙은 화살표 바로 위가 된다. 가장 가까운 칸으로만
+            붙이면 A*가 안쪽으로 붙어 돈 만큼 한 칸 안쪽 열이 뽑혀서, 화살표
+            옆줄로 달리라는 그림이 된다.
+
+            차선에서 먼 구간(중앙 섬으로 들어가는 길 등)은 그냥 가장 가까운
+            칸 중심으로 붙인다.
+            """
+            lane = self._lane_coord(value, axis)
+            if lane is not None:
+                return lane
+            size = cell[axis]
+            return base[axis] + round((value - base[axis]) / size) * size
+
+        def leg_ok(i):
+            """i번 구간이 뚫려 있는지. 범위 밖이면 볼 것이 없다."""
+            if i < 0 or i >= last:
+                return True
+            return self._clear(pts[i], pts[i + 1])
+
+        for i in range(1, last):
+            a, b = pts[i], pts[i + 1]
+            vertical = abs(b[0] - a[0]) < eps
+            horizontal = abs(b[1] - a[1]) < eps
+            # 축이 하나로 정해지는 구간만 맞춘다. 점에 가까운 구간(둘 다 참)은
+            # 어느 쪽으로 옮겨야 할지 정할 수 없다.
+            if vertical == horizontal:
+                continue
+
+            axis = 0 if vertical else 1
+            value = snapped((a[axis] + b[axis]) / 2.0, axis)
+            before = (a[axis], b[axis])
+            if abs(value - before[0]) < eps and abs(value - before[1]) < eps:
+                continue
+
+            a[axis] = b[axis] = value
+            if not (leg_ok(i - 1) and leg_ok(i) and leg_ok(i + 1)):
+                a[axis], b[axis] = before      # 되돌린다
+
+        return self._drop_straight([tuple(p) for p in pts])
+
+    def _lane_coord(self, value, axis):
+        """
+        이 값이 순환 차선의 폭 안이면 그 차선의 중심 좌표, 아니면 None.
+
+        Args:
+            value: 구간이 서 있는 좌표 (세로 구간이면 x, 가로 구간이면 y)
+            axis:  0이면 x, 1이면 y
+        """
+        if self.one_way is None:
+            return None
+
+        best, best_d = None, self.one_way.lane_free_cm
+        for a, b in self.one_way.segments:
+            # 구간과 나란한 차선만 본다. 세로 구간은 세로 차선에 붙인다.
+            if abs(a[axis] - b[axis]) > self.lot_map.resolution:
+                continue
+            d = abs(a[axis] - value)
+            if d <= best_d:
+                best, best_d = a[axis], d
+        return best
+
+    def _drop_straight(self, route):
+        """
+        옮기면서 한 직선이 된 꼭지점을 지운다.
+
+        자리로 들어가는 마지막 구간에서 생긴다. 앞 구간을 행 중심으로 맞추면
+        그 행에 있던 자리 중심과 같은 높이가 되어, 가운데 꼭지점이 직선 위의
+        한 점이 된다. 남겨 두면 화면에 꺾이지 않는 꺾임점이 찍힌다.
+        """
+        eps = self.lot_map.resolution
+        out = [route[0]]
+        for cur, nxt in zip(route[1:-1], route[2:]):
+            prev = out[-1]
+            # 앞뒤가 같은 가로줄이거나 같은 세로줄이면 가운데는 필요 없다
+            same_row = abs(prev[1] - cur[1]) < eps and abs(cur[1] - nxt[1]) < eps
+            same_col = abs(prev[0] - cur[0]) < eps and abs(cur[0] - nxt[0]) < eps
+            if same_row or same_col:
+                continue
+            out.append(cur)
+        out.append(route[-1])
+        return self._drop_tiny(out)
 
     def _clear(self, a, b):
         """두 실좌표 사이가 뚫려 있는지. (격자 점유만 본다)"""
