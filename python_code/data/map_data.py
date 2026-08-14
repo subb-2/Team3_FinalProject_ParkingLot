@@ -64,7 +64,9 @@ SPOT_CELL_SPAN = {
 #     오른쪽 열: 전부 일반                                        = 5자리
 #   - 가운데 col 5 / col 7은 중앙 섬 두 개. 각각 기둥 2개 사이에 전기차 구역 2칸.
 #   - 그 사이(col 1~3, 5~6, 8~10)와 맨 아랫줄(row 8)이 전부 도로다.
-#   - 입구(GATE1)는 아래 오른쪽(row 8, col 8), 출구(GATE2)는 아래 왼쪽(row 8, col 3).
+#   - 입구(GATE1)는 아래 오른쪽(row 8, col 8), 출구(GATE2)는 아래 왼쪽(row 8, col 4).
+#     열이 13개(0~12)이므로 가운데는 col 6이고, 두 문이 그 양옆으로 두 칸씩
+#     떨어져 마주 본다. 실물 목업이 그렇게 대칭이다.
 #     입구로 들어와 안쪽을 돌고 왼쪽 아래 출구로 빠지는 흐름이 된다.
 #
 # 기둥과 주차 구역의 관계:
@@ -89,7 +91,7 @@ grid_map = [
         [SPOT3  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL   ,ROAD   ,PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,SPOT1],  # row 5
         [PILL   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,PILL],  # row 6
         [SPOT2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,ROAD ],  # row 7
-        [ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD   ,ROAD],  # row 8
+        [ROAD   ,ROAD   ,ROAD   ,ROAD   ,GATE2  ,ROAD   ,ROAD   ,ROAD   ,GATE1  ,ROAD   ,ROAD   ,ROAD   ,ROAD],  # row 8
 ]
 
 # 기둥(PILL) -> 기둥 번호 매핑
@@ -255,7 +257,7 @@ GATE2_POS = _find_cell(GATE2)   # 출구
 #   -> 오른쪽 통로를 위로   (D-4 -> D-3 -> D-2 -> D-1)
 #   -> 윗줄을 왼쪽으로
 #   -> 왼쪽 통로를 아래로   (A-1 -> A-2 -> A-3 -> A-4)
-#   -> 아랫줄을 오른쪽으로 가서 출구(row 8, col 3)
+#   -> 아랫줄을 오른쪽으로 가서 출구(row 8, col 4)
 #
 # 화면 기준(위가 row 0, 왼쪽이 col 0)으로 보면 반시계 방향이다.
 #
