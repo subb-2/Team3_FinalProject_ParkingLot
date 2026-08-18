@@ -192,16 +192,16 @@ module Mac_Adder_Tree_FC2 (
     // Bias 하드코딩 (10개 노드)
     // -------------------------------------------------------------
     localparam logic signed [31:0] BIAS_LUT[0:9] = '{
+        32'hffff_fff8, // f8 
+        32'hffff_fffa, // fa 
+        32'hffff_fff7, // f7 
+        32'h0000_0005, // 05
+        32'hffff_fffe, // fe
+        32'h0000_000e, // 0e 
+        32'hffff_fff7, // f7 
         32'h0000_0009, // 09 
-        32'h0000_000D, // 0D 
-        32'hFFFF_FFF7, // F7 
-        32'hFFFF_FFF9, // F9
-        32'h0000_0001, // 01
-        32'h0000_000B, // 0B 
-        32'h0000_0008, // 08 
-        32'hFFFF_FFF7, // F7 
-        32'h0000_0004, // 04
-        32'hFFFF_FFF2  // F2
+        32'hffff_ffff, // ff
+        32'h0000_0004  // 04
     };
 
     // -------------------------------------------------------------
@@ -296,10 +296,10 @@ module Mac_Adder_Tree_FC2 (
     logic signed [31:0] sum_with_bias;
     logic signed [31:0] scaled_val;
 
-    assign sum_with_bias = accum + (BIAS_LUT[i_cnt_node] <<< 2); // Bias Shift = 4
+    assign sum_with_bias = accum + (BIAS_LUT[i_cnt_node] <<< 2); // Bias Shift = 2
     
-    // 2. Python 레퍼런스의 FC2 Output Right Shift 값 적용 (예: >>> 7)
-    assign scaled_val    = sum_with_bias >>> 7; 
+    // 2. Python 레퍼런스의 FC2 Output Right Shift 값 적용 (예: >>> 10)
+    assign scaled_val    = sum_with_bias >>> 10; 
 
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin

@@ -143,137 +143,196 @@ endmodule
 
 
 module BRAM_WE2_TOP #(
-    parameter DEPTH     = 2400,
-    parameter IN_DATA   = 8,
-    parameter IN_WADDR  = 12,
-    parameter OUT_DATA  = 8,
-    parameter IN_RADDR  = 9
+    parameter DEPTH    = 2400,
+    parameter IN_DATA  = 8,
+    parameter IN_WADDR = 12,
+    parameter OUT_DATA = 8,
+    parameter IN_RADDR = 9
 ) (
-    input  logic                 clk,
-    input  logic                 i_we,
-    input  logic [ IN_DATA-1:0]  i_data,
-    input  logic [IN_WADDR-1:0]  i_waddr,
-    output logic [OUT_DATA-1:0]  o_data_ch1,
-    output logic [OUT_DATA-1:0]  o_data_ch2,
-    output logic [OUT_DATA-1:0]  o_data_ch3,
-    output logic [OUT_DATA-1:0]  o_data_ch4,
-    output logic [OUT_DATA-1:0]  o_data_ch5,
-    output logic [OUT_DATA-1:0]  o_data_ch6,
-    input  logic [IN_RADDR-1:0]  i_raddr
+    input logic                clk,
+    input logic                i_we,
+    input logic [ IN_DATA-1:0] i_data,
+    input logic [IN_WADDR-1:0] i_waddr,
+
+    output logic [OUT_DATA-1:0] o_data_ch1,
+    output logic [OUT_DATA-1:0] o_data_ch2,
+    output logic [OUT_DATA-1:0] o_data_ch3,
+    output logic [OUT_DATA-1:0] o_data_ch4,
+    output logic [OUT_DATA-1:0] o_data_ch5,
+    output logic [OUT_DATA-1:0] o_data_ch6,
+
+    input logic [IN_RADDR-1:0] i_raddr
 );
 
-    // =========================================================================
-    // 1. 내부 주소 및 인덱스 계산 신호 (조합 회로)
-    // =========================================================================
-    logic [3:0] out_ch;        // 출력 채널 인덱스 (0 ~ 15)
-    logic [7:0] rel_addr;      // 150개 단위 블록 내 상대 주소 (0 ~ 149)
-    logic [2:0] in_ch_idx;     // 25개 단위 입력 채널 순서 (0 ~ 5)
-    logic [4:0] kernel_idx;    // 5x5 필터 내부 픽셀 인덱스 (0 ~ 24)
-    
-    logic [8:0] target_waddr;  // 각 BRAM 내부 저장 주소 (0 ~ 399)
+    /*
+     * Stage 1
+     * 전체 주소에서 출력 채널 계산
+     */
+    logic [         3:0] out_ch_s1;
+    logic [IN_WADDR-1:0] waddr_s1;
+    logic [ IN_DATA-1:0] data_s1;
+    logic                we_s1 = 1'b0;
 
-    logic we_ch1, we_ch2, we_ch3, we_ch4, we_ch5, we_ch6;
+    logic [        19:0] out_ch_mult_comb;
 
-    // =========================================================================
-    // 2. 주소 디코딩 (나누기/모듈로 연산자 완전 제거 - 고정소수점 역수 곱셈 방식)
-    // =========================================================================
-    
-    // 1) out_ch = i_waddr / 150
-    // 1/150 ≈ 437 / 65536 (2^16) -> 0~2399 범위에서 100% 정밀도 일치
-    assign out_ch = (i_waddr * 20'd437) >> 16;
+    assign out_ch_mult_comb = i_waddr * 20'd437;
 
-    // 2) rel_addr = i_waddr % 150 = i_waddr - (out_ch * 150)
-    assign rel_addr = i_waddr - ((out_ch << 7) + (out_ch << 4) + (out_ch << 2) + (out_ch << 1));
+    always_ff @(posedge clk) begin
+        out_ch_s1 <= out_ch_mult_comb[19:16];
+        waddr_s1  <= i_waddr;
+        data_s1   <= i_data;
+        we_s1     <= i_we;
+    end
 
-    // 3) in_ch_idx = rel_addr / 25
-    // 1/25 ≈ 41 / 1024 (2^10) -> 0~149 범위에서 100% 정밀도 일치
-    assign in_ch_idx = (rel_addr * 13'd41) >> 10;
+    /*
+     * Stage 2
+     * 150개 단위 블록 안의 상대 주소 계산
+     */
+    logic [        7:0] rel_addr_s2;
+    logic [        3:0] out_ch_s2;
+    logic [IN_DATA-1:0] data_s2;
+    logic               we_s2 = 1'b0;
 
-    // 4) kernel_idx = rel_addr % 25 = rel_addr - (in_ch_idx * 25)
-    assign kernel_idx = rel_addr - ((in_ch_idx << 4) + (in_ch_idx << 3) + in_ch_idx);
+    logic [       11:0] out_ch_x150_comb;
 
-    // 5) target_waddr = (out_ch * 25) + kernel_idx
-    assign target_waddr = (out_ch << 4) + (out_ch << 3) + out_ch + kernel_idx;
+    /*
+     * 반드시 12비트로 확장한 뒤 시프트해야 합니다.
+     * 4비트 out_ch를 바로 시프트하면 상위 비트가 잘릴 수 있습니다.
+     */
+    assign out_ch_x150_comb =
+        ({8'd0, out_ch_s1} << 7) +
+        ({8'd0, out_ch_s1} << 4) +
+        ({8'd0, out_ch_s1} << 2) +
+        ({8'd0, out_ch_s1} << 1);
 
-    // =========================================================================
-    // 3. Write Enable 라우팅 (조합 회로)
-    // =========================================================================
-    always_comb begin
-        we_ch1 = 1'b0;
-        we_ch2 = 1'b0;
-        we_ch3 = 1'b0;
-        we_ch4 = 1'b0;
-        we_ch5 = 1'b0;
-        we_ch6 = 1'b0;
+    always_ff @(posedge clk) begin
+        rel_addr_s2 <= waddr_s1 - out_ch_x150_comb;
+        out_ch_s2   <= out_ch_s1;
+        data_s2     <= data_s1;
+        we_s2       <= we_s1;
+    end
 
-        if (i_we) begin
-            case (in_ch_idx)
-                3'd0: we_ch1 = 1'b1;
-                3'd1: we_ch2 = 1'b1;
-                3'd2: we_ch3 = 1'b1;
-                3'd3: we_ch4 = 1'b1;
-                3'd4: we_ch5 = 1'b1;
-                3'd5: we_ch6 = 1'b1;
-                default: ;
+    /*
+     * Stage 3
+     * 입력 채널 번호 계산
+     */
+    logic [        2:0] in_ch_idx_s3;
+    logic [        7:0] rel_addr_s3;
+    logic [        3:0] out_ch_s3;
+    logic [IN_DATA-1:0] data_s3;
+    logic               we_s3 = 1'b0;
+
+    logic [       12:0] in_ch_mult_comb;
+
+    assign in_ch_mult_comb = rel_addr_s2 * 13'd41;
+
+    always_ff @(posedge clk) begin
+        in_ch_idx_s3 <= in_ch_mult_comb[12:10];
+        rel_addr_s3  <= rel_addr_s2;
+        out_ch_s3    <= out_ch_s2;
+        data_s3      <= data_s2;
+        we_s3        <= we_s2;
+    end
+
+    /*
+     * Stage 4
+     * 최종 BRAM 주소와 write enable 생성
+     */
+    logic [7:0] kernel_idx_comb;
+    logic [7:0] in_ch_x25_comb;
+    logic [8:0] out_ch_x25_comb;
+
+    logic [8:0] target_waddr_q;
+    logic [IN_DATA-1:0] wdata_q;
+    logic [5:0] we_ch_q = 6'b000000;
+
+    assign in_ch_x25_comb =
+        ({5'd0, in_ch_idx_s3} << 4) +
+        ({5'd0, in_ch_idx_s3} << 3) +
+         {5'd0, in_ch_idx_s3};
+
+    assign kernel_idx_comb = rel_addr_s3 - in_ch_x25_comb;
+
+    assign out_ch_x25_comb =
+        ({5'd0, out_ch_s3} << 4) +
+        ({5'd0, out_ch_s3} << 3) +
+         {5'd0, out_ch_s3};
+
+    always_ff @(posedge clk) begin
+        target_waddr_q <= out_ch_x25_comb + {1'b0, kernel_idx_comb};
+
+        wdata_q <= data_s3;
+
+        we_ch_q <= 6'b000000;
+
+        if (we_s3) begin
+            case (in_ch_idx_s3)
+                3'd0: we_ch_q[0] <= 1'b1;
+                3'd1: we_ch_q[1] <= 1'b1;
+                3'd2: we_ch_q[2] <= 1'b1;
+                3'd3: we_ch_q[3] <= 1'b1;
+                3'd4: we_ch_q[4] <= 1'b1;
+                3'd5: we_ch_q[5] <= 1'b1;
+                default: we_ch_q <= 6'b000000;
             endcase
         end
     end
 
-    // =========================================================================
-    // 4. BRAM 인스턴스화
-    // =========================================================================
+    /*
+     * BRAM instances
+     */
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_1 (
-        .clk     (clk         ),
-        .i_we    (we_ch1      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch1  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[0]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch1),
+        .i_raddr(i_raddr)
     );
 
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_2 (
-        .clk     (clk         ),
-        .i_we    (we_ch2      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch2  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[1]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch2),
+        .i_raddr(i_raddr)
     );
 
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_3 (
-        .clk     (clk         ),
-        .i_we    (we_ch3      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch3  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[2]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch3),
+        .i_raddr(i_raddr)
     );
 
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_4 (
-        .clk     (clk         ),
-        .i_we    (we_ch4      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch4  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[3]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch4),
+        .i_raddr(i_raddr)
     );
 
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_5 (
-        .clk     (clk         ),
-        .i_we    (we_ch5      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch5  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[4]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch5),
+        .i_raddr(i_raddr)
     );
 
     BRAM_WEIGHT2 U_BRAM_WEIGHT2_6 (
-        .clk     (clk         ),
-        .i_we    (we_ch6      ),
-        .i_data  (i_data      ),
-        .i_waddr (target_waddr),
-        .o_data  (o_data_ch6  ),
-        .i_raddr (i_raddr     )
+        .clk    (clk),
+        .i_we   (we_ch_q[5]),
+        .i_data (wdata_q),
+        .i_waddr(target_waddr_q),
+        .o_data (o_data_ch6),
+        .i_raddr(i_raddr)
     );
 
 endmodule

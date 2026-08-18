@@ -14,7 +14,11 @@ module image_rom (
     logic [31:0] mem [0:127];
 
     initial begin
-        $readmemh("mnist_0123.mem", mem); 
+         $readmemh("mnist_0815.mem", mem);
+        // $readmemh("mnist_0123.mem", mem);
+        // $readmemh("mnist_4567.mem", mem); 
+        // $readmemh("mnist_6847.mem", mem); 
+        // $readmemh("mnist_4667.mem", mem); 
     end
 
     always_ff @(posedge clk) begin
