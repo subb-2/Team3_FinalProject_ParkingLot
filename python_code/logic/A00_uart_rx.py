@@ -6,15 +6,11 @@ A00_uart_rx : Zybo(FPGA) → Jetson 차량번호 수신 모듈  [Wi-Fi(TCP) 버�
 - Zybo    : TCP 클라이언트 (Wi-Fi 모듈로 AP에 접속 후 Jetson IP:PORT로 접속)
 
 전송 데이터 포맷은 UART 버전과 동일한 2바이트 바이너리를 유지한다.
-한 바이트에 두 자리를 담고, 낮은 자리 쪽 바이트를 먼저 보낸다.
-  먼저 온 바이트 : 상위4비트 = 3번째 자리, 하위4비트 = 4번째 자리
-  나중에 온 바이트: 상위4비트 = 1번째 자리, 하위4비트 = 2번째 자리
-  예) 0x34 0x12  ->  "1234"
+한 바이트에 두 자리를 담고, 한 바이트 안에서는 상위4비트가 앞자리다.
+  0x12 -> "12"
 
-바이트 순서는 실물로 확인한 것이다. Zybo에서 1234를 보내면 이쪽에서
-0x34 0x12로 들어온다. 먼저 온 바이트를 앞자리로 읽으면 "3412"가 된다.
-Zybo 펌웨어의 순서가 바뀌면 아래 parse_car_id / build_car_packet 두 곳만
-같이 뒤집으면 된다.
+두 바이트 중 어느 쪽이 먼저 오는지는 보드마다 다르다. 입차와 출차 Zybo의
+펌웨어가 서로 반대라, 아래 BYTE_ORDER에 역할별로 적어 둔다.
 
 시리얼 구현이 필요하면 git 이력에서 꺼낼 것. (Wi-Fi 전환 전 버전)
 
@@ -65,33 +61,58 @@ def get_wifi_config():
     }
 
 
-def parse_car_id(raw_data):
+# 역할별 바이트 순서. 실물로 확인한 값이다.
+#   'low_first'  : 뒤 두 자리를 담은 바이트가 먼저 온다.  0x34 0x12 -> "1234"
+#   'high_first' : 앞 두 자리를 담은 바이트가 먼저 온다.  0x12 0x34 -> "1234"
+#
+# 두 보드의 펌웨어를 서로 다른 사람이 짜서 순서가 반대다. 한쪽만 맞추면
+# 다른 쪽 번호가 앞뒤 두 자리씩 뒤집혀 들어온다. (1234 -> 3412)
+# 펌웨어를 고쳐 순서를 맞추면 여기 값도 같이 바꿀 것.
+BYTE_ORDER = {
+    'entry': 'low_first',       # 입차 Zybo
+    'exit': 'high_first',       # 출차 Zybo
+}
+
+
+def parse_car_id(raw_data, role='entry'):
     """
     2바이트 바이너리 데이터에서 4자리 차량 번호를 추출합니다.
 
-    낮은 자리 쪽 바이트가 먼저 온다. 즉 먼저 온 바이트가 뒤 두 자리(3, 4번째),
-    나중에 온 바이트가 앞 두 자리(1, 2번째)다. 순서대로 읽으면 1234가 3412로
-    나온다. (모듈 첫머리 주석 참고)
+    Args:
+        raw_data: 받은 2바이트
+        role:     'entry' 또는 'exit'. 바이트 순서가 역할마다 다르다.
+                  (BYTE_ORDER 주석 참고)
 
     Returns:
         (차량번호 4자리 문자열, 먼저 온 바이트, 나중에 온 바이트)
     """
-    low, high = raw_data[0], raw_data[1]
+    first, second = raw_data[0], raw_data[1]
+    if BYTE_ORDER.get(role, 'low_first') == 'low_first':
+        high, low = second, first
+    else:
+        high, low = first, second
 
     digit1 = (high >> 4) & 0x0F
     digit2 = high & 0x0F
     digit3 = (low >> 4) & 0x0F
     digit4 = low & 0x0F
 
-    return f"{digit1}{digit2}{digit3}{digit4}", low, high
+    return f"{digit1}{digit2}{digit3}{digit4}", first, second
 
 
-def build_car_packet(car_id):
-    """4자리 차량번호 문자열 -> 2바이트 패킷. (테스트 송신용 / parse_car_id의 역연산)"""
+def build_car_packet(car_id, role='entry'):
+    """
+    4자리 차량번호 문자열 -> 2바이트 패킷. (테스트 송신용 / parse_car_id의 역연산)
+
+    역할에 맞는 순서로 만든다. 그래야 그 역할의 Zybo가 보내는 것과 같은
+    바이트가 나가고, 테스트 송신으로 실제 동작을 그대로 흉내 낼 수 있다.
+    """
     d = f"{int(car_id):04d}"
     high = (int(d[0]) << 4) | int(d[1])     # 앞 두 자리
     low = (int(d[2]) << 4) | int(d[3])      # 뒤 두 자리
-    return bytes([low, high])               # 낮은 자리 쪽을 먼저 보낸다
+    if BYTE_ORDER.get(role, 'low_first') == 'low_first':
+        return bytes([low, high])
+    return bytes([high, low])
 
 
 def _enable_keepalive(sock, idle=10, interval=5, count=3):
@@ -174,7 +195,7 @@ def _notify_rx(role, car_id, first_byte, second_byte, result=None):
 
 def _process_packet(role, raw_data):
     """수신한 2바이트를 파싱해서 입차/출차 로직으로 넘긴다."""
-    car_id, b1, b2 = parse_car_id(raw_data)
+    car_id, b1, b2 = parse_car_id(raw_data, role)
 
     if role == 'entry':
         receive_time = datetime.datetime.now().replace(second=0, microsecond=0)
@@ -352,7 +373,7 @@ def send_test_packet(role, car_id, host='127.0.0.1'):
     """
     config = get_wifi_config()
     port = config['entry_port'] if role == 'entry' else config['exit_port']
-    packet = build_car_packet(car_id)
+    packet = build_car_packet(car_id, role)
 
     with socket.create_connection((host, port), timeout=3) as sock:
         sock.sendall(packet)
