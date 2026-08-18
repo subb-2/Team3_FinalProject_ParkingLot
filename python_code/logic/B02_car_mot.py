@@ -991,15 +991,6 @@ class CarMOT:
         가장 많이 움직인 트랙을 고른다. 임계값 미만이면 None.
 
         이미 다른 차량번호가 붙은 트랙(= 주차를 마친 차)은 후보에서 제외한다.
-
-        번호가 없더라도 '처음 잡힌 자리를 한 번도 벗어난 적 없는' 트랙은
-        빼놓는다. 세워둔 차다. 이동 임계값이 2cm라 검출 상자가 떨리는 것만
-        으로도 넘길 수 있어서, 그냥 두면 세워둔 차가 FIFO의 번호를 가져가
-        엉뚱한 차를 안내하기 시작한다.
-
-        예전에는 미리 세워둔 차가 전부 주차 기록에 있어서 위의 번호 검사에
-        걸렸다. 이제는 카메라만 보고 자리를 채우는 경우(기록 없이 서 있는 차)
-        가 있으므로 그 검사만으로는 부족하다.
         """
         best, best_move = None, 0.0
         for trk in tracks:
@@ -1008,10 +999,6 @@ class CarMOT:
                 continue
             bound_car = self.track_to_car.get(track_id)
             if bound_car is not None and bound_car != self.active_car_id:
-                continue
-            if (bound_car is None
-                    and self._stayed_in_place(track_id,
-                                              self.single['STUCK_SPOT_RADIUS_CM'])):
                 continue
 
             moved, threshold = self._recent_movement(track_id, now)
