@@ -69,6 +69,10 @@ CONFIG = {
     "NAV_HORIZON_FADE_PX": 96,  # 지평선 아래로 안개처럼 흐려지는 구간 높이
     "NAV_BANNER_H": 112,        # 상단 턴 안내 배너 높이
 
+    # 내 차 뒤로 이어 그릴 경로 길이 (cm). 0이면 앞쪽만 그린다.
+    # 화살표가 선 위에 놓여 보이게 하는 것이 목적이라 한 뼘이면 충분하다.
+    "NAV_ROUTE_TAIL_CM": 30.0,
+
     # ---------------------------------------------------------------
     # 화면 회전 규칙
     #
@@ -638,6 +642,28 @@ class NavigationView:
         self._car_deg = math.degrees(math.atan2(dy, dx))
         return self._car_deg
 
+    def _route_anchor(self, nav, car_pos):
+        """
+        경로 위에서 차가 서 있는 점과 그 자리의 진행 방향.
+
+        Returns:
+            ((x_cm, y_cm), 각도). 계획된 경로가 없으면 None.
+            각도 규약은 _world_to_flat과 같다. (x축 오른쪽 0도, 시계 방향 +)
+        """
+        route = nav.get("route")
+        if not route or len(route) < 2:
+            return None
+
+        points = route_from_position(route, nav.get("route_index", 1), car_pos)
+        if len(points) < 2:
+            return None
+
+        here, ahead = points[0], points[1]
+        dx, dy = ahead[0] - here[0], ahead[1] - here[1]
+        if math.hypot(dx, dy) < 1e-6:
+            return None
+        return here, math.degrees(math.atan2(dy, dx))
+
     def _view_heading(self, moving_deg):
         """
         지도를 어느 방향으로 세울지 결정. 정지 중에는 직전 값을 그대로 쓴다.
@@ -711,8 +737,27 @@ class NavigationView:
             return self._render_waiting(fps, extra_info)
 
         car_pos = nav["world_pos"]
-        heading = self._view_heading(self._track_motion(nav))
         target = nav.get("target_spot")
+
+        # 화면의 기준점과 방향.
+        #
+        # 안내 경로가 있으면 차의 실제 위치가 아니라 '경로 위로 내려 찍은
+        # 점'을 기준으로 삼고, 방향도 그 자리의 경로 방향으로 세운다. 그러면
+        # 화살표가 늘 파란 선 위에 놓이고, 머리는 앞(목적지) 쪽 선을, 꼬리는
+        # 지나온 선을 가리킨다.
+        #
+        # 실제 위치와 진행 방향을 그대로 쓰면 화살표가 선 옆으로 벗어난 채
+        # 따라다니고, 검출이 흔들릴 때마다 방향이 좌우로 돌아간다. 차는
+        # 차선 한가운데를 정확히 밟지 않으므로 이 어긋남은 늘 있다.
+        # 이력은 경로가 있든 없든 계속 갱신해 둔다. 안내가 끝나 경로가
+        # 사라지는 순간 쓸 값이 없으면 화면이 한 번 홱 돈다.
+        moving = self._track_motion(nav)
+        anchor = self._route_anchor(nav, car_pos)
+        if anchor is None:
+            course = moving
+        else:
+            car_pos, course = anchor
+        heading = self._view_heading(course)
 
         # 1) 노면 레이어를 '위에서 본' 상태로 그린 뒤 원근 변환
         ground = np.full((self.height, self.width, 3), COLOR_NAV_GROUND, dtype=np.uint8)
@@ -847,12 +892,39 @@ class NavigationView:
         """
         route = nav.get("route")
         if route and len(route) >= 2:
+            index = nav.get("route_index", 1)
             # 첫 구간이 비스듬해지지 않도록 C01이 모서리를 차에 맞춰 준다.
-            return route_from_position(
-                route, nav.get("route_index", 1), car_pos), True
+            points = route_from_position(route, index, car_pos)
+            tail = self._route_tail(route, index, points[0])
+            return ([tail] + points if tail else points), True
 
         target = nav.get("target_world")
         return ([car_pos, target], False) if target is not None else (None, False)
+
+    def _route_tail(self, route, index, here):
+        """
+        차 뒤로 조금만 이어 그릴 점. 없으면 None.
+
+        선이 화살표 코앞에서 시작하면 화살표가 선 위에 놓인 것이 아니라
+        선의 시작점에 얹혀 있는 것처럼 보인다. 꼬리 쪽으로 한 뼘만 이어 두면
+        '지나온 길 위에 서 있다'가 된다.
+
+        지나온 경유점까지 전부 그리지는 않는다. 그러면 한 바퀴 돌아온 경로가
+        통째로 남아 어디로 가야 하는지 읽기 어려워진다.
+        """
+        length = CONFIG['NAV_ROUTE_TAIL_CM']
+        if length <= 0 or index < 1:
+            return None
+
+        prev = route[index - 1]
+        dx, dy = here[0] - prev[0], here[1] - prev[1]
+        travelled = math.hypot(dx, dy)
+        if travelled < 1e-6:
+            return None
+
+        back = min(length, travelled)       # 이번 구간을 벗어나지 않는다
+        return (here[0] - dx / travelled * back,
+                here[1] - dy / travelled * back)
 
     def _draw_ground_route(self, layer, car_pos, heading, nav):
         """
