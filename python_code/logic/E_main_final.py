@@ -109,6 +109,32 @@ def start_uart(rx_feed):
     return True
 
 
+def register_test_cars(rx_feed):
+    """
+    UART 없이 돌릴 때 쓰는 테스트 차량번호를 등록한다.
+
+    UART를 켜면 아무것도 하지 않는다. B_main / C_main과 같은 규칙이다.
+    켠 채로 넣으면 프로그램이 뜨자마자 그 번호에 자리가 배정되어, Zybo에서는
+    아직 아무 값도 오지 않았는데 화면에는 목적지가 깜빡이고 있게 된다.
+    실물 수신을 시험하는 중에 그 자리는 이미 배정 후보에서도 빠져 있다.
+
+    UART를 켠 상태에서 번호를 하나 넣어 보려면 /enqueue/1234 를 쓴다.
+    그쪽은 사람이 부른 것이 분명하므로 1번 구간에 '수동'으로 표시된다.
+    """
+    if CONFIG['ENABLE_UART']:
+        return
+
+    from data.car_data import TEST_PRESET_CAR_NUMBERS
+    if not TEST_PRESET_CAR_NUMBERS:
+        return
+
+    for car_id in TEST_PRESET_CAR_NUMBERS:
+        result = register_car_number(car_id)
+        rx_feed.push_manual(car_id, result)
+    print(f"  미리 지정된 테스트 차량번호 {len(TEST_PRESET_CAR_NUMBERS)}개를 "
+          f"등록했습니다. (UART가 꺼져 있을 때만)")
+
+
 def start_watcher(pipeline, watcher):
     """
     [4단계] 주차 완료와 오주차를 감시하는 스레드를 띄운다.
@@ -170,12 +196,7 @@ def main():
     stage(3, "검출 / 추적 / 위치추정")
     pipeline = build_pipeline(cap)
 
-    from data.car_data import TEST_PRESET_CAR_NUMBERS
-    if TEST_PRESET_CAR_NUMBERS:
-        for car_id in TEST_PRESET_CAR_NUMBERS:
-            result = register_car_number(car_id)
-            rx_feed.push_manual(car_id, result)
-        print(f"  미리 지정된 테스트 차량번호 {len(TEST_PRESET_CAR_NUMBERS)}개를 등록했습니다.")
+    register_test_cars(rx_feed)
 
     runner = PipelineRunner(pipeline)
     runner.start()
