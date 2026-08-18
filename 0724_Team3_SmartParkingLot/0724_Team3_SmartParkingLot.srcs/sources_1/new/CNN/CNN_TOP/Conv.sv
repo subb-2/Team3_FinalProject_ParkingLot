@@ -27,7 +27,7 @@ module cnn_conv1 #(
   state_t c_state;
   state_t n_state;
 
-  localparam logic [7:0] BIAS_PARAM[0:5] = '{8'hF7, 8'h1E, 8'h04, 8'h02, 8'h02, 8'h09};
+  localparam logic [7:0] BIAS_PARAM[0:5] = '{8'hed, 8'hfb, 8'h06, 8'hfb, 8'hfe, 8'h01};
 
   logic        [ 4:0] cnt;
   logic        [ 2:0] calc_cnt;
@@ -53,8 +53,8 @@ module cnn_conv1 #(
   logic signed [18:0] step3            [ 0:3];
   logic signed [19:0] step4            [ 0:1];
 
-  logic [7:0] r_raddr;
-  logic [1:0] buf_cnt;
+  logic        [ 7:0] r_raddr;
+  logic        [ 1:0] buf_cnt;
 
   assign o_raddr = {1'b0, buf_cnt, r_raddr[4:0]};
 
@@ -177,7 +177,7 @@ module cnn_conv1 #(
       o_pxl_data   <= 8'd0;
       o_done       <= 1'b0;
 
-      buf_cnt <= 2'd0;
+      buf_cnt      <= 2'd0;
     end else begin
       o_done <= 1'b0;
 
@@ -269,10 +269,10 @@ module cnn_conv1 #(
 
           if (conv_bias_result < 0) begin
             o_pxl_data <= 8'd0;
-          end else if ((conv_bias_result >>> 1) > 21'd255) begin
+          end else if ((conv_bias_result >>> 2) > 21'd255) begin
             o_pxl_data <= 8'd255;
           end else begin
-            o_pxl_data <= conv_bias_result[8:1];
+            o_pxl_data <= conv_bias_result[9:2];
           end
 
           if (pxl_x < 5'd27) begin
@@ -291,9 +291,9 @@ module cnn_conv1 #(
             pxl_x        <= 5'd0;
             pxl_y        <= 5'd0;
             initial_load <= 1'b1;
-            if(ch_cnt_d == 3'd5) buf_cnt <= buf_cnt + 1; 
+            if (ch_cnt_d == 3'd5) buf_cnt <= buf_cnt + 1;
           end
-           
+
         end
 
         WAIT_CHANNEL: begin
@@ -314,6 +314,8 @@ module cnn_conv1 #(
       endcase
     end
   end
+
+
 
 endmodule
 
@@ -562,9 +564,9 @@ module cnn_conv2 #(
         end
 
         DONE: begin
-            o_done   <= 1'b1;
-            cnt      <= 5'd0;
-            calc_cnt <= 3'd0;
+          o_done   <= 1'b1;
+          cnt      <= 5'd0;
+          calc_cnt <= 3'd0;
           if (pxl_x < 4'd9) begin
             for (int row_idx = 0; row_idx < 5; row_idx++) begin
               pxl_reg[(row_idx*5)+0] <= pxl_reg[(row_idx*5)+1];
@@ -617,6 +619,8 @@ module cnn_conv2 #(
     end
   end
 
+
+
 endmodule
 
 
@@ -649,95 +653,99 @@ module conv2 (
     output logic       o_done
 );
 
-    localparam logic [7:0] BIAS_PARAM[0:15] = '{
-        8'h08,
-        8'h0E,
-        8'h01,
-        8'h03,
-        8'hFF,
-        8'h05,
-        8'h08,
-        8'hFD,
-        8'h01,
-        8'hFA,
-        8'hFF,
-        8'h00,
-        8'h05,
-        8'h05,
-        8'h08,
-        8'hFF
-    };
-        
+  localparam logic [7:0] BIAS_PARAM[0:15] = '{
+      8'hfa,
+      8'hf5,
+      8'h0a,
+      8'h00,
+      8'hf5,
+      8'h07,
+      8'hf8,
+      8'h01,
+      8'h08,
+      8'h06,
+      8'h07,
+      8'h0e,
+      8'h07,
+      8'h02,
+      8'hfa,
+      8'hfe
+  };
 
-  logic [ 7:0] bias;
-  logic [20:0] w_pxl_data_0;
-  logic [20:0] w_pxl_data_1;
-  logic [20:0] w_pxl_data_2;
-  logic [20:0] w_pxl_data_3;
-  logic [20:0] w_pxl_data_4;
-  logic [20:0] w_pxl_data_5;
-  logic        conv2_done;
+
+  logic        [ 7:0] bias;
+  logic        [20:0] w_pxl_data_0;
+  logic        [20:0] w_pxl_data_1;
+  logic        [20:0] w_pxl_data_2;
+  logic        [20:0] w_pxl_data_3;
+  logic        [20:0] w_pxl_data_4;
+  logic        [20:0] w_pxl_data_5;
+  logic               conv2_done;
   logic signed [22:0] conv2_sum;
 
-  logic [10:0] w_raddr;
-  logic [11:0] w_wraddr;
+  logic        [10:0] w_raddr;
+  logic        [11:0] w_wraddr;
 
-  assign o_raddr = w_raddr[7:0];
+  assign o_raddr   = w_raddr[7:0];
   assign o_w_raddr = w_wraddr[8:0];
 
 
-  logic        conv2_done_dly0;
-  logic        conv2_done_dly1; 
+  logic conv2_done_dly0;
+  logic conv2_done_dly1;
 
   assign bias = BIAS_PARAM[i_ch_cnt];
 
-    always @ (posedge clk or posedge reset) begin
-        if(reset) begin
-            conv2_sum <= 0;
-        end
-        else if(conv2_done) begin
-            conv2_sum <= $signed(w_pxl_data_0) + 
-                         $signed(w_pxl_data_1) +
-                         $signed(w_pxl_data_2) + 
-                         $signed(w_pxl_data_3) +
-                         $signed(w_pxl_data_4) +
-                         $signed(w_pxl_data_5) +
-                         ($signed({{13{bias[7]}}, bias}) <<< 6);
-                          ;
-        end
-        else begin
-            conv2_sum <= conv2_sum;
-        end
+  always @(posedge clk or posedge reset) begin
+    if (reset) begin
+      conv2_sum <= 0;
+    end else if (conv2_done) begin
+      conv2_sum <= $signed(
+          w_pxl_data_0
+      ) + $signed(
+          w_pxl_data_1
+      ) + $signed(
+          w_pxl_data_2
+      ) + $signed(
+          w_pxl_data_3
+      ) + $signed(
+          w_pxl_data_4
+      ) + $signed(
+          w_pxl_data_5
+      ) + ($signed(
+          {{13{bias[7]}}, bias}
+      ) <<< 5);
+      ;
+    end else begin
+      conv2_sum <= conv2_sum;
     end
+  end
 
-    always @ (posedge clk or posedge reset) begin
-        if(reset) begin
-            conv2_done_dly0 <= 0;
-            conv2_done_dly1 <= 0;
-        end
-        else begin
-            conv2_done_dly0 <= conv2_done;
-            conv2_done_dly1 <= conv2_done_dly0;
-        end
+  always @(posedge clk or posedge reset) begin
+    if (reset) begin
+      conv2_done_dly0 <= 0;
+      conv2_done_dly1 <= 0;
+    end else begin
+      conv2_done_dly0 <= conv2_done;
+      conv2_done_dly1 <= conv2_done_dly0;
     end
+  end
 
-    assign o_done = conv2_done_dly1;
+  assign o_done = conv2_done_dly1;
 
 
-    always @ (posedge clk or posedge reset) begin
-        if (reset) begin
-            o_pxl_data <= 8'd0;
-        end
-        else if (conv2_done_dly0) begin
-            if ($signed(conv2_sum) < 0) begin
-                o_pxl_data <= 8'd0;                          // ReLU
-            end else if (($signed(conv2_sum) >>> 9) > 21'sd255) begin
-                o_pxl_data <= 8'd255;                        // Saturation
-            end else begin
-                o_pxl_data <= conv2_sum[16:9];               // Valid Range (0~255)
-            end
-        end
+  always @(posedge clk or posedge reset) begin
+    if (reset) begin
+      o_pxl_data <= 8'd0;
+    end else if (conv2_done_dly0) begin
+      if ($signed(conv2_sum) < 0) begin
+        o_pxl_data <= 8'd0;  // ReLU
+      end else if (($signed(conv2_sum) >>> 9) > 21'sd255) begin
+        o_pxl_data <= 8'd255;  // Saturation
+      end else begin
+        o_pxl_data <= conv2_sum[16:9];  // Valid Range (0~255)
+      end
     end
+  end
 
 
   cnn_conv2 #(
@@ -830,3 +838,5 @@ module conv2 (
   );
 
 endmodule
+
+
