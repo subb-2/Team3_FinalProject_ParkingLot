@@ -268,6 +268,125 @@ def find_nearest_spot(world_pos, exclude=None, max_distance_cm=None):
     return best_id, best_dist
 
 
+def sync_spot_occupancy(observations, radius_cm):
+    """
+    카메라가 본 대로 자리 점유 상태를 맞춘다.
+
+    미리 세워둔 차 목록(car_data의 INITIAL_PARKED)은 '프로그램이 뜰 때
+    이랬다'는 선언일 뿐이다. 실물 차를 옮기면 기록과 어긋나고, 그때부터
+    빈자리 배정이 실제로 빈 곳이 아니라 기록상 빈 곳으로 간다. 옮긴 자리는
+    비어 있는데 배정 후보에서 빠져 있고, 실제로 차가 서 있는 자리로 다른
+    차를 보내게 된다.
+
+    카메라는 지금 어디에 차가 서 있는지 보고 있으므로 그것을 기준으로 삼는다.
+    자리 중심에서 radius_cm 안에 멈춰 있는 차가 있으면 그 자리는 찼고,
+    아무도 없으면 비었다.
+
+    안내 중인 차(parked=False)는 건드리지 않는다. 그 차의 도착과 오주차
+    판정은 B02와 E00의 감시가 맡고 있고, 여기서 먼저 기록을 옮겨 버리면
+    '엉뚱한 데 세웠다'는 사실이 사라진다. 도착 판정이 끝난 뒤부터 이 함수가
+    맡는다.
+
+    Args:
+        observations: [(차량번호 또는 None, (x_cm, y_cm)), ...]
+                      멈춰 있는 차만 넘길 것. 지나가는 차까지 넣으면 통로를
+                      지나칠 때마다 옆 자리가 찼다 비었다 한다.
+        radius_cm:    자리 중심에서 이 거리 안이면 그 자리에 선 것으로 본다.
+
+    Returns:
+        바뀐 것 목록 [(구역ID, "full"|"empty", 차량번호 또는 None), ...]
+    """
+    changes = []
+
+    # 배정만 해두고 아직 가는 중인 자리는 건드리지 않는다. 아직 아무도
+    # 서 있지 않은 것이 정상이고, 여기서 비우면 다음 차에게 같은 자리를
+    # 또 배정해 두 대가 같은 곳으로 간다.
+    guided = {car_id for car_id, info in cars_info.items()
+              if info.get("spot_id") and not info.get("parked")}
+    reserved = {cars_info[car_id]["spot_id"] for car_id in guided}
+
+    # 1) 어느 자리에 누가 서 있는지
+    occupied = {}
+    for car_id, world_pos in observations:
+        if car_id in guided:
+            continue        # 안내 중인 차. 도착 판정이 끝나야 여기서 다룬다.
+        spot_id, _ = find_nearest_spot(world_pos, max_distance_cm=radius_cm)
+        if spot_id is None or spot_id in reserved:
+            continue        # 통로 한가운데이거나, 다른 차에게 배정해 둔 자리
+        # 번호를 아는 차가 우선이다. 같은 자리에 번호 없는 트랙이 겹쳐
+        # 잡히는 일이 있는데, 그때 번호 쪽을 버리면 출차를 못 한다.
+        if occupied.get(spot_id) is None:
+            occupied[spot_id] = car_id
+
+    # 2) 기록을 실제 자리에 맞춘다.
+    #
+    # 옮길 자리를 한꺼번에 정리하고 나서 채운다. 한 대씩 옮기면 차들이
+    # 자리를 맞바꾼 경우(1111이 D-2로, 2222가 D-3으로...)에 "그 자리는 이미
+    # 다른 차가 쓰고 있다"며 아무도 못 옮기고 그대로 굳는다.
+    moving = {car_id: spot_id for spot_id, car_id in occupied.items()
+              if car_id and cars_info.get(car_id, {}).get("spot_id") != spot_id}
+    for car_id in moving:
+        info = cars_info.get(car_id)
+        if info and info.get("spot_id") in spot_status:
+            spot_status[info["spot_id"]] = "empty"
+
+    for spot_id, car_id in occupied.items():
+        if car_id is None:
+            # 번호를 못 읽은 차가 서 있다. 누구인지는 몰라도 그 자리에 차가
+            # 있다는 사실은 같으므로 채워 둔다. (출차는 되지 않는다)
+            if spot_status.get(spot_id) != "full":
+                changes.append((spot_id, "full", None))
+            spot_status[spot_id] = "full"
+            continue
+
+        info = cars_info.get(car_id)
+        if info is None:
+            # 입차 기록이 없는 차가 자리에 서 있다. 시스템이 켜지기 전부터
+            # 있었거나 수신을 놓친 차다. 요금 계산이 가능하도록 기록을
+            # 만들어 두되, 입차 시각은 지금 처음 본 때로 잡는다.
+            cars_info[car_id] = {
+                "spot_id": spot_id,
+                "entry_time": datetime.now(),
+                "car_type": get_car_type(car_id),
+                "parked": True,
+            }
+            changes.append((spot_id, "full", car_id))
+        else:
+            if info.get("spot_id") != spot_id:
+                changes.append((spot_id, "full", car_id))
+            info["spot_id"] = spot_id
+            info["parked"] = True
+        spot_status[spot_id] = "full"
+
+    # 3) 아무도 없는 자리를 비운다
+    #
+    # 기록에 주인이 있는 자리는 그 차가 지금 어딘가에서 보일 때만 비운다.
+    # 보이지 않는 것은 가려졌거나 검출을 놓친 것일 수 있는데, 그때 비우면
+    # 세워둔 차 위로 다른 차를 보내게 된다. 그 차가 다른 자리에서 보였다면
+    # 위 2)에서 기록이 이미 옮겨졌으므로 이 자리는 주인이 없다.
+    holder_of = {info["spot_id"]: car_id for car_id, info in cars_info.items()
+                 if info.get("spot_id")}
+    seen = {car_id for car_id, _ in observations if car_id}
+
+    for spot_id in spot_status:
+        if spot_id in occupied or spot_id in reserved:
+            continue
+        holder = holder_of.get(spot_id)
+        if holder is not None and holder not in seen:
+            continue
+        if spot_status.get(spot_id) == "full":
+            spot_status[spot_id] = "empty"
+            changes.append((spot_id, "empty", holder))
+        if holder is not None:
+            # 그 차는 지금 통로에 있다. 기록을 자리에서 떼어 놓지 않으면
+            # 이 자리를 새 차에게 배정한 뒤 옛 차가 출차할 때 남의 자리를
+            # 비워 버린다. 입차 시각은 그대로 두어 요금 계산은 살려 둔다.
+            cars_info[holder]["spot_id"] = None
+            cars_info[holder]["parked"] = False
+
+    return changes
+
+
 def relocate_car(car_id, new_spot_id):
     """
     차량의 주차 기록을 실제로 세워진 자리로 옮긴다.
@@ -407,8 +526,11 @@ def remove_car(car_id):
     
     # 저장소에서 제거 및 상태 변경
     del cars_info[car_id]
-    spot_status[spot_id] = "empty"
-    
+    # 자리를 뜬 채 통로에 있던 차는 spot_id가 비어 있다. (sync_spot_occupancy)
+    # 그때 spot_status를 건드리면 남의 자리를 비우거나 KeyError가 난다.
+    if spot_id in spot_status:
+        spot_status[spot_id] = "empty"
+
     return spot_id, fee, duration_minutes
 
 def print_all_parked():

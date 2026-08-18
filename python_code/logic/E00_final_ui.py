@@ -40,6 +40,8 @@ E00_final_ui : 최종 통합 관제 화면
 
 import sys
 import os
+import math
+import time
 import threading
 from collections import deque
 from datetime import datetime
@@ -102,6 +104,24 @@ CONFIG = {
     # 여기서는 어느 자리인지 몰라 '자리를 파악하지 못했습니다'만 띄우는
     # 상황이 그것이다. 한 값에서 가져오면 그런 어긋남이 생길 수 없다.
     "MISPARK_MAX_DIST_CM": B02_CONFIG['SINGLE_ACTIVE']['STUCK_SPOT_RADIUS_CM'],
+
+    # --- 카메라로 자리 점유 맞추기 -------------------------------------
+    # 켜면 '지금 카메라에 보이는 것'이 자리 점유의 기준이 된다.
+    #
+    # 미리 세워둔 차 목록(car_data의 INITIAL_PARKED)은 프로그램이 뜰 때의
+    # 선언일 뿐이라, 실물 차를 옮기면 기록과 어긋난다. 그러면 빈자리 배정이
+    # 실제로 빈 곳이 아니라 기록상 빈 곳으로 가서, 옮겨 세운 자리로 다른
+    # 차를 보내게 된다. 카메라가 보고 있는 것을 따르면 그 어긋남이 없다.
+    "CAMERA_OCCUPANCY": True,
+
+    # 자리 중심에서 이 거리 안에 멈춰 있으면 그 자리에 선 것으로 본다.
+    # B02가 정지한 차를 주차로 인정하는 반경과 같은 값을 쓴다.
+    "OCCUPY_RADIUS_CM": B02_CONFIG['SINGLE_ACTIVE']['STUCK_SPOT_RADIUS_CM'],
+
+    # 이만큼 안 움직인 차만 '서 있다'고 본다.
+    # 지나가는 차까지 세면 통로를 지날 때마다 옆 자리가 찼다 비었다 한다.
+    "OCCUPY_STILL_SEC": 2.0,
+    "OCCUPY_MOVE_CM": 3.0,
 }
 
 
@@ -218,6 +238,8 @@ class ParkingWatcher:
         self._lock = threading.Lock()
 
         self._last_world = {}      # {차량번호: (x_cm, y_cm)} 마지막으로 본 위치
+        # {키: (위치, 그 자리에 선 시각)} 얼마나 안 움직였는지 재는 데 쓴다
+        self._still_since = {}
         self._parked_seen = {}     # {차량번호: bool} 직전 tick의 parked 값
         self._events = deque(maxlen=CONFIG['EVENT_LOG_MAX'])
         self._latest = None        # 화면 하단에 크게 띄울 가장 최근 안내
@@ -265,6 +287,12 @@ class ParkingWatcher:
             with self._lock:
                 self._last_world[car_id] = (pos[0], pos[1])
 
+        # 1-b) 카메라가 보는 대로 자리 점유를 맞춘다.
+        #      좌표계가 서 있을 때만 한다. 보정 전에는 world_pos가 이미지
+        #      픽셀이라 cm 기준인 반경 판정이 뜻을 잃는다.
+        if CONFIG['CAMERA_OCCUPANCY'] and mapper.is_ready():
+            self._sync_occupancy(pipeline, mapper)
+
         # 2) parked가 False -> True로 바뀐 차를 찾는다
         for car_id, info in list(cars_info.items()):
             parked = bool(info.get("parked"))
@@ -279,6 +307,50 @@ class ParkingWatcher:
                 del self._parked_seen[car_id]
                 with self._lock:
                     self._last_world.pop(car_id, None)
+
+    def _sync_occupancy(self, pipeline, mapper):
+        """
+        멈춰 있는 차를 모아 A01에 넘겨 자리 점유를 맞춘다.
+
+        움직이는 차를 세면 안 된다. 통로를 지나가는 차도 자리 옆을 스치므로,
+        그 순간마다 옆 자리가 찼다 비었다 하면서 배정이 튄다. 그래서 위치가
+        OCCUPY_MOVE_CM 안에서 OCCUPY_STILL_SEC 이상 머문 차만 넘긴다.
+
+        번호를 못 읽은 트랙도 넘긴다. 누구인지는 몰라도 그 자리에 차가 서
+        있다는 사실은 같고, 그 자리로 다른 차를 보내면 안 되기 때문이다.
+        """
+        from logic.A01_parking_manager import sync_spot_occupancy
+
+        now = time.time()
+        move_limit = CONFIG['OCCUPY_MOVE_CM']
+        still_sec = CONFIG['OCCUPY_STILL_SEC']
+
+        observations = []
+        alive = set()
+        for nav in pipeline.latest_nav:
+            pos = nav.get("world_pos")
+            if pos is None:
+                continue
+            pos = mapper.pixel_to_cm(pos) or pos
+            car_id = nav.get("car_id")
+            key = car_id or f"#{nav.get('track_id')}"
+            alive.add(key)
+
+            since = self._still_since.get(key)
+            if since is None or math.dist(since[0], pos) > move_limit:
+                self._still_since[key] = (pos, now)      # 방금 움직였다
+                continue
+            if now - since[1] >= still_sec:
+                observations.append((car_id, pos))
+
+        for key in list(self._still_since):
+            if key not in alive:
+                del self._still_since[key]
+
+        for change in sync_spot_occupancy(observations, CONFIG['OCCUPY_RADIUS_CM']):
+            spot_id, state, car_id = change
+            who = f" ({car_id})" if car_id else ""
+            print(f"[자리 점유] {spot_id} -> {'차 있음' if state == 'full' else '비었음'}{who}")
 
     def _handle_parked(self, car_id, info):
         """주차 완료 전이를 처리한다. 정상인지 오주차인지 판정하고 기록한다."""
