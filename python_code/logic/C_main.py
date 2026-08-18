@@ -792,7 +792,14 @@ if __name__ == '__main__':
 
     print(f"\n[INFO] Flask 웹 서버를 시작합니다. http://젯슨IP:{CONFIG['WEB_PORT']}/ 으로 접속하세요.")
     try:
-        app.run(host=CONFIG['WEB_HOST'], port=CONFIG['WEB_PORT'], debug=False)
+        # threaded=True를 명시한다. 이 화면은 영상 두 개를 MJPEG로 계속
+        # 흘려보내는데, 한 번에 하나만 처리하는 서버라면 그 스트림이 서버를
+        # 통째로 붙들어 나머지 요청이 영영 응답하지 않는다. 브라우저에서는
+        # 페이지가 안 열리고 로딩만 도는 것으로 보인다.
+        # (Flask 1.0부터 기본값이 True지만, 젯슨에 apt로 깔린 옛 버전은
+        #  False라서 실제로 이 증상이 난다)
+        app.run(host=CONFIG['WEB_HOST'], port=CONFIG['WEB_PORT'],
+                debug=False, threaded=True)
     finally:
         cap.release()
         print("[INFO] 카메라를 해제하고 종료합니다.")
