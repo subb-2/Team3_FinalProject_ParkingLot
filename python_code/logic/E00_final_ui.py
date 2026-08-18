@@ -122,6 +122,11 @@ CONFIG = {
     # 지나가는 차까지 세면 통로를 지날 때마다 옆 자리가 찼다 비었다 한다.
     "OCCUPY_STILL_SEC": 2.0,
     "OCCUPY_MOVE_CM": 3.0,
+
+    # 자리가 이 시간 동안 계속 비어 보여야 비운 것으로 친다.
+    # 손으로 차를 옮기는 동안에는 검출이 흔들리므로 한두 프레임으로
+    # 판단하면 안 되고, 그렇다고 길게 잡으면 옮긴 것이 화면에 늦게 뜬다.
+    "OCCUPY_EMPTY_SEC": 3.0,
 }
 
 
@@ -347,7 +352,13 @@ class ParkingWatcher:
             if key not in alive:
                 del self._still_since[key]
 
-        for change in sync_spot_occupancy(observations, CONFIG['OCCUPY_RADIUS_CM']):
+        # 검출이 통째로 멈춘 것과 주차장이 빈 것은 다르다. 트랙이 하나도
+        # 없으면 자리를 비우지 않는다.
+        sensing = bool(pipeline.latest_tracks)
+        for change in sync_spot_occupancy(observations,
+                                          CONFIG['OCCUPY_RADIUS_CM'],
+                                          empty_sec=CONFIG['OCCUPY_EMPTY_SEC'],
+                                          sensing=sensing):
             spot_id, state, car_id = change
             who = f" ({car_id})" if car_id else ""
             print(f"[자리 점유] {spot_id} -> {'차 있음' if state == 'full' else '비었음'}{who}")

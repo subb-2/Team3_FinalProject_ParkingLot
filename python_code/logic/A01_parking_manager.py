@@ -1,6 +1,7 @@
 import sys
 import os
 import math
+import time
 # 상위 디렉토리(python_code)를 import 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -268,7 +269,11 @@ def find_nearest_spot(world_pos, exclude=None, max_distance_cm=None):
     return best_id, best_dist
 
 
-def sync_spot_occupancy(observations, radius_cm):
+# 자리가 언제부터 비어 보였는지. sync_spot_occupancy만 쓴다.
+_spot_empty_since = {}
+
+
+def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
     """
     카메라가 본 대로 자리 점유 상태를 맞춘다.
 
@@ -292,6 +297,12 @@ def sync_spot_occupancy(observations, radius_cm):
                       멈춰 있는 차만 넘길 것. 지나가는 차까지 넣으면 통로를
                       지나칠 때마다 옆 자리가 찼다 비었다 한다.
         radius_cm:    자리 중심에서 이 거리 안이면 그 자리에 선 것으로 본다.
+        empty_sec:    이 시간 동안 계속 아무도 없어야 자리를 비운다.
+                      검출이 한두 프레임 흔들렸다고 바로 비우면, 세워둔 차
+                      위로 다음 차를 보내게 된다.
+        sensing:      지금 카메라가 차를 하나라도 보고 있는가. 아니면 자리를
+                      비우지 않는다. 검출이 통째로 멈춘 것과 주차장이 빈 것을
+                      구별할 수 없기 때문이다.
 
     Returns:
         바뀐 것 목록 [(구역ID, "full"|"empty", 차량번호 또는 None), ...]
@@ -370,25 +381,33 @@ def sync_spot_occupancy(observations, radius_cm):
 
     # 3) 아무도 없는 자리를 비운다
     #
-    # 기록에 주인이 있는 자리는 그 차가 지금 어딘가에서 보일 때만 비운다.
-    # 보이지 않는 것은 가려졌거나 검출을 놓친 것일 수 있는데, 그때 비우면
-    # 세워둔 차 위로 다른 차를 보내게 된다. 그 차가 다른 자리에서 보였다면
-    # 위 2)에서 기록이 이미 옮겨졌으므로 이 자리는 주인이 없다.
+    # 기준은 '그 차가 어디 있는가'가 아니라 '이 자리에 지금 차가 있는가'다.
+    # 예전에는 기록에 주인이 있는 자리는 그 차가 다른 데서 보일 때만 비웠는데,
+    # 손으로 차를 옮기면 그 사이 번호 추적이 끊기는 일이 잦다. 그러면 옮겨간
+    # 자리는 채워지는데 원래 자리는 영영 차 있는 것으로 남아, 옮기기 전과
+    # 달라지는 것이 없었다.
+    #
+    # 대신 시간으로 거른다. 검출이 한두 프레임 흔들린 것과 정말로 자리가 빈
+    # 것은 얼마나 오래 비어 보이는지로 갈린다.
     holder_of = {info["spot_id"]: car_id for car_id, info in cars_info.items()
                  if info.get("spot_id")}
-    seen = {car_id for car_id, _ in observations if car_id}
+    now = time.monotonic()
 
     for spot_id in spot_status:
         if spot_id in near or spot_id in reserved:
+            _spot_empty_since.pop(spot_id, None)
             continue
+        if not sensing:
+            continue        # 카메라가 아무것도 못 보는 중. 판단하지 않는다.
+        since = _spot_empty_since.setdefault(spot_id, now)
+        if now - since < empty_sec:
+            continue        # 아직 잠깐 안 보이는 것일 수 있다
         holder = holder_of.get(spot_id)
-        if holder is not None and holder not in seen:
-            continue
         if spot_status.get(spot_id) == "full":
             spot_status[spot_id] = "empty"
             changes.append((spot_id, "empty", holder))
         if holder is not None:
-            # 그 차는 지금 통로에 있다. 기록을 자리에서 떼어 놓지 않으면
+            # 그 자리에 있던 차는 옮겨졌다. 기록을 자리에서 떼어 놓지 않으면
             # 이 자리를 새 차에게 배정한 뒤 옛 차가 출차할 때 남의 자리를
             # 비워 버린다. 입차 시각은 그대로 두어 요금 계산은 살려 둔다.
             cars_info[holder]["spot_id"] = None
