@@ -63,3 +63,10 @@ python_code/marker_debug.jpg
 *.engine
 *.onnx
 *.pt
+
+# 기둥 보정 좌표.
+# 카메라를 어디에 어떤 각도로 달았는지에 묶인 값이라 기기마다 다르다.
+# 저장소가 들고 있으면 젯슨에서 /calibrate로 다시 찍을 때마다 수정된
+# 파일이 되어, 코드를 받을 때마다 충돌한다. 기기에 두고 각자 관리한다.
+# (없으면 프로그램이 /calibrate 페이지로 안내한다)
+python_code/config/pillar_pixels.json
