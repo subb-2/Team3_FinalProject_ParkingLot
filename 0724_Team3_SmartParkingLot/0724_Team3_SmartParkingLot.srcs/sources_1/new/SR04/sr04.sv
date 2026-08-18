@@ -4,16 +4,23 @@ module sr04 (
     input  logic clk,
     input  logic pclk,
     input  logic reset,
+    
+    // HW
     input  logic o_echo,
+    output logic o_trigger,
+
+    // CNN
     input  logic i_cnn_done,
+
+    // VGA
+    output logic o_vga_start,
     input  logic i_vga_done,
     
-    output logic o_trigger,
-    output logic o_capture,
+    // SG90
     output logic o_close
 );
 
-    logic [11:0] w_distance, s_distance; // 센서에서 측정된 거리를 FSM으로 전달하는 선
+    logic [11:0] w_distance, s_distance;
 
     logic s_cnn_done;
     logic w_distance_val, s_distance_val;
@@ -56,8 +63,8 @@ module sr04 (
         .i_distance_val(s_distance_val),
         .i_distance(s_distance),
         .i_cnn_done(s_cnn_done),
+        .o_vga_start(o_vga_start),
         .i_vga_done(i_vga_done),
-        .o_capture(o_capture),
         .o_close(o_close)
     );
 
@@ -66,11 +73,19 @@ endmodule
 module sr04_fsm (
     input  logic        clk,
     input  logic        reset,
+
+    // SR04 HW
     input  logic        i_distance_val,
     input  logic [11:0] i_distance,
+
+    // CNN
     input  logic        i_cnn_done,
+
+    // VGA
+    output logic        o_vga_start,
     input  logic        i_vga_done,
-    output logic        o_capture,
+
+    // SG90
     output logic        o_close
 );
 
@@ -92,12 +107,11 @@ module sr04_fsm (
     logic [31:0] delay_cnt;
     logic [2:0]  gone_cnt;
 
-
     always_ff @(posedge clk, posedge reset) begin
         if (reset) begin
             state <= IDLE;
-            delay_cnt <= 32'd0;
-            gone_cnt  <= 3'b000;
+            delay_cnt   <= 32'd0;
+            gone_cnt    <= 3'b000;
         end else begin
             case (state)
                 IDLE: begin
@@ -157,48 +171,47 @@ module sr04_fsm (
 
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
-            o_capture <= 1'b0;
-            o_close <= 1'b1;
+            o_close     <= 1'b1;
+            o_vga_start <= 1'b0;
         end else begin
             case (state)
                 IDLE: begin
-                    o_close   <= 1'b1;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b1;
                 end
                 WAIT: begin
                     o_close <= 1'b1;
                     if (delay_cnt == DELAY - 1) begin
-                        o_capture <= 1'b1;
+                        o_vga_start <= 1'b1;
                     end else begin
-                        o_capture <= 1'b0;
+                        o_vga_start <= 1'b0;
                     end
                 end
                 WAIT_VGA: begin
-                    o_close   <= 1'b1;
-                    o_capture <= 1'b1;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b1;
                 end
                 WAIT_CNN: begin
-                    o_close   <= 1'b1;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b1;
                 end
                 OPEN: begin
-                    o_close   <= 1'b0;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b0;
                 end
                 WAIT_GONE: begin
-                    o_close   <= 1'b0;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b0;
                 end
                 WAIT_DELAY: begin
-                    o_close   <= 1'b0;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b0;
                 end
                 default: begin
-                    o_close   <= 1'b1;
-                    o_capture <= 1'b0;
+                    o_vga_start <= 1'b0;
+                    o_close     <= 1'b1;
                 end
             endcase
         end
     end
-
 endmodule
