@@ -374,16 +374,14 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
 
         info = cars_info.get(car_id)
         if info is None:
-            # 입차 기록이 없는 차가 자리에 서 있다. 시스템이 켜지기 전부터
-            # 있었거나 수신을 놓친 차다. 요금 계산이 가능하도록 기록을
-            # 만들어 두되, 입차 시각은 지금 처음 본 때로 잡는다.
-            cars_info[car_id] = {
-                "spot_id": spot_id,
-                "entry_time": datetime.now(),
-                "car_type": get_car_type(car_id),
-                "parked": True,
-            }
-            changes.append((spot_id, "full", car_id))
+            # 번호는 붙어 있는데 입차 기록이 없다. 방금 출차한 차가 아직
+            # 자리에 서 있는 경우가 대부분이다. 자리는 실제로 차 있으므로
+            # 채우되, 기록은 만들지 않는다. 만들면 출차한 차가 곧바로 다시
+            # 입차한 것이 되어 요금이 새로 붙는다. 입차는 수신으로만 생긴다.
+            if spot_status.get(spot_id) != "full":
+                changes.append((spot_id, "full", None))
+            spot_status[spot_id] = "full"
+            continue
         else:
             if info.get("spot_id") != spot_id:
                 changes.append((spot_id, "full", car_id))
