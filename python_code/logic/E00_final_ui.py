@@ -259,7 +259,7 @@ class ParkingWatcher:
         생성 시점과 감시 시작 시점 사이에 입차가 들어와도 어긋나지 않게 하기
         위해서다.
         """
-        for car_id, info in cars_info.items():
+        for car_id, info in list(cars_info.items()):
             self._parked_seen[car_id] = bool(info.get("parked"))
 
     # --- 감시 루프 -------------------------------------------------------
@@ -555,7 +555,7 @@ def _build_track_items(pipeline):
     # 검출만 놓친 것인지 알 수 없다. 자리에 있다는 것은 배정 기록이 알고
     # 있으므로 그대로 두고, 추적이 없다는 사실만 track_id를 비워 표시한다.
     seen = {t["car_id"] for t in items if t["car_id"]}
-    for car_id, info in cars_info.items():
+    for car_id, info in list(cars_info.items()):
         if car_id in seen or not info.get("parked"):
             continue
         label, css = TRACK_STATE["parked"]
@@ -636,7 +636,7 @@ def _build_cars_on_map(pipeline):
     # 한 번 흔들릴 때마다 점이 사라지면 화면만 깜빡인다.
     # (자리를 뜨면 감시 스레드가 parked를 풀어 주므로 점도 같이 사라진다)
     seen = {c["car_id"] for c in cars if c["car_id"]}
-    for car_id, info in cars_info.items():
+    for car_id, info in list(cars_info.items()):
         if car_id in seen or not info.get("parked"):
             continue
         spot_pos = SPOT_WORLD_POS.get(info.get("spot_id"))
@@ -768,21 +768,25 @@ def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
 
     # 배정은 됐지만 아직 도착하지 않은 자리. 여기가 깜빡인다.
     assigned_pending = {}
-    for car_id, info in cars_info.items():
+    # 사본을 돈다. 감시 스레드가 카메라를 보고 cars_info를 고치는 중이라
+    # 원본을 그대로 돌면 "dictionary changed size during iteration"으로
+    # 상태 요청이 통째로 실패한다. 화면에서는 갱신이 멈춘 것으로 보인다.
+    for car_id, info in list(cars_info.items()):
         if not info.get("parked") and info.get("spot_id"):
             assigned_pending[info["spot_id"]] = car_id
 
     # 자리별 상태
+    snapshot = list(cars_info.items())
     spots = {}
-    for spot_id, status in spot_status.items():
-        occupant = next((cid for cid, i in cars_info.items()
+    for spot_id, status in list(spot_status.items()):
+        occupant = next((cid for cid, i in snapshot
                          if i.get("spot_id") == spot_id), None)
         spots[spot_id] = {
             "status": status,
             "car_id": occupant,
             # 배정만 된 상태(가는 중)와 실제로 주차를 마친 상태를 구분한다.
             # 둘 다 spot_status는 full이지만 화면에서는 달리 보여야 한다.
-            "parked": bool(occupant and cars_info[occupant].get("parked")),
+            "parked": bool(occupant and cars_info.get(occupant, {}).get("parked")),
             "pending": spot_id in assigned_pending,
             "type_name": SPOT_TYPE_NAME.get(SPOT_TYPE_OF.get(spot_id), "?"),
         }

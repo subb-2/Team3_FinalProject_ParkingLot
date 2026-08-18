@@ -306,13 +306,23 @@ def sync_spot_occupancy(observations, radius_cm):
     reserved = {cars_info[car_id]["spot_id"] for car_id in guided}
 
     # 1) 어느 자리에 누가 서 있는지
+    #
+    # 채울 때와 비울 때의 기준을 다르게 둔다. 하나로 두면 딱 그 거리에 선
+    # 차 때문에 검출이 1cm 흔들릴 때마다 자리가 찼다 비었다 한다.
+    # 채우는 것은 radius_cm 안, 비우는 것은 그 1.5배 밖일 때만이다.
+    release_cm = radius_cm * 1.5
     occupied = {}
+    near = set()
     for car_id, world_pos in observations:
         if car_id in guided:
             continue        # 안내 중인 차. 도착 판정이 끝나야 여기서 다룬다.
-        spot_id, _ = find_nearest_spot(world_pos, max_distance_cm=radius_cm)
+        spot_id, distance = find_nearest_spot(world_pos,
+                                              max_distance_cm=release_cm)
         if spot_id is None or spot_id in reserved:
             continue        # 통로 한가운데이거나, 다른 차에게 배정해 둔 자리
+        near.add(spot_id)
+        if distance > radius_cm:
+            continue        # 자리 근처이긴 하나 그 자리에 섰다고 보기엔 멀다
         # 번호를 아는 차가 우선이다. 같은 자리에 번호 없는 트랙이 겹쳐
         # 잡히는 일이 있는데, 그때 번호 쪽을 버리면 출차를 못 한다.
         if occupied.get(spot_id) is None:
@@ -369,7 +379,7 @@ def sync_spot_occupancy(observations, radius_cm):
     seen = {car_id for car_id, _ in observations if car_id}
 
     for spot_id in spot_status:
-        if spot_id in occupied or spot_id in reserved:
+        if spot_id in near or spot_id in reserved:
             continue
         holder = holder_of.get(spot_id)
         if holder is not None and holder not in seen:
