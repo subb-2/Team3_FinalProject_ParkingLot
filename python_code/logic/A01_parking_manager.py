@@ -272,6 +272,18 @@ def find_nearest_spot(world_pos, exclude=None, max_distance_cm=None):
 # 자리가 언제부터 비어 보였는지. sync_spot_occupancy만 쓴다.
 _spot_empty_since = {}
 
+# 번호를 잃어버린 차. {차량번호: (원래 자리, 잃어버린 시각)}
+#
+# 손으로 차를 옮기면 그 사이 추적이 끊긴다. 다시 잡힌 트랙에는 번호가 없고
+# (화면에 WAIT로 뜬다), 번호를 붙일 방법도 없다. B02는 '기록된 자리 근처에
+# 서 있는 차'에 번호를 붙이는데, 그 차는 이제 다른 자리에 있기 때문이다.
+#
+# 그래서 자리를 잃은 번호를 잠시 들고 있다가, 번호 없는 차가 빈자리에 새로
+# 서면 짝지어 준다. 기록이 실물을 따라가면 B02의 주차 결합이 다시 걸려
+# 화면에도 번호가 돌아온다.
+_orphan_cars = {}
+_ORPHAN_TTL_SEC = 30.0
+
 
 def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
     """
@@ -391,6 +403,7 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
     # 것은 얼마나 오래 비어 보이는지로 갈린다.
     holder_of = {info["spot_id"]: car_id for car_id, info in cars_info.items()
                  if info.get("spot_id")}
+    seen = {car_id for car_id, _ in observations if car_id}
     now = time.monotonic()
 
     for spot_id in spot_status:
@@ -412,6 +425,62 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
             # 비워 버린다. 입차 시각은 그대로 두어 요금 계산은 살려 둔다.
             cars_info[holder]["spot_id"] = None
             cars_info[holder]["parked"] = False
+            if holder not in seen:
+                # 어디에서도 안 보인다. 옮기는 동안 추적이 끊긴 것이다.
+                # 번호를 들고 있다가 아래에서 새 자리와 짝지어 준다.
+                _orphan_cars[holder] = (spot_id, now)
+
+    # 4) 번호를 잃은 차와, 번호 없이 자리에 선 차를 짝지어 준다
+    changes += _adopt_orphans(occupied, now)
+
+    return changes
+
+
+def _adopt_orphans(occupied, now):
+    """
+    번호 없이 자리에 선 차에게, 방금 자리를 잃은 번호를 붙여 준다.
+
+    손으로 차를 옮겼을 때 벌어지는 일이다. 옮기는 동안 추적이 끊겨 새 트랙에
+    번호가 없고(WAIT), 원래 자리는 비었다고 판정되어 그 번호가 자리를 잃는다.
+    둘은 같은 차이므로 다시 묶어야 한다.
+
+    짝은 '원래 자리에서 가장 가까운 새 자리'로 정한다. 여러 대를 한꺼번에
+    옮기면 어느 것이 어느 것인지 알 방법이 없으니, 가장 그럴듯한 쪽을 고른다.
+    번호를 잘못 붙이는 것보다 안 붙이는 것이 나은 경우를 위해 시간 제한
+    (_ORPHAN_TTL_SEC)을 두어, 오래된 것은 그냥 버린다.
+    """
+    for car_id, (_, lost_at) in list(_orphan_cars.items()):
+        if now - lost_at > _ORPHAN_TTL_SEC or car_id not in cars_info:
+            del _orphan_cars[car_id]
+
+    changes = []
+    for spot_id, car_id in occupied.items():
+        if car_id is not None or not _orphan_cars:
+            continue
+        # 이미 기록상 임자가 있는 자리면 건드리지 않는다
+        if any(info.get("spot_id") == spot_id for info in cars_info.values()):
+            continue
+
+        best, best_dist = None, None
+        for orphan, (old_spot, _) in _orphan_cars.items():
+            old_pos = SPOT_WORLD_POS.get(old_spot)
+            new_pos = SPOT_WORLD_POS.get(spot_id)
+            if old_pos is None or new_pos is None:
+                continue
+            dist = math.hypot(old_pos[0] - new_pos[0], old_pos[1] - new_pos[1])
+            if best_dist is None or dist < best_dist:
+                best, best_dist = orphan, dist
+
+        if best is None:
+            continue
+
+        del _orphan_cars[best]
+        cars_info[best]["spot_id"] = spot_id
+        cars_info[best]["parked"] = True
+        spot_status[spot_id] = "full"
+        changes.append((spot_id, "full", best))
+        print(f"[번호 되찾음] {spot_id}에 선 차를 '{best}'로 봅니다. "
+              f"(원래 자리에서 {best_dist:.0f}cm)")
 
     return changes
 
