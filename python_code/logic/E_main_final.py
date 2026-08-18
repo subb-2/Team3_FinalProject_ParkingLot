@@ -46,6 +46,8 @@ from logic.E00_final_ui import (
     build_lot_layout, build_ui_state, render_page,
 )
 from logic.B02_car_mot import car_number_fifo
+# 시작 시점에 배정된 자리가 있는지 확인하는 데만 쓴다. (report_assignments)
+from data.car_data import cars_info
 
 # 설정 (Configuration)
 CONFIG = {
@@ -135,6 +137,34 @@ def register_test_cars(rx_feed):
           f"등록했습니다. (UART가 꺼져 있을 때만)")
 
 
+def report_assignments():
+    """
+    시작 시점에 이미 배정되어 있는 자리를 터미널에 적는다.
+
+    화면에서 깜빡이는 자리는 '배정은 됐는데 아직 도착하지 않은 차'다. 그것이
+    어디서 왔는지 화면만 보고는 알 수 없어서, Zybo에서 아무것도 안 왔는데
+    자리가 깜빡인다는 이야기가 나온다. 시작할 때 한 줄 적어 두면 그 자리가
+    프로그램이 만든 것인지 실제 수신으로 생긴 것인지 바로 갈린다.
+
+    미리 세워둔 차(INITIAL_PARKED)는 여기 해당하지 않는다. 그쪽은 주차까지
+    끝난 상태라 깜빡이지 않고 채워진 색으로만 보인다.
+    """
+    pending = {info["spot_id"]: car_id for car_id, info in cars_info.items()
+               if info.get("spot_id") and not info.get("parked")}
+    parked = sum(1 for info in cars_info.values() if info.get("parked"))
+
+    print(f"  미리 세워둔 차 {parked}대 (자리 채움, 깜빡이지 않음)")
+    if not pending:
+        print("  배정 대기 중인 자리 없음. 수신이 와야 자리가 깜빡입니다.")
+        return
+
+    where = ", ".join(f"{spot}<-'{car}'" for spot, car in sorted(pending.items()))
+    print(f"  [주의] 시작부터 배정된 자리가 있습니다: {where}")
+    if CONFIG['ENABLE_UART']:
+        print("         UART를 켰는데 이러면 수신 말고 다른 경로로 들어온 것입니다.")
+        print("         (data/car_data.py의 TEST_PRESET_CAR_NUMBERS, /enqueue 확인)")
+
+
 def start_watcher(pipeline, watcher):
     """
     [4단계] 주차 완료와 오주차를 감시하는 스레드를 띄운다.
@@ -197,6 +227,7 @@ def main():
     pipeline = build_pipeline(cap)
 
     register_test_cars(rx_feed)
+    report_assignments()
 
     runner = PipelineRunner(pipeline)
     runner.start()
