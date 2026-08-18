@@ -6,9 +6,15 @@ A00_uart_rx : Zybo(FPGA) → Jetson 차량번호 수신 모듈  [Wi-Fi(TCP) 버�
 - Zybo    : TCP 클라이언트 (Wi-Fi 모듈로 AP에 접속 후 Jetson IP:PORT로 접속)
 
 전송 데이터 포맷은 UART 버전과 동일한 2바이트 바이너리를 유지한다.
-  byte1 상위4비트 = 1번째 자리, byte1 하위4비트 = 2번째 자리
-  byte2 상위4비트 = 3번째 자리, byte2 하위4비트 = 4번째 자리
-  예) 0x12 0x34  ->  "1234"
+한 바이트에 두 자리를 담고, 낮은 자리 쪽 바이트를 먼저 보낸다.
+  먼저 온 바이트 : 상위4비트 = 3번째 자리, 하위4비트 = 4번째 자리
+  나중에 온 바이트: 상위4비트 = 1번째 자리, 하위4비트 = 2번째 자리
+  예) 0x34 0x12  ->  "1234"
+
+바이트 순서는 실물로 확인한 것이다. Zybo에서 1234를 보내면 이쪽에서
+0x34 0x12로 들어온다. 먼저 온 바이트를 앞자리로 읽으면 "3412"가 된다.
+Zybo 펌웨어의 순서가 바뀌면 아래 parse_car_id / build_car_packet 두 곳만
+같이 뒤집으면 된다.
 
 시리얼 구현이 필요하면 git 이력에서 꺼낼 것. (Wi-Fi 전환 전 버전)
 
@@ -60,24 +66,32 @@ def get_wifi_config():
 
 
 def parse_car_id(raw_data):
-    """2바이트 바이너리 데이터에서 4자리 차량 번호를 추출합니다."""
-    byte1 = raw_data[0]
-    byte2 = raw_data[1]
+    """
+    2바이트 바이너리 데이터에서 4자리 차량 번호를 추출합니다.
 
-    digit1 = (byte1 >> 4) & 0x0F
-    digit2 = byte1 & 0x0F
-    digit3 = (byte2 >> 4) & 0x0F
-    digit4 = byte2 & 0x0F
+    낮은 자리 쪽 바이트가 먼저 온다. 즉 먼저 온 바이트가 뒤 두 자리(3, 4번째),
+    나중에 온 바이트가 앞 두 자리(1, 2번째)다. 순서대로 읽으면 1234가 3412로
+    나온다. (모듈 첫머리 주석 참고)
 
-    return f"{digit1}{digit2}{digit3}{digit4}", byte1, byte2
+    Returns:
+        (차량번호 4자리 문자열, 먼저 온 바이트, 나중에 온 바이트)
+    """
+    low, high = raw_data[0], raw_data[1]
+
+    digit1 = (high >> 4) & 0x0F
+    digit2 = high & 0x0F
+    digit3 = (low >> 4) & 0x0F
+    digit4 = low & 0x0F
+
+    return f"{digit1}{digit2}{digit3}{digit4}", low, high
 
 
 def build_car_packet(car_id):
     """4자리 차량번호 문자열 -> 2바이트 패킷. (테스트 송신용 / parse_car_id의 역연산)"""
     d = f"{int(car_id):04d}"
-    byte1 = (int(d[0]) << 4) | int(d[1])
-    byte2 = (int(d[2]) << 4) | int(d[3])
-    return bytes([byte1, byte2])
+    high = (int(d[0]) << 4) | int(d[1])     # 앞 두 자리
+    low = (int(d[2]) << 4) | int(d[3])      # 뒤 두 자리
+    return bytes([low, high])               # 낮은 자리 쪽을 먼저 보낸다
 
 
 def _enable_keepalive(sock, idle=10, interval=5, count=3):
@@ -130,7 +144,7 @@ def add_rx_listener(callback):
     return callback
 
 
-def _notify_rx(role, car_id, byte1, byte2, result=None):
+def _notify_rx(role, car_id, first_byte, second_byte, result=None):
     """
     수신 사실을 등록된 리스너 전원에게 알린다.
 
@@ -140,14 +154,14 @@ def _notify_rx(role, car_id, byte1, byte2, result=None):
     전달되는 event_dict:
         role     : 'entry'(입차) 또는 'exit'(출차)
         car_id   : 4자리 차량번호 문자열
-        raw_hex  : "0x12 0x34" 형태의 원본 바이트 표기
+        raw_hex  : "0x34 0x12" 형태의 원본 바이트 표기 (받은 순서 그대로)
         time     : 수신 시각 (datetime)
         result   : 입차면 handle_car_entry의 결과 dict, 출차면 None
     """
     event = {
         "role": role,
         "car_id": car_id,
-        "raw_hex": f"0x{byte1:02X} 0x{byte2:02X}",
+        "raw_hex": f"0x{first_byte:02X} 0x{second_byte:02X}",
         "time": datetime.datetime.now(),
         "result": result,
     }
