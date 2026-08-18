@@ -18,6 +18,7 @@ TODO
 """
 
 import socket
+import select
 import threading
 import time
 import errno
@@ -79,20 +80,33 @@ def build_car_packet(car_id):
     return bytes([byte1, byte2])
 
 
-def _recv_exact(conn, size):
-    """소켓에서 정확히 size 바이트를 모을 때까지 읽는다. 연결이 끊기면 None 반환."""
-    buf = b''
-    while len(buf) < size:
+def _enable_keepalive(sock, idle=10, interval=5, count=3):
+    """
+    죽은 상대를 스스로 알아채도록 TCP keepalive를 켠다.
+
+    Zybo의 전원이 꺼지거나 Wi-Fi가 끊기면 FIN이 오지 않는다. 그러면 소켓은
+    멀쩡한 것처럼 남아서, 서버는 영영 오지 않을 2바이트를 기다리며 그 자리를
+    붙들고 있게 된다. Zybo를 다시 켜서 접속해도 서버는 이미 붙들려 있으니
+    받아주지 못한다. keepalive를 켜 두면 약 25초 안에 소켓이 오류로 끊겨
+    자리가 풀린다.
+
+    설정 이름은 리눅스 것이다. 없는 플랫폼에서는 조용히 건너뛴다.
+    (그래도 SO_KEEPALIVE 자체는 켜지므로 기본 주기로는 동작한다)
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    for name, value in (('TCP_KEEPIDLE', idle),
+                        ('TCP_KEEPINTVL', interval),
+                        ('TCP_KEEPCNT', count)):
+        option = getattr(socket, name, None)
+        if option is None:
+            continue
         try:
-            chunk = conn.recv(size - len(buf))
-        except socket.timeout:
-            continue          # 아직 안 왔을 뿐이므로 계속 대기
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
         except OSError:
-            return None       # 소켓이 닫힘
-        if not chunk:
-            return None       # 상대방이 연결을 종료함
-        buf += chunk
-    return buf
+            pass
 
 
 # 수신 이벤트 구독
@@ -192,7 +206,9 @@ def _serve_role(role, label, host, port, timeout, stop_event):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((host, port))
-        srv.listen(1)
+        # 대기열을 1로 두면, 한 자리가 붙들려 있을 때 들어오는 접속이 커널
+        # 단계에서 거절된다. Zybo 쪽에서는 '접속이 안 된다'로만 보인다.
+        srv.listen(4)
         srv.settimeout(timeout)
     except OSError as e:
         print(f"[에러] {label} 포트({port})를 열 수 없습니다: {e}")
@@ -211,31 +227,64 @@ def _serve_role(role, label, host, port, timeout, stop_event):
 
     print(f"[{label}] TCP 서버 대기 중: {host}:{port}")
 
+    # 접속을 받은 뒤에도 서버 소켓을 계속 지켜본다.
+    #
+    # 예전에는 한 번 받으면 그 연결이 끊길 때까지 accept로 돌아가지 않았다.
+    # Zybo가 리셋되거나 Wi-Fi가 끊겨 FIN 없이 사라지면 그 연결은 소켓 위에
+    # 그대로 남고, 서버는 오지 않을 2바이트를 기다리며 자리를 붙들고 있는다.
+    # 그 상태에서 Zybo가 다시 붙으려 하면 대기열이 차 있어 거절된다.
+    # 한쪽(입차)만 접속이 안 되는 증상이 이것이다.
+    #
+    # 새 접속이 오면 그것을 살아 있는 쪽으로 보고 이전 연결을 닫는다. Zybo는
+    # 역할마다 한 대이므로 두 연결이 동시에 의미 있는 경우가 없다.
+    conn = None
+    buf = b''
+
     while not stop_event.is_set():
-        # 1) Zybo 접속 대기
+        watch = [srv] if conn is None else [srv, conn]
         try:
-            conn, addr = srv.accept()
-        except socket.timeout:
-            continue
+            ready, _, _ = select.select(watch, [], [], timeout)
         except OSError:
             break
 
-        print(f"[{label}] Zybo 접속됨: {addr[0]}:{addr[1]}")
-        conn.settimeout(timeout)
+        if srv in ready:
+            try:
+                new_conn, addr = srv.accept()
+            except OSError:
+                break
+            _enable_keepalive(new_conn)
+            if conn is not None:
+                print(f"[{label}] 새 접속이 들어와 이전 연결을 닫습니다.")
+                conn.close()
+                buf = b''
+            conn = new_conn
+            print(f"[{label}] Zybo 접속됨: {addr[0]}:{addr[1]}")
 
-        # 2) 연결이 유지되는 동안 2바이트씩 계속 수신
+        if conn is None or conn not in ready:
+            continue
+
+        # 2바이트씩 끊어 읽는다. 한 번에 여러 대가 몰려와도, 반대로 한
+        # 바이트씩 쪼개져 와도 남는 것은 buf에 두고 다음에 이어 붙인다.
         try:
-            while not stop_event.is_set():
-                raw_data = _recv_exact(conn, 2)
-                if raw_data is None:
-                    break
-                _process_packet(role, raw_data)
-        except Exception as e:
+            chunk = conn.recv(64)
+        except OSError as e:
             print(f"[{label}] 수신 중 오류: {e}")
-        finally:
-            conn.close()
-            print(f"[{label}] Zybo 연결이 끊어졌습니다. 재접속 대기...")
+            chunk = b''
 
+        if not chunk:
+            conn.close()
+            conn = None
+            buf = b''
+            print(f"[{label}] Zybo 연결이 끊어졌습니다. 재접속 대기...")
+            continue
+
+        buf += chunk
+        while len(buf) >= 2:
+            _process_packet(role, buf[:2])
+            buf = buf[2:]
+
+    if conn is not None:
+        conn.close()
     srv.close()
     print(f"[{label}] 서버 소켓을 닫았습니다.")
 
@@ -298,9 +347,14 @@ def send_test_packet(role, car_id, host='127.0.0.1'):
 
 
 if __name__ == "__main__":
-    # python A00_uart_rx.py                    -> 수신 서버 실행
-    # python A00_uart_rx.py send entry 1234    -> 테스트 패킷 송신
+    # python A00_uart_rx.py                                 -> 수신 서버 실행
+    # python A00_uart_rx.py send entry 1234                 -> 자기 자신에게 송신
+    # python A00_uart_rx.py send entry 1234 192.168.0.50    -> 젯슨으로 송신
+    #
+    # 마지막 형태가 배선 점검용이다. PC에서 젯슨으로 쏴 보면 Zybo가 붙지
+    # 못하는 것이 네트워크 문제인지 Zybo 쪽 문제인지 바로 갈린다.
     if len(sys.argv) >= 4 and sys.argv[1] == 'send':
-        send_test_packet(sys.argv[2], sys.argv[3])
+        host = sys.argv[4] if len(sys.argv) >= 5 else '127.0.0.1'
+        send_test_packet(sys.argv[2], sys.argv[3], host=host)
     else:
         uart_rx_main()
