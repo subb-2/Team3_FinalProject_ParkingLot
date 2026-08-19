@@ -5,8 +5,8 @@ E00_final_ui : 최종 통합 관제 화면
 
     +-----------------------------+-----------------------------+
     | 1) 차량 번호 수신 및 저장       | 2) 주차장 CCTV               |
-    |   [수신]   -저장->  [대기열]   |                             |
-    |   [안내 중] -도착->  [주차완료] |  카메라 원본 +               |
+    | [수신][대기열][안내][완료][정산] |                             |
+    |                             |  카메라 원본 +               |
     |                             |  검출/추적 오버레이 (B01/B02)  |
     +-----------------------------+-----------------------------+
     | 3) 주차장 상태                | 4) 실시간 주차 안내            |
@@ -18,11 +18,15 @@ E00_final_ui : 최종 통합 관제 화면
 왼쪽 위에서 시계 방향으로 '번호를 받는다 -> 차를 본다 -> 자리를 정한다 ->
 그 차에게 길을 알려준다'가 된다.
 
-1번 구간은 한 대의 차가 수신에서 안내, 주차 완료까지 지나가는 흐름을 그대로
-늘어놓는다. B02의 CarNumberFIFO가 실제로 하는 일이다. 화면의 4분의 1이라
-여섯 칸을 가로로 이을 수 없어 두 단 두 행으로 접었고, 읽는 순서는 그대로
-왼쪽에서 오른쪽, 위에서 아래다. 숫자 하나('대기 3대')로 줄이면 어느 차가
-다음 차례인지가 화면에서 사라진다.
+1번 구간은 한 대의 차가 입차 수신에서 출차 정산까지 지나가는 흐름을 그대로
+늘어놓는다. 다섯 칸이 한 줄로, 왼쪽에서 오른쪽이다.
+
+    입차 수신함 -> 차량 번호 대기열 -> 안내중인 차량 -> 주차 완료 안내
+    -> 출차 완료 및 정산
+
+앞의 넷은 B02의 CarNumberFIFO가 실제로 하는 일이고, 마지막 칸은 출차 수신
+(A00)이 A01.remove_car에서 받아온 자리, 주차 시간, 요금이다. 숫자 하나
+('대기 3대')로 줄이면 어느 차가 다음 차례인지가 화면에서 사라진다.
 
 3번의 안내 경로는 4번이 그리는 것과 같은 경로다. 4번은 차 기준으로 돌려 원근을
 입힐 뿐이라, 일방통행을 지키는지는 화살표와 같은 평면인 3번에서 확인한다.
@@ -35,6 +39,7 @@ E00_final_ui : 최종 통합 관제 화면
 
 이 모듈이 하는 일
   - 수신 이벤트 수집    : A00의 리스너로 등록해 받은 값을 쌓아둔다
+                          (입차는 첫 칸, 출차는 요금까지 마지막 칸에 간다)
   - 주차 완료 감시      : cars_info의 parked 전이를 보고 안내문을 만든다
   - 오주차 판정과 정정  : 실제 위치가 배정된 자리와 다르면 기록을 실물에 맞춘다
   - 상태 JSON 제공      : 브라우저가 0.5초마다 가져간다
@@ -1027,19 +1032,6 @@ FINAL_UI_HTML = r"""
  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
       font-family:"Malgun Gothic","맑은 고딕","Noto Sans KR",sans-serif}
 
- /* 위에 1번 가로 띠, 아래에 2·3·4번 3등분.
-    +-------------------------------------------------------+
-    | 1 수신 -> push -> FIFO 큐 -> pop -> 안내 중 -> 주차 완료  |
-    +---------------+---------------+-----------------------+
-    | 2 주차장 CCTV  | 3 주차장 상태   | 4 실시간 주차 안내       |
-    +---------------+---------------+-----------------------+
-
-    1번을 가로 띠로 올린 이유: 이 구간이 보여주는 것은 '한 대의 차가 수신에서
-    안내까지 지나가는 흐름'이라 왼쪽에서 오른쪽으로 읽혀야 한다. 세로 열에
-    넣으면 그 흐름이 그냥 목록으로만 보인다.
-
-    아래 셋은 1fr씩 똑같이. 퍼센트로 주면 33%x3 + gap이 100%를 넘어
-    오른쪽이 잘린다. */
  /* 네 구간을 십자로 4등분한다.
       +----------------+----------------+
       | 1 차량 번호 수신 | 2 주차장 CCTV   |
@@ -1062,51 +1054,59 @@ FINAL_UI_HTML = r"""
  .sub{font-size:11px;color:var(--dim);font-weight:400}
  .body{flex:1;overflow:auto;padding:10px 12px;min-height:0}
 
- /* ---- 1번 구간 : 수신 -> FIFO -> 안내 (가로 흐름) ----
-    로직 순서 그대로 왼쪽에서 오른쪽으로 늘어놓는다.
-      수신(A00) -> push -> 대기열(CarNumberFIFO) -> pop -> 안내 중(B02) -> 주차 완료 */
- /* 한 구간이 화면의 4분의 1이라 여섯 칸을 가로로 늘어놓을 수 없다.
-    두 단 두 행으로 접는다. 읽는 순서는 그대로다.
-      [수신]  -저장->  [대기열]
-      [안내 중] -도착-> [주차 완료]  */
- #pipe{display:grid;grid-template-columns:1fr auto 1fr;
-       grid-template-rows:1fr 1fr;gap:10px 6px;padding:12px;
-       min-height:0;overflow:hidden}
+ /* ---- 1번 구간 : 입차 수신 -> FIFO -> 안내 -> 완료 -> 출차 정산 ----
+    로직 순서 그대로 왼쪽에서 오른쪽으로 다섯 칸을 늘어놓는다.
+      입차 수신(A00) -> push -> 대기열(CarNumberFIFO) -> pop -> 안내 중(B02)
+      -> 주차 완료(ParkingWatcher) -> 출차 수신(A00) + 정산(fee_calculator)
+
+    두 단으로 접었던 것을 한 줄로 편다. 칸 하나는 좁아지지만 대신 패널 높이를
+    통째로 쓰므로, 수신 목록은 오히려 두 건에서 네 건으로 늘어난다. */
+ #pipe{flex:1;display:grid;
+       grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;
+       gap:0 6px;padding:12px;min-height:0;overflow:hidden}
+ /* min-height:0이 있어야 칸이 내용에 밀려 늘어나지 않는다. 그리드 항목의
+    기본값(auto)으로 두면 대기열이 열 대쯤 쌓였을 때 그 칸만 아래로 자라
+    #pipe 밖으로 잘려 나간다. 0으로 두면 안쪽 목록이 대신 스크롤한다. */
  .stg{background:var(--sunken);border:1px solid var(--line);border-radius:8px;
-      padding:10px 13px;display:flex;flex-direction:column;min-width:0;
+      padding:10px 11px;display:flex;flex-direction:column;min-width:0;min-height:0;
       justify-content:flex-start}
- .stg > .cap{font-size:11px;color:var(--dim);margin-bottom:8px;white-space:nowrap;
-             display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+ .stg > .cap{font-size:11px;color:var(--dim);margin-bottom:3px;white-space:nowrap;
+             display:flex;justify-content:space-between;gap:8px;align-items:baseline;
+             overflow:hidden}
+ .stg > .cap > span{overflow:hidden;text-overflow:ellipsis}
+ /* 머리말 아래 한 줄. 예전에 칸 사이 화살표에 달려 있던 설명('배정 성공만',
+    '반경 8cm')이 여기로 왔다. 다섯 칸이 한 줄이라 화살표에 글자를 달 폭이
+    없다. 다섯 칸 모두 이 줄을 가지므로 본문이 시작하는 높이도 서로 맞는다. */
+ .stg > .hint{font-size:10px;color:#98a0ac;margin-bottom:8px;white-space:nowrap;
+              overflow:hidden;text-overflow:ellipsis}
+ /* 목록이 든 칸은 남는 높이를 다 쓰고, 넘치면 그 안에서만 스크롤한다.
+    이것이 없으면 내용이 칸을 밀어내 다섯 칸의 높이가 서로 달라진다. */
+ #rxlist,#noticebody,#paybody{flex:1;min-height:0;overflow:auto}
  .stg.queue{border-color:#a8c6e8;background:#eef5fd}
 
- /* 단계 사이 화살표. push / pop이 어느 쪽으로 도는지가 이 화면의 핵심이다. */
- /* 화살표 칸의 폭은 그 안의 글자가 한 줄로 들어갈 만큼이어야 한다.
-    좁으면 '차량 번호 저장'이 두 줄로 접혀 화살표가 밀린다. 늘린 만큼은
-    옆의 대기열(flex:1)에서 가져오므로 전체 폭은 그대로다. */
- .flowarw{width:100px;display:flex;flex-direction:column;align-items:center;
-          justify-content:center;color:var(--dim);font-size:10px;gap:2px;
-          white-space:nowrap}
- .flowarw b{font-size:11px;color:var(--accent);font-weight:700;white-space:nowrap}
- .flowarw .ln{width:100%;height:0;border-top:1px solid #c2c8d0;position:relative}
- .flowarw .ln::after{content:"";position:absolute;right:0;top:-4px;
-                     border-left:7px solid #c2c8d0;
-                     border-top:4px solid transparent;border-bottom:4px solid transparent}
+ /* 단계 사이 화살표. 글자 없이 방향만 가리킨다.
+    예전에는 여기에 'push / 배정 성공만' 같은 설명을 달았는데, 칸이 다섯이
+    되면서 화살표도 넷이라 그 폭이 본문을 다 먹는다. 설명은 .hint로 갔다. */
+ .flowsep{width:14px;display:flex;align-items:center;justify-content:center;
+          color:#b9c0c9;font-size:14px;font-weight:700}
 
- /* 대기열 카드. 왼쪽 끝이 front(다음에 매칭될 차)다. */
- .qrow{display:flex;align-items:center;gap:8px;overflow-x:auto;flex:1;min-height:0}
+ /* 대기열 카드. 맨 위가 front(다음에 매칭될 차)다.
+    다섯 칸이 한 줄이 되면서 이 칸은 좁고 길어졌다. 카드를 가로로 늘어놓으면
+    두 대째부터 칸 밖으로 나가 옆으로 스크롤해야 보인다. 세로로 쌓으면
+    네댓 대가 한눈에 들어온다. 읽는 방향만 바뀌고 front가 먼저인 것은 같다. */
+ .qrow{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0}
  .qcard{flex:0 0 auto;border:1px solid #b7cde6;border-radius:8px;background:#eaf2fb;
-        padding:9px 15px;text-align:center}
+        padding:6px 10px;text-align:center}
  .qcard.front{border-color:var(--accent);background:#d8e9fd;
               box-shadow:0 0 0 2px rgba(15,98,214,.20)}
- .qcard .no{font-size:22px;font-weight:700;letter-spacing:2px;
+ .qcard .no{font-size:20px;font-weight:700;letter-spacing:2px;
             font-variant-numeric:tabular-nums;line-height:1.25}
- .qcard .mk{font-size:10px;color:var(--accent);letter-spacing:0;margin-top:2px}
- .qempty{color:var(--dim);font-size:13px;padding:16px 4px}
+ .qcard .mk{font-size:10px;color:var(--accent);letter-spacing:0;margin-top:1px}
+ .qempty{color:var(--dim);font-size:12px;padding:12px 2px;line-height:1.6}
 
- /* 최근 수신 (가로 띠라 최근 두 건만 보인다) */
+ /* 최근 입차 수신 (칸 하나에 네 건까지 들어간다) */
  .rx{border:1px solid var(--line);border-left:3px solid var(--accent);
      border-radius:6px;padding:5px 8px;margin-bottom:5px;background:var(--sunken)}
- .rx.exit{border-left-color:var(--warn)}
  .rx.fail{border-left-color:var(--bad)}
  .rx-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
  .rx-car{font-size:16px;font-weight:700;letter-spacing:1.5px;font-variant-numeric:tabular-nums}
@@ -1197,8 +1197,7 @@ FINAL_UI_HTML = r"""
  .av .n{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
  .av .l{font-size:10px;color:var(--dim);margin-top:1px}
 
- /* 주차 완료 안내문. 흐름의 마지막 칸이라 1번 띠의 오른쪽 끝에 붙는다.
-    수신 -> 큐 -> 안내 -> 완료가 한 줄로 읽힌다. */
+ /* 주차 완료 안내문. 1번 구간의 넷째 칸이다. */
  #notice{overflow:hidden;min-width:0}
  #notice.ok  {border-color:var(--ok)}
  #notice.bad {border-color:var(--bad)}
@@ -1211,6 +1210,20 @@ FINAL_UI_HTML = r"""
  #notice.warn .nt-line{color:var(--warn)}
  .nt-note{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
  .nt-idle{font-size:13px;color:var(--dim)}
+
+ /* 출차 완료 및 정산. 흐름의 마지막 칸이다.
+    이 칸의 결론은 요금이므로 요금을 가장 크게 쓴다. 번호와 자리는 '어느
+    차의 얼마인지'를 확인하는 값이라 그 위아래에 작게 붙는다. */
+ #pay{overflow:hidden;min-width:0}
+ #pay.ok {border-color:var(--ok)}
+ #pay.bad{border-color:var(--bad)}
+ #pay.bad .nt-line{color:var(--bad)}
+ .paycar{font-size:22px;font-weight:700;letter-spacing:2px;line-height:1.3;
+         font-variant-numeric:tabular-nums}
+ .payfee{font-size:27px;font-weight:700;color:var(--ok);line-height:1.3;
+         margin-top:4px;font-variant-numeric:tabular-nums}
+ .payfee b{font-size:14px;font-weight:600;margin-left:2px}
+ .paymin{font-size:11px;color:var(--dim);margin-top:5px}
 
  /* ---- 2번 구간 : 카메라 (차량 검출) ---- */
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
@@ -1269,40 +1282,54 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 1번 구간 : 수신 -> 차량 번호 대기열 -> 안내 -> 주차 완료 (왼쪽 위).
-       B02의 CarNumberFIFO가 실제로 하는 일을 그대로 늘어놓은 것이다. -->
+  <!-- 1번 구간 : 입차 수신 -> 대기열 -> 안내 -> 주차 완료 -> 출차 정산 (왼쪽 위).
+       앞의 넷은 B02의 CarNumberFIFO가 실제로 하는 일을 그대로 늘어놓은 것이고,
+       마지막 칸은 출차 수신이 가져온 자리, 주차 시간, 요금이다. -->
   <div class="col" id="top">
     <h2><span><span class="num">1</span>차량 번호 수신 및 저장</span>
         <span class="sub" id="rxcount">-</span></h2>
     <div id="pipe">
 
       <div class="stg rxbox">
-        <div class="cap"><span>수신</span><span>2바이트</span></div>
+        <div class="cap"><span>입차 번호 수신함</span></div>
+        <div class="hint">2바이트 수신</div>
         <div id="rxlist">
           <div class="empty">차량 번호 수신 대기 중</div>
         </div>
       </div>
 
-      <div class="flowarw"><b>차량 번호 저장</b><div class="ln"></div><span>배정 성공만</span></div>
+      <div class="flowsep">&rarr;</div>
 
       <div class="stg queue">
-        <div class="cap"><span>차량 번호 대기열</span>
-                         <span id="qcount">대기 0대</span></div>
+        <div class="cap"><span>차량 번호 대기열</span></div>
+        <div class="hint">배정 성공만 &middot; <span id="qcount">대기 0대</span></div>
         <div class="qrow" id="queue">
           <div class="qempty">대기 중인 차량번호가 없습니다.</div>
         </div>
       </div>
 
+      <div class="flowsep">&rarr;</div>
+
       <div class="stg act">
-        <div class="cap"><span>안내 중</span></div>
+        <div class="cap"><span>안내중인 차량</span></div>
+        <div class="hint">앞 순서부터 한 대씩</div>
         <div id="active"><div class="empty">없음</div></div>
       </div>
 
-      <div class="flowarw"><b>도착</b><div class="ln"></div><span>반경 __ARRIVAL_CM__cm</span></div>
+      <div class="flowsep">&rarr;</div>
 
       <div class="stg done" id="notice">
-        <div class="cap"><span>주차 완료 / 오주차</span></div>
+        <div class="cap"><span>주차 완료 안내</span></div>
+        <div class="hint">도착 반경 __ARRIVAL_CM__cm</div>
         <div id="noticebody"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
+      </div>
+
+      <div class="flowsep">&rarr;</div>
+
+      <div class="stg pay" id="pay">
+        <div class="cap"><span>출차 완료 및 정산</span></div>
+        <div class="hint"><span id="paycount">출차 0대</span></div>
+        <div id="paybody"><div class="nt-idle">출차 수신을 기다리는 중입니다.</div></div>
       </div>
 
     </div>
@@ -1526,35 +1553,31 @@ function esc(s){
     m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 }
 
-// ---- 1번 구간 : 수신 -> FIFO -> 안내 ----
-// 가로 띠라 높이가 좁다. 수신 목록은 최근 두 건만 보여준다.
-// (전체 이력이 필요하면 /status를 볼 것)
-const RX_SHOWN = 2;
+// ---- 1번 구간 : 입차 수신 -> FIFO -> 안내 -> 완료 -> 출차 정산 ----
+// 다섯 칸이 한 줄이라 칸은 좁지만 패널 높이를 통째로 쓴다.
+// 수신 목록은 그만큼 최근 네 건까지 보인다. (전체 이력은 /status를 볼 것)
+const RX_SHOWN = 4;
 
 function renderRx(rx){
   document.getElementById('rxcount').textContent =
     `입차 ${rx.total.entry} · 출차 ${rx.total.exit}`;
 
+  // 출차는 마지막 칸(출차 완료 및 정산)이 맡는다. 첫 칸에는 입차만 남긴다.
+  // 둘을 한 목록에 섞으면 좁은 칸에서 방금 들어온 차가 출차 기록에 밀려
+  // 화면 밖으로 나가고, 흐름의 시작과 끝이 같은 칸에서 겹쳐 보인다.
+  const items = rx.items.filter(it => it.role !== 'exit');
+
   const box = document.getElementById('rxlist');
-  if (!rx.items.length){
+  if (!items.length){
     box.innerHTML = '<div class="empty">차량 번호 수신 대기 중</div>';
     return;
   }
 
-  box.innerHTML = rx.items.slice(0, RX_SHOWN).map(it => {
-    const cls = !it.ok ? 'fail' : (it.role === 'exit' ? 'exit' : '');
-    let detail;
-    if (it.role === 'exit'){
-      // 출차는 '어느 자리에서 나갔고, 얼마나 있었고, 얼마인지'가 전부다.
-      detail = it.ok
-        ? `<span class="rx-spot">${esc(it.spot_id)} 출차</span> · ` +
-          `${it.minutes}분 · <b>${(it.fee || 0).toLocaleString()}원</b>`
-        : `<span class="rx-fail">${esc(it.message) || '출차 실패'}</span>`;
-    } else if (it.ok && it.spot_id){
-      detail = `${esc(it.car_type)} · <span class="rx-spot">${esc(it.spot_id)} 배정</span>`;
-    } else {
-      detail = `<span class="rx-fail">${esc(it.message) || '배정 실패'}</span>`;
-    }
+  box.innerHTML = items.slice(0, RX_SHOWN).map(it => {
+    const cls = it.ok ? '' : 'fail';
+    const detail = (it.ok && it.spot_id)
+      ? `${esc(it.car_type)} · <span class="rx-spot">${esc(it.spot_id)} 배정</span>`
+      : `<span class="rx-fail">${esc(it.message) || '배정 실패'}</span>`;
     const src = it.source === 'manual' ? '(수동)' : '';
     return `<div class="rx ${cls}">
       <div class="rx-top">
@@ -1566,7 +1589,7 @@ function renderRx(rx){
   }).join('');
 }
 
-// FIFO 대기열. 왼쪽 끝이 front(다음에 매칭될 차)다.
+// FIFO 대기열. 맨 위가 front(다음에 매칭될 차)다.
 // 이 순서가 곧 안내를 받는 순서라, 숫자 하나로 줄이면 화면에서 그 사실이 사라진다.
 function renderFifo(st){
   const f = st.fifo || {waiting: [], active: null};
@@ -1702,6 +1725,46 @@ function renderNotice(ev){
     (ev.note ? `<div class="nt-note">${esc(ev.note)}</div>` : '');
 }
 
+// 출차 완료 및 정산 (1번 구간의 마지막 칸).
+//
+// 출차도 입차와 같은 수신 목록으로 들어온다. A00이 A01.remove_car의 반환값을
+// 그대로 실어 보내므로 자리, 주차 시간, 요금이 이미 그 안에 있다. 여기서
+// 다시 계산하지 않는다. 계산을 두 곳에서 하면 요금표(get_fee_config)를 고쳤을
+// 때 화면과 실제 청구가 어긋난다.
+function renderPay(rx){
+  document.getElementById('paycount').textContent = `출차 ${rx.total.exit}대`;
+
+  // 가장 최근 출차 한 건. rx.items는 최신이 앞이다.
+  const ex = rx.items.find(it => it.role === 'exit');
+  const card = document.getElementById('pay');
+  const box = document.getElementById('paybody');
+
+  if (!ex){
+    card.className = 'stg pay';
+    box.innerHTML = '<div class="nt-idle">출차 수신을 기다리는 중입니다.</div>';
+    return;
+  }
+
+  if (!ex.ok){
+    // 입차 기록이 없는 번호로 출차가 들어온 경우다. 요금을 매길 수 없다.
+    // 번호판을 잘못 읽었거나 입차 수신을 놓친 것이므로 그대로 띄운다.
+    card.className = 'stg pay bad';
+    box.innerHTML =
+      `<div class="nt-head"><span>차량 ${esc(ex.car_id)}</span>
+         <span>${esc(ex.time)}</span></div>
+       <div class="nt-line">${esc(ex.message) || '출차 처리 실패'}</div>`;
+    return;
+  }
+
+  card.className = 'stg pay ok';
+  box.innerHTML =
+    `<div class="nt-head"><span>${esc(ex.spot_id) || '자리 미상'} 출차</span>
+       <span>${esc(ex.time)}</span></div>
+     <div class="paycar">${esc(ex.car_id)}</div>
+     <div class="payfee">${(ex.fee || 0).toLocaleString()}<b>원</b></div>
+     <div class="paymin">주차 ${ex.minutes}분</div>`;
+}
+
 // ---- 2번 구간 : 카메라 ----
 function renderCam(st){
   const t = st.tracks;
@@ -1818,6 +1881,7 @@ async function tick(){
     renderCars(st);
     renderRoute(st);
     renderNotice(st.latest_event);
+    renderPay(st.rx);
     renderCam(st);
     renderNav(st);
   } catch (e) {
