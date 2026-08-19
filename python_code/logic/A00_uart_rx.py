@@ -330,6 +330,53 @@ def _notify_rx(role, car_id, first_byte, second_byte, result=None,
             print(f"[경고] 수신 리스너에서 오류가 발생했습니다: {e}")
 
 
+def _order_hint(role, car_id):
+    """
+    수신 줄 뒤에 붙일 안내. 반대로 읽으면 어떤 번호가 되는지 적는다.
+
+    번호가 이상하게 나왔을 때 무엇을 바꿔야 하는지 그 줄에서 끝나야 한다.
+    화면의 번호와 여기 적힌 '반대로 읽으면'을 비교해 실물 번호판과 같은
+    쪽을 고르면 되고, 바꾸는 것은 /byteorder/{role} 한 번이다.
+    """
+    other = _swapped_halves(car_id)
+    if other == car_id:
+        return ""       # 앞뒤 두 자리가 같은 번호. 뒤집어도 같다.
+    return (f"  (먼저 온 바이트를 {'앞' if BYTE_ORDER.get(role) == 'high_first' else '뒤'}에 "
+            f"놓은 값. 반대로 읽으면 {other})")
+
+
+def set_byte_order(role, order):
+    """
+    역할별 바이트 순서를 실행 중에 바꾼다. (E_main_final의 /byteorder)
+
+    Zybo 펌웨어를 손볼 때마다 어느 바이트가 먼저 오는지가 바뀌었다. 그때마다
+    코드를 고치고 프로그램을 다시 띄우면 그 사이에 온 수신을 놓친다.
+
+    Args:
+        role:  'entry' 또는 'exit'
+        order: 'high_first'(먼저 온 바이트가 앞 두 자리)
+               'low_first' (먼저 온 바이트가 뒤 두 자리)
+               'flip'      (지금 값을 뒤집는다)
+
+    Returns:
+        바뀐 뒤의 값. 잘못된 인자면 None.
+    """
+    if role not in BYTE_ORDER:
+        return None
+    if order == 'flip':
+        order = ('low_first' if BYTE_ORDER[role] == 'high_first'
+                 else 'high_first')
+    if order not in ('high_first', 'low_first'):
+        return None
+
+    BYTE_ORDER[role] = order
+    label = '입차' if role == 'entry' else '출차'
+    front = '앞 두 자리' if order == 'high_first' else '뒤 두 자리'
+    print(f"[{label}] 바이트 순서를 {order}로 바꿉니다. "
+          f"(먼저 온 바이트 = {front})")
+    return order
+
+
 def _process_packet(port_role, raw_data, peer_ip=None):
     """수신한 2바이트를 파싱해서 입차/출차 로직으로 넘긴다."""
     role, car_id, b1, b2, rerouted = resolve_packet(port_role, raw_data, peer_ip)
@@ -342,7 +389,8 @@ def _process_packet(port_role, raw_data, peer_ip=None):
 
     if role == 'entry':
         receive_time = datetime.datetime.now().replace(second=0, microsecond=0)
-        print(f"\n[입차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
+        print(f"\n[입차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}"
+              f"{_order_hint('entry', car_id)}")
 
         # 입차 처리 호출 (차량 종류에 맞는 가장 가까운 빈자리를 배정)
         result = handle_car_entry(car_id, receive_time)
@@ -360,7 +408,8 @@ def _process_packet(port_role, raw_data, peer_ip=None):
         _notify_rx(role, car_id, b1, b2, result,
                    port_role=port_role, rerouted=rerouted)
     else:
-        print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}")
+        print(f"\n[출차수신(Dec)] (Hex: 0x{b1:02X} 0x{b2:02X}) -> {car_id}"
+              f"{_order_hint('exit', car_id)}")
 
         # 출차 및 요금 계산 호출.
         # 반환값을 화면까지 실어 보낸다. 예전에는 여기서 버려서 요금과

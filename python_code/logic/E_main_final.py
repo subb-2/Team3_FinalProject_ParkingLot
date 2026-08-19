@@ -107,6 +107,15 @@ def start_uart(rx_feed):
 
     print(f"  Zybo 접속 주소 {config['jetson_ip']}:{config['entry_port']}(입차) "
           f"/ {config['exit_port']}(출차)")
+
+    # 어느 바이트를 앞 두 자리로 읽는지 적어 둔다. 번호가 앞뒤로 뒤집혀
+    # 보이는 일이 반복돼서, 지금 어떤 규칙으로 읽고 있는지가 보여야 한다.
+    from logic.A00_uart_rx import BYTE_ORDER
+    for role, label in (('entry', '입차'), ('exit', '출차')):
+        front = '앞' if BYTE_ORDER[role] == 'high_first' else '뒤'
+        print(f"  {label} 번호 읽는 순서 : 먼저 온 바이트가 {front} 두 자리 "
+              f"({BYTE_ORDER[role]})")
+    print("  번호가 뒤집혀 보이면 /byteorder/entry 또는 /byteorder/exit")
     print("  수신 서버를 띄웠습니다. 언제 접속해도 받습니다.")
     return True
 
@@ -358,6 +367,36 @@ def main():
         else:
             C_CONFIG['DRAW_STATUS_TEXT'] = not C_CONFIG['DRAW_STATUS_TEXT']
         return {"debug": C_CONFIG['DRAW_STATUS_TEXT']}
+
+    @app.route('/byteorder')
+    @app.route('/byteorder/<role>')
+    @app.route('/byteorder/<role>/<order>')
+    def byteorder(role=None, order=None):
+        """
+        2바이트 중 어느 쪽을 앞 두 자리로 읽을지 실행 중에 바꾼다.
+
+        Zybo 펌웨어를 손볼 때마다 보내는 순서가 바뀌었고, 그때마다 코드를
+        고쳐 다시 띄우는 동안 수신을 놓쳤다. 번호가 앞뒤 두 자리씩 뒤집혀
+        보이면(8935가 3589로) 여기를 한 번 부르면 된다.
+
+            /byteorder                  지금 값 보기
+            /byteorder/entry            입차만 뒤집기
+            /byteorder/exit/low_first   출차를 '먼저 온 바이트가 뒤 두 자리'로
+
+        어느 쪽이 맞는지는 터미널의 수신 줄이 알려준다. 받은 바이트와 함께
+        '반대로 읽으면 ____'가 찍히므로, 실물 번호판과 같은 쪽을 고르면 된다.
+        """
+        from logic.A00_uart_rx import BYTE_ORDER, set_byte_order
+
+        if role is None:
+            return {"byte_order": dict(BYTE_ORDER)}
+
+        changed = set_byte_order(role, order or 'flip')
+        if changed is None:
+            return {"error": f"role은 entry/exit, order는 high_first/low_first "
+                             f"입니다. (받은 값: {role}/{order})",
+                    "byte_order": dict(BYTE_ORDER)}, 400
+        return {"byte_order": dict(BYTE_ORDER), "changed": {role: changed}}
 
     @app.route('/queue/reset')
     def queue_reset():
