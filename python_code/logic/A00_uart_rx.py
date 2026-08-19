@@ -70,22 +70,24 @@ def get_wifi_config():
 #   'low_first'  : 뒤 두 자리를 담은 바이트가 먼저 온다.  0x34 0x12 -> "1234"
 #   'high_first' : 앞 두 자리를 담은 바이트가 먼저 온다.  0x12 0x34 -> "1234"
 #
-# 두 보드의 순서가 서로 다르다. 실물 번호판 8935로 양쪽을 다 확인했다.
-#   입차 : 8935를 high_first로 읽어야 8935가 나온다.
-#   출차 : 8935를 보냈는데 high_first로 읽으니 3589가 나왔다. 앞뒤 두 자리가
-#          뒤집힌 값이므로 이 보드는 뒤 두 자리를 먼저 보낸다(low_first).
+# 지금은 두 보드가 같은 양식이다. 둘 다 앞 두 자리를 먼저 보낸다.
+# 실물 번호판 8935로 확인했다. (0x89 0x35 -> 8935)
 #
-# 한동안 둘 다 high_first로 두었던 것은 실측이 아니었다. 시연 번호판이
-# 1111, 2222처럼 앞뒤 두 자리가 같은 것뿐이라 뒤집혀도 같은 값이 나와
-# 드러나지 않았을 뿐이다. 실물 번호판을 등록하고 나서야 보였다.
+# 이 값은 펌웨어를 고칠 때마다 따라 움직인다. 출차를 한동안 low_first로
+# 두었던 것은 그때 실제로 뒤 두 자리가 먼저 왔기 때문이고, 출차 펌웨어가
+# 입차와 같은 양식으로 바뀐 뒤에는 그 설정이 도리어 번호를 뒤집었다.
+# (8935 -> 3589) 순서를 의심할 일이 생기면 터미널의 '수신' 줄에 찍히는
+# 원본 바이트를 먼저 볼 것. 0x89 0x35면 high_first가 맞다.
+#
+# 시연 번호판이 1111, 2222처럼 앞뒤 두 자리가 같으면 뒤집혀도 같은 값이
+# 나와 이 설정이 틀린 줄 모른다. 실물 번호판으로 확인할 것.
 #
 # 뒤집히면 등록되지 않은 번호가 된다. 입차에서는 조용히 일반 차량으로
-# 처리되고(8935는 전기차인데 3589로 읽혀 일반 자리를 받았다), 출차에서는
+# 처리되고(8935는 전기차인데 3589로 읽히면 일반 자리를 받는다), 출차에서는
 # 그런 번호의 입차 기록이 없으므로 '입차 기록이 없습니다'로 거부된다.
-# 한쪽 펌웨어가 순서를 바꾸면 그 역할만 여기서 되돌릴 것.
 BYTE_ORDER = {
     'entry': 'high_first',      # 입차 Zybo (앞 두 자리를 먼저 보낸다)
-    'exit': 'low_first',        # 출차 Zybo (뒤 두 자리를 먼저 보낸다)
+    'exit': 'high_first',       # 출차 Zybo (입차와 같은 양식)
 }
 
 
@@ -109,6 +111,7 @@ ROLE_RESOLVE = {
     'ROLE_BY_IP': {},
 
     # 출차 번호의 앞뒤 두 자리가 뒤집혀 들어왔을 때 되돌릴지 여부.
+    # (BYTE_ORDER가 실제 펌웨어와 어긋난 동안 출차가 아예 막히지 않게 하는 장치)
     # 뒤집은 번호가 기록에 있을 때만 걸린다. BYTE_ORDER가 맞으면 쓰이지
     # 않는 안전장치다. (resolve_packet 참고)
     'SWAPPED_HALVES_FALLBACK': True,
@@ -154,6 +157,11 @@ def build_car_packet(car_id, role='entry'):
     if BYTE_ORDER.get(role, 'low_first') == 'low_first':
         return bytes([low, high])
     return bytes([high, low])
+
+
+# 짝이 맞지 않고 남은 바이트를 얼마나 들고 있을지 (초).
+# 이 시간을 넘기면 다음 번호의 일부가 아니라 찌꺼기로 보고 버린다.
+PARTIAL_TTL_SEC = 0.5
 
 
 def _swapped_halves(car_id):
@@ -432,11 +440,11 @@ def _serve_role(role, label, host, port, timeout, stop_event):
                     print(f"[{label}] {old_ip}가 다시 접속해 이전 연결을 닫습니다.")
                     old.close()
                     del conns[old]
-            conns[new_conn] = [addr[0], b'']
+            conns[new_conn] = [addr[0], b'', time.time()]
             print(f"[{label}] Zybo 접속됨: {addr[0]}:{addr[1]}")
 
         for conn in [c for c in ready if c is not srv and c in conns]:
-            peer_ip, buf = conns[conn]
+            peer_ip, buf, last_at = conns[conn]
 
             # 2바이트씩 끊어 읽는다. 한 번에 여러 대가 몰려와도, 반대로 한
             # 바이트씩 쪼개져 와도 남는 것은 buf에 두고 다음에 이어 붙인다.
@@ -452,11 +460,31 @@ def _serve_role(role, label, host, port, timeout, stop_event):
                 print(f"[{label}] {peer_ip} 연결이 끊어졌습니다. 재접속 대기...")
                 continue
 
+            # 받은 바이트를 그대로 찍는다. 번호가 이상하게 보일 때 원인이
+            # 바이트 순서인지(0x89 0x35 인지 0x35 0x89 인지), 보드가 2바이트가
+            # 아닌 다른 길이를 보내는 것인지는 이 줄 하나로 갈린다.
+            now = time.time()
+            print(f"[{label}] 수신 {len(chunk)}바이트: "
+                  f"{' '.join(f'0x{b:02X}' for b in chunk)}")
+
+            # 앞선 조각이 오래 남아 있으면 버린다.
+            #
+            # 홀수 개를 보내는 보드가 하나 있으면 한 바이트가 계속 남아,
+            # 그 뒤로는 앞 패킷의 꼬리와 다음 패킷의 머리가 짝지어진다.
+            # 한 번 어긋나면 영영 어긋난 채로 엉뚱한 번호가 나온다.
+            # 차는 몇 초에 한 대씩 오므로, 조각이 이 시간을 넘겨 남아 있으면
+            # 그것은 다음 번호의 일부가 아니라 버려야 할 찌꺼기다.
+            if buf and now - last_at > PARTIAL_TTL_SEC:
+                print(f"[{label}] 짝이 맞지 않는 바이트 "
+                      f"{' '.join(f'0x{b:02X}' for b in buf)}를 버립니다.")
+                buf = b''
+
             buf += chunk
             while len(buf) >= 2:
                 _process_packet(role, buf[:2], peer_ip)
                 buf = buf[2:]
             conns[conn][1] = buf
+            conns[conn][2] = now
 
     for conn in conns:
         conn.close()
