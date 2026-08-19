@@ -940,9 +940,13 @@ FINAL_UI_HTML = r"""
  .stg.done {flex:0 0 420px}
 
  /* 단계 사이 화살표. push / pop이 어느 쪽으로 도는지가 이 화면의 핵심이다. */
- .flowarw{flex:0 0 62px;display:flex;flex-direction:column;align-items:center;
-          justify-content:center;color:var(--dim);font-size:10px;gap:2px}
- .flowarw b{font-size:11px;color:var(--accent);font-weight:700}
+ /* 화살표 칸의 폭은 그 안의 글자가 한 줄로 들어갈 만큼이어야 한다.
+    좁으면 '차량 번호 저장'이 두 줄로 접혀 화살표가 밀린다. 늘린 만큼은
+    옆의 대기열(flex:1)에서 가져오므로 전체 폭은 그대로다. */
+ .flowarw{flex:0 0 100px;display:flex;flex-direction:column;align-items:center;
+          justify-content:center;color:var(--dim);font-size:10px;gap:2px;
+          white-space:nowrap}
+ .flowarw b{font-size:11px;color:var(--accent);font-weight:700;white-space:nowrap}
  .flowarw .ln{width:100%;height:0;border-top:1px solid #c2c8d0;position:relative}
  .flowarw .ln::after{content:"";position:absolute;right:0;top:-4px;
                      border-left:7px solid #c2c8d0;
