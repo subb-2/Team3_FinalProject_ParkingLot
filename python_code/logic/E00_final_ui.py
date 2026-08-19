@@ -1239,18 +1239,9 @@ FINAL_UI_HTML = r"""
  .nt-idle{font-size:13px;color:var(--dim)}
 
  /* 출차 완료 및 정산. 흐름의 마지막 칸이다.
-    이 칸의 결론은 요금이므로 요금을 가장 크게 쓴다. 번호와 자리는 '어느
-    차의 얼마인지'를 확인하는 값이라 그 위아래에 작게 붙는다. */
+    첫 칸(입차 수신함)과 같은 .rx 카드를 쓴다. 한 흐름의 처음과 끝이라
+    모양이 같아야 나란히 읽힌다. 요금은 그 카드의 결과 줄에 들어간다. */
  #pay{overflow:hidden;min-width:0}
- #pay.ok {border-color:var(--ok)}
- #pay.bad{border-color:var(--bad)}
- #pay.bad .nt-line{color:var(--bad)}
- .paycar{font-size:22px;font-weight:700;letter-spacing:2px;line-height:1.3;
-         font-variant-numeric:tabular-nums}
- .payfee{font-size:27px;font-weight:700;color:var(--ok);line-height:1.3;
-         margin-top:4px;font-variant-numeric:tabular-nums}
- .payfee b{font-size:14px;font-weight:600;margin-left:2px}
- .paymin{font-size:11px;color:var(--dim);margin-top:5px}
 
  /* ---- 2번 구간 : 카메라 (차량 검출) ---- */
  /* 영상 두 개 모두 남는 공간에 맞춰 비율을 지키며 들어간다.
@@ -1356,7 +1347,7 @@ FINAL_UI_HTML = r"""
       <div class="stg pay" id="pay">
         <div class="cap"><span>출차 완료 및 정산</span></div>
         <div class="hint"><span id="paycount">출차 0대</span></div>
-        <div id="paybody"><div class="nt-idle">출차 수신을 기다리는 중입니다.</div></div>
+        <div id="paybody"><div class="empty">출차 수신을 기다리는 중입니다.</div></div>
       </div>
 
     </div>
@@ -1585,6 +1576,22 @@ function esc(s){
 // 수신 목록은 그만큼 최근 네 건까지 보인다. (전체 이력은 /status를 볼 것)
 const RX_SHOWN = 4;
 
+// 수신 카드 한 장. 첫 칸(입차 수신함)과 마지막 칸(출차 정산)이 같이 쓴다.
+//
+// 한 흐름의 처음과 끝이라 같은 모양이어야 나란히 읽힌다. 번호가 가장 크고,
+// 오른쪽에 역할과 시각, 그 아래 한 줄로 결과를 적는다. 다른 것은 그 한 줄의
+// 내용뿐이다. (입차는 '차종 · 배정 자리', 출차는 '자리 · 주차 시간 · 요금')
+function rxCard(it, detail, extra){
+  const src = it.source === 'manual' ? '(수동)' : '';
+  return `<div class="rx ${it.ok ? '' : 'fail'}">
+    <div class="rx-top">
+      <span class="rx-car">${esc(it.car_id)}</span>
+      <span class="rx-time">${esc(it.role_label)}${src} ${esc(it.time)}</span>
+    </div>
+    <div class="rx-line">${detail}</div>${extra || ''}
+  </div>`;
+}
+
 function renderRx(rx){
   document.getElementById('rxcount').textContent =
     `입차 ${rx.total.entry} · 출차 ${rx.total.exit}`;
@@ -1600,20 +1607,11 @@ function renderRx(rx){
     return;
   }
 
-  box.innerHTML = items.slice(0, RX_SHOWN).map(it => {
-    const cls = it.ok ? '' : 'fail';
-    const detail = (it.ok && it.spot_id)
+  box.innerHTML = items.slice(0, RX_SHOWN).map(it => rxCard(it,
+    (it.ok && it.spot_id)
       ? `${esc(it.car_type)} · <span class="rx-spot">${esc(it.spot_id)} 배정</span>`
-      : `<span class="rx-fail">${esc(it.message) || '배정 실패'}</span>`;
-    const src = it.source === 'manual' ? '(수동)' : '';
-    return `<div class="rx ${cls}">
-      <div class="rx-top">
-        <span class="rx-car">${esc(it.car_id)}</span>
-        <span class="rx-time">${esc(it.role_label)}${src} ${esc(it.time)}</span>
-      </div>
-      <div class="rx-line">${detail}</div>
-    </div>`;
-  }).join('');
+      : `<span class="rx-fail">${esc(it.message) || '배정 실패'}</span>`
+  )).join('');
 }
 
 // FIFO 대기열. 맨 위가 front(다음에 매칭될 차)다.
@@ -1761,42 +1759,26 @@ function renderNotice(ev){
 function renderPay(rx){
   document.getElementById('paycount').textContent = `출차 ${rx.total.exit}대`;
 
-  // 가장 최근 출차 한 건. rx.items는 최신이 앞이다.
-  const ex = rx.items.find(it => it.role === 'exit');
-  const card = document.getElementById('pay');
+  // 첫 칸과 같은 카드로 그린다. 목록도 같은 수만큼 남긴다.
+  const items = rx.items.filter(it => it.role === 'exit');
   const box = document.getElementById('paybody');
 
-  if (!ex){
-    card.className = 'stg pay';
-    box.innerHTML = '<div class="nt-idle">출차 수신을 기다리는 중입니다.</div>';
+  if (!items.length){
+    box.innerHTML = '<div class="empty">출차 수신을 기다리는 중입니다.</div>';
     return;
   }
 
-  // 입차 포트로 들어온 것을 출차로 돌려 처리한 경우. 왜 여기 떴는지
-  // 적어주지 않으면 화면만 보고는 알 수 없다. (A00_uart_rx.resolve_packet)
-  const via = ex.rerouted
-    ? `<div class="nt-note">입차 포트로 들어온 번호입니다.
-         이미 세워둔 차라 출차로 처리했습니다.</div>`
-    : '';
-
-  if (!ex.ok){
-    // 입차 기록이 없는 번호로 출차가 들어온 경우다. 요금을 매길 수 없다.
-    // 번호판을 잘못 읽었거나 입차 수신을 놓친 것이므로 그대로 띄운다.
-    card.className = 'stg pay bad';
-    box.innerHTML =
-      `<div class="nt-head"><span>차량 ${esc(ex.car_id)}</span>
-         <span>${esc(ex.time)}</span></div>
-       <div class="nt-line">${esc(ex.message) || '출차 처리 실패'}</div>` + via;
-    return;
-  }
-
-  card.className = 'stg pay ok';
-  box.innerHTML =
-    `<div class="nt-head"><span>${esc(ex.spot_id) || '자리 미상'} 출차</span>
-       <span>${esc(ex.time)}</span></div>
-     <div class="paycar">${esc(ex.car_id)}</div>
-     <div class="payfee">${(ex.fee || 0).toLocaleString()}<b>원</b></div>
-     <div class="paymin">주차 ${ex.minutes}분</div>` + via;
+  box.innerHTML = items.slice(0, RX_SHOWN).map(it => rxCard(it,
+    it.ok
+      ? `${esc(it.spot_id) || '자리 미상'} · 주차 ${it.minutes}분 ·
+         <span class="rx-spot">${(it.fee || 0).toLocaleString()}원</span>`
+      // 입차 기록이 없는 번호로 출차가 들어온 경우다. 요금을 매길 수 없다.
+      // 번호판을 잘못 읽었거나 입차 수신을 놓친 것이므로 그대로 띄운다.
+      : `<span class="rx-fail">${esc(it.message) || '출차 처리 실패'}</span>`,
+    // 입차 포트로 들어온 것을 출차로 돌려 처리한 경우. 왜 여기 떴는지
+    // 적어주지 않으면 화면만 보고는 알 수 없다. (A00_uart_rx.resolve_packet)
+    it.rerouted ? '<div class="rx-line">입차 포트로 들어온 번호입니다</div>' : ''
+  )).join('');
 }
 
 // ---- 2번 구간 : 카메라 ----
