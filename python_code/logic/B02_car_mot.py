@@ -1229,6 +1229,37 @@ class CarMOT:
 
         return released
 
+    def reset_cars(self):
+        """
+        트랙에 붙어 있는 차량번호를 전부 떼어낸다. (전체 초기화)
+
+        입출차 기록을 통째로 되돌릴 때(A01.reset_all) 함께 부른다. 기록만
+        지우면 화면의 차에는 지워진 번호가 그대로 붙어 있고, 그 번호로
+        안내가 계속되거나 주차 잠금이 남아 다음 차가 번호를 못 받는다.
+
+        추적 자체는 건드리지 않는다. Track ID와 궤적은 카메라가 보고 있는
+        사실이라 기록을 되돌린다고 없던 일이 되지 않는다. 번호가 빠진
+        트랙은 다음 대기열 번호를 새로 받아간다.
+
+        Returns:
+            떼어낸 차량번호 수.
+        """
+        dropped = len(self.track_to_car)
+
+        self.track_to_car.clear()
+        self.parked_lock.clear()
+        self._parked_cars.clear()
+        self.ghosts.clear()
+        self.rebound_at.clear()
+        self._stuck_warned.clear()
+
+        self.active_car_id = None
+        self._arrived_since = None
+        self._active_moved_at = None
+
+        print(f"[초기화] 트랙에 붙어 있던 차량번호 {dropped}개를 떼어냈습니다.")
+        return dropped
+
     def _tick_frame_interval(self, now):
         """프레임 간격을 지수이동평균으로 갱신한다. (유령 수명 계산용)"""
         prev = self._last_update_at

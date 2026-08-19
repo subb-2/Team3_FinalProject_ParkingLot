@@ -136,9 +136,24 @@ def handle_car_entry(car_id, receive_time):
             print(f"[입차 거부] {message}")
         return last_entry_result
 
-    if car_id in cars_info:
-        return _result(False, cars_info[car_id]["spot_id"], REASON_ALREADY,
-                       f"차량 '{car_id}'는 이미 {cars_info[car_id]['spot_id']}에 주차 중입니다.")
+    info = cars_info.get(car_id)
+
+    # 자리를 잃은 기록은 지우고 새로 배정한다.
+    #
+    # 카메라가 자리를 비었다고 판정하면 sync_spot_occupancy가 기록에서 자리만
+    # 떼어 놓는다. 그래야 그 자리를 다음 차에게 줄 수 있기 때문이다. 그런데
+    # 기록 자체는 남아 있어서, 그 번호가 다시 들어오면 "이미 None에 주차
+    # 중입니다"라는 말이 안 되는 이유로 거부됐다. 세워진 자리가 없는 기록은
+    # 지금 이 차를 막을 근거가 되지 못한다.
+    if info is not None and info.get("spot_id") is None:
+        print(f"[입차 요청] '{car_id}'는 자리 없는 옛 기록만 남아 있습니다. "
+              f"지우고 새로 배정합니다.")
+        del cars_info[car_id]
+        info = None
+
+    if info is not None:
+        return _result(False, info["spot_id"], REASON_ALREADY,
+                       f"차량 '{car_id}'는 이미 {info['spot_id']}에 주차 중입니다.")
 
     spot_id, reason = find_spot_for_car(car_id)
 
@@ -657,6 +672,51 @@ def remove_car(car_id):
         spot_status[spot_id] = "empty"
 
     return spot_id, fee, duration_minutes
+
+def reset_all():
+    """
+    입출차 기록을 프로그램을 막 켰을 때 상태로 되돌린다.
+
+    시연 도중에 기록이 실물과 어긋나면 손으로 고칠 방법이 없다. 번호판을
+    잘못 읽어 들어온 차, 카메라가 잘못 채운 자리, 자리를 잃은 옛 기록 같은
+    것들이 쌓이면 그 다음 입차부터 배정이 계속 어긋난다. 그럴 때 프로그램을
+    껐다 켜는 대신 이걸 부른다. (화면의 [전체 초기화] 버튼)
+
+    되돌리는 것
+      - 모든 차량 기록 (cars_info)
+      - 모든 자리 상태 (spot_status) -> map_data.INITIAL_OCCUPIED 기준
+      - 미리 세워둔 차 (car_data.INITIAL_PARKED) 다시 적용
+      - 자리 비움 판정과 번호 미아 기록, 마지막 입차 결과
+
+    건드리지 않는 것
+      - 주차장 배치, 요금표, 차량 종류 등록부 (설정 파일이 정하는 값)
+      - 카메라 보정 (/recalibrate가 따로 있다)
+
+    Returns:
+        {"cars": 지운 차량 기록 수, "parked": 다시 세워둔 차 수}
+    """
+    global last_entry_result
+    from data.car_data import _apply_initial_parked
+    from data.map_data import INITIAL_OCCUPIED
+
+    dropped = len(cars_info)
+    cars_info.clear()
+
+    for spot_id in spot_status:
+        spot_status[spot_id] = INITIAL_OCCUPIED.get(spot_id, "empty")
+
+    _spot_empty_since.clear()
+    _orphan_cars.clear()
+    last_entry_result = None
+
+    # 시작할 때와 같은 함수로 다시 채운다. 여기서 따로 채우면 시작 상태와
+    # 초기화 상태가 조금씩 달라진다.
+    _apply_initial_parked()
+
+    print(f"[전체 초기화] 차량 기록 {dropped}건을 지웠습니다. "
+          f"(미리 세워둔 차 {len(cars_info)}대만 남음)")
+    return {"cars": dropped, "parked": len(cars_info)}
+
 
 def print_all_parked():
     """현재 주차 중인 모든 차량 정보를 출력합니다."""

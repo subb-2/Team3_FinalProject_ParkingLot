@@ -362,31 +362,37 @@ def main():
     @app.route('/queue/reset')
     def queue_reset():
         """
-        대기 중인 차량번호를 전부 지운다.
+        프로그램을 막 켰을 때 상태로 되돌린다. (2번 구간의 [전체 초기화] 버튼)
 
-        번호판을 잘못 읽어 엉뚱한 번호가 들어왔을 때 쓴다. 2번 구간의
-        [대기열 리셋] 버튼이 이 주소를 부른다.
+        예전에는 대기 중인 번호와 그 배정만 되돌렸다. 그것으로는 화면을
+        치울 수 없었다. 이미 안내를 받거나 주차를 마친 차, 카메라가 잘못
+        채운 자리, 자리를 잃은 옛 기록은 그대로 남는데, 그 기록들 때문에
+        다음 입차부터 배정이 계속 어긋난다. ("이미 None에 주차 중입니다")
+        시연 중에 그런 상태가 되면 프로그램을 껐다 켜는 수밖에 없었다.
 
-        대기열만 비우면 모자란다. 번호는 받는 즉시 자리를 하나 배정받으므로
-        (A00 -> A01.handle_car_entry), 큐에서만 지우면 그 자리는 아무도 오지
-        않는 채로 막혀 있고 화면에서도 계속 깜빡인다. 그래서 아직 도착하지
-        않은 차의 배정도 함께 되돌린다.
+        되돌리는 것은 다섯 가지다.
+          1. 대기열      (B02의 CarNumberFIFO)
+          2. 입출차 기록과 자리 상태 (A01.reset_all)
+             -> 미리 세워둔 차(car_data.INITIAL_PARKED)만 남는다
+          3. 트랙에 붙은 차량번호 (B02.reset_cars)
+          4. 수신 목록   (1번 구간 첫 칸과 마지막 칸)
+          5. 주차 완료 / 오주차 안내문과 감시 상태
 
-        왼쪽 수신 목록과 오른쪽 주차 완료 / 오주차 안내문도 함께 비운다.
-        지웠는데 화면에 그 번호가 그대로 남아 있으면 무엇이 지워진 것인지 알
-        수 없고, 없던 일로 한 번호가 남긴 안내문이 계속 떠 있게 된다.
-
-        이미 안내를 받고 있는 차와 주차를 마친 차는 건드리지 않는다. 그쪽은
-        실제로 움직이고 있거나 자리에 서 있다.
+        건드리지 않는 것: 카메라 보정(/recalibrate), 주차장 배치, 요금표.
         """
-        from logic.A01_parking_manager import cancel_assignment
+        from logic.A01_parking_manager import reset_all
 
         dropped = car_number_fifo.clear()
-        released = [spot for spot in
-                    (cancel_assignment(car_id) for car_id in dropped) if spot]
+        records = reset_all()
+        unbound = pipeline.mot.reset_cars()
         rx_cleared = rx_feed.clear()
-        notice_cleared = watcher.clear()
-        return {"cleared": dropped, "released": released,
+        # clear()가 아니라 reset()이다. 안내문뿐 아니라 '무엇이 이미 주차
+        # 상태였는지'까지 다시 잡아야, 방금 되살린 미리 세워둔 차들이
+        # 주차 완료 안내로 쏟아지지 않는다.
+        notice_cleared = watcher.reset()
+        return {"cleared": dropped,
+                "cars_cleared": records["cars"], "parked": records["parked"],
+                "unbound": unbound,
                 "rx_cleared": rx_cleared, "notice_cleared": notice_cleared,
                 "waiting": car_number_fifo.size()}
 

@@ -221,6 +221,12 @@ class RxFeed:
             "fee": result.get("fee"),
             "minutes": result.get("minutes"),
             "source": event.get("source", "wifi"),
+            # 포트가 말하는 역할과 다르게 처리했는가.
+            # (주차를 마친 차의 번호가 입차 포트로 다시 들어온 경우.
+            #  A00_uart_rx.resolve_packet 참고) 화면에 그 사실을 적어야
+            # 왜 입차가 아니라 출차로 처리됐는지 알 수 있다.
+            "rerouted": bool(event.get("rerouted")),
+            "port_role": event.get("port_role", role),
         }
 
         with self._lock:
@@ -492,7 +498,7 @@ class ParkingWatcher:
         주차 완료 / 오주차 안내문을 비운다.
 
         번호를 잘못 읽어 들어온 차 때문에 뜬 오주차 안내가 그대로 남아 있으면,
-        지운 뒤에도 화면은 계속 그 이야기를 하고 있다. 대기열 리셋은 '그 번호는
+        지운 뒤에도 화면은 계속 그 이야기를 하고 있다. 전체 초기화는 '그 번호는
         없던 일로' 하는 것이므로 그 번호가 남긴 안내문도 같이 지운다.
 
         Returns:
@@ -502,6 +508,27 @@ class ParkingWatcher:
             dropped = len(self._events)
             self._events.clear()
             self._latest = None
+        return dropped
+
+    def reset(self):
+        """
+        감시 상태를 처음 켰을 때로 되돌린다. (전체 초기화)
+
+        clear()는 화면에 뜬 안내문만 지운다. 기록까지 통째로 되돌릴 때는
+        '어느 차를 어디서 봤는지', '무엇이 이미 주차 상태였는지'도 함께
+        비워야 한다. 그러지 않으면 초기화로 다시 세워둔 차들이 곧바로
+        False -> True 전이로 잡혀 "주차 완료" 안내가 쏟아진다.
+
+        Returns:
+            지운 안내문 수.
+        """
+        dropped = self.clear()
+        with self._lock:
+            self._last_world.clear()
+            self._still_since.clear()
+            self._parked_seen.clear()
+        # 지금 cars_info에 있는 차(다시 세워둔 차)를 '본 것'으로 표시한다.
+        self.prime()
         return dropped
 
     def snapshot(self):
@@ -1348,8 +1375,8 @@ FINAL_UI_HTML = r"""
                     title="기둥을 다시 찍어 좌표계를 잡습니다">기둥 보정</button>
             <button id="dbgbtn" onclick="toggleDebug()">디버그</button>
             <button id="qrstbtn" onclick="resetQueue()"
-                    title="번호판을 잘못 읽어 들어온 번호를 지웁니다. 대기 중인 번호와 그 배정까지 되돌립니다"
-                    >차량 번호 대기열 리셋</button>
+                    title="프로그램을 막 켰을 때 상태로 되돌립니다. 대기열, 입출차 기록, 자리 상태, 화면 기록을 모두 비우고 미리 세워둔 차만 남깁니다"
+                    >전체 초기화</button>
             <span id="camdet">검출 대기 중</span></span>
       <span><span class="pill" id="cammark">-</span>
             <span class="pill" id="camfps">-</span></span>
@@ -1745,6 +1772,13 @@ function renderPay(rx){
     return;
   }
 
+  // 입차 포트로 들어온 것을 출차로 돌려 처리한 경우. 왜 여기 떴는지
+  // 적어주지 않으면 화면만 보고는 알 수 없다. (A00_uart_rx.resolve_packet)
+  const via = ex.rerouted
+    ? `<div class="nt-note">입차 포트로 들어온 번호입니다.
+         이미 세워둔 차라 출차로 처리했습니다.</div>`
+    : '';
+
   if (!ex.ok){
     // 입차 기록이 없는 번호로 출차가 들어온 경우다. 요금을 매길 수 없다.
     // 번호판을 잘못 읽었거나 입차 수신을 놓친 것이므로 그대로 띄운다.
@@ -1752,7 +1786,7 @@ function renderPay(rx){
     box.innerHTML =
       `<div class="nt-head"><span>차량 ${esc(ex.car_id)}</span>
          <span>${esc(ex.time)}</span></div>
-       <div class="nt-line">${esc(ex.message) || '출차 처리 실패'}</div>`;
+       <div class="nt-line">${esc(ex.message) || '출차 처리 실패'}</div>` + via;
     return;
   }
 
@@ -1762,7 +1796,7 @@ function renderPay(rx){
        <span>${esc(ex.time)}</span></div>
      <div class="paycar">${esc(ex.car_id)}</div>
      <div class="payfee">${(ex.fee || 0).toLocaleString()}<b>원</b></div>
-     <div class="paymin">주차 ${ex.minutes}분</div>`;
+     <div class="paymin">주차 ${ex.minutes}분</div>` + via;
 }
 
 // ---- 2번 구간 : 카메라 ----
@@ -1833,21 +1867,28 @@ async function toggleDebug(){
   }
 }
 
-// 대기 중인 차량번호를 전부 지운다. 번호판을 잘못 읽었을 때 쓴다.
+// 프로그램을 막 켰을 때 상태로 되돌린다.
+//
+// 대기열만 비우던 버튼이었는데, 그것으로는 화면에 남은 것을 치울 수 없었다.
+// 잘못 들어온 번호는 이미 자리를 받았고, 카메라가 잘못 채운 자리와 자리를
+// 잃은 옛 기록도 그대로 남아 그 다음 입차부터 배정이 계속 어긋난다.
+// 그래서 기록 전체(대기열, 입출차, 자리, 트랙에 붙은 번호, 화면 기록)를
+// 되돌리고 미리 세워둔 차만 남긴다.
+//
 // 결과를 버튼에 잠깐 적어 준다. 눌렀는데 아무 반응이 없으면 눌린 것인지
-// 알 수 없고, 대기열이 원래 비어 있었는지도 구별되지 않는다.
+// 알 수 없기 때문이다.
 async function resetQueue(){
   const b = document.getElementById('qrstbtn');
   const label = b.textContent;
   try {
     const r = await (await fetch('/queue/reset')).json();
-    b.textContent = r.cleared.length
-      ? `${r.cleared.length}개 지움 (${r.cleared.join(', ')})`
-      : ((r.rx_cleared || r.notice_cleared) ? '화면 기록 비움' : '지울 것이 없음');
+    const cars = (r.cars_cleared || 0) + (r.cleared || []).length;
+    b.textContent = cars ? `초기화 완료 (기록 ${r.cars_cleared || 0}건)`
+                         : '초기화 완료';
     tick();          // 수신 목록과 자리 상태를 바로 다시 그린다
   } catch (e) {
-    console.error('대기열 리셋 실패', e);
-    b.textContent = '리셋 실패';
+    console.error('전체 초기화 실패', e);
+    b.textContent = '초기화 실패';
   }
   setTimeout(() => { b.textContent = label; }, 2500);
 }
