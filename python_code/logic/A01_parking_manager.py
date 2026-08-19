@@ -500,6 +500,48 @@ def _adopt_orphans(occupied, now):
     return changes
 
 
+def take_departed_car(exclude=None):
+    """
+    방금 자리를 뜬 차의 번호를 하나 꺼낸다. 꺼낸 번호는 목록에서 지운다.
+
+    세워둔 차가 빠져나가면 카메라가 그 자리를 빈 것으로 보고(sync_spot_occupancy)
+    그 번호를 _orphan_cars에 적어 둔다. 자리를 잃었을 뿐 아직 주차장 안에
+    있는 차다.
+
+    B02가 이 함수를 쓴다. 돌아다니는 차가 있는데 대기열이 비어 있으면 밖에서
+    들어온 차일 리 없으므로, 자리를 비운 그 차로 보고 번호를 붙인다.
+    (B02_car_mot._bind_departed_cars)
+
+    가장 최근에 자리를 뜬 차부터 준다. 여러 대가 나갔다면 방금 움직이기
+    시작한 차가 화면에 보이는 그 차일 가능성이 높다.
+
+    Args:
+        exclude: 이미 다른 트랙에 붙어 있는 차량번호 집합. 건너뛴다.
+
+    Returns:
+        차량번호. 줄 것이 없으면 None.
+    """
+    exclude = exclude or set()
+    now = time.monotonic()
+
+    best, best_at = None, None
+    for car_id, (_, lost_at) in list(_orphan_cars.items()):
+        # 오래된 것은 버린다. _adopt_orphans와 같은 기준이다.
+        if now - lost_at > _ORPHAN_TTL_SEC or car_id not in cars_info:
+            del _orphan_cars[car_id]
+            continue
+        if car_id in exclude:
+            continue
+        if best_at is None or lost_at > best_at:
+            best, best_at = car_id, lost_at
+
+    if best is None:
+        return None
+
+    del _orphan_cars[best]
+    return best
+
+
 def relocate_car(car_id, new_spot_id):
     """
     차량의 주차 기록을 실제로 세워진 자리로 옮긴다.

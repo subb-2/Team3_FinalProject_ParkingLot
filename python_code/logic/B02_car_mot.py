@@ -110,6 +110,11 @@ CONFIG = {
         # 자리에 제대로 세운 차가 '다른 곳에 주차'로 처리된다.
         "ARRIVAL_HOLD_SEC": 10.0,
 
+        # --- 자리를 뜬 차 되찾기 ---
+        # 대기열이 비었는데 돌아다니는 차가 있으면, 방금 자리를 비운 차로 보고
+        # 그 번호를 붙일지 여부. (_bind_departed_cars)
+        "DEPARTED_REBIND": True,
+
         # --- 안전장치 ---
         # 도착 판정이 되지 않는 상태로 이 시간 이상 정지해 있으면 강제 해제한다.
         # 호모그래피가 아직 안 잡혔거나, 차가 목표 반경에 살짝 못 미친 곳에
@@ -688,6 +693,8 @@ class CarMOT:
         self._free_spots = free_spots_of() if free_spots_of is not None else {}
         if self.single_enable:
             self._update_active_binding(tracks, alive_ids, now, target_of)
+            # 3-b) 자리를 뜬 차가 돌아다니는 경우. 안내가 아니라 번호만 돌려준다.
+            self._bind_departed_cars(tracks, now)
 
         # 4) 나머지 트랙에 번호를 부여한다. 재바인딩(승계)이 FIFO보다 우선.
         #
@@ -990,6 +997,55 @@ class CarMOT:
                   f"(Track ID {moving}, FIFO 소비 없음)")
 
         self._bind_active(moving, now)
+
+    def _bind_departed_cars(self, tracks, now):
+        """
+        자리를 비우고 돌아다니는 차에게 그 자리에 있던 번호를 돌려준다.
+
+        세워둔 차가 빠져나가면 통로를 지나 출구로 간다. 그런데 자리를 뜨는
+        동안 추적이 끊기는 일이 잦아(멈춰 있던 상자가 갑자기 크게 움직인다)
+        새로 생긴 트랙에는 번호가 없다. 그대로 두면 화면에 번호 없는 차가
+        나가고, 출차 수신이 와도 어느 점이 그 차인지 알 수 없다.
+
+        근거는 '대기열이 비어 있다'는 사실이다. 입구를 지난 차라면 그 번호가
+        대기열에 있어야 한다. 대기열이 비었는데 돌아다니는 차가 있다면 그
+        차는 밖에서 들어온 차가 아니라 안에 있던 차다. 방금 자리를 비운 차가
+        기록에 있으면(A01.take_departed_car) 그 번호를 준다.
+
+        안내(활성 차량)로 삼지는 않는다. 나가는 차에게는 갈 목표가 없고,
+        목표 없이 활성으로 두면 출구 앞에 서 있는 동안 안전장치
+        (STUCK_RELEASE_SEC)가 걸려 엉뚱한 빈자리에 '주차 완료'로 처리된다.
+        번호만 붙여 화면과 출차 정산이 그 차를 알아보게 하면 된다.
+
+        확실하지 않으면 아무것도 하지 않는다. 잘못 붙인 번호는 없느니만 못하다.
+        """
+        if not self.single.get('DEPARTED_REBIND', True):
+            return
+        if self.fifo.size():
+            return          # 대기 중인 번호가 있다. 그쪽이 먼저다.
+        if self._parked_known and not self._world_ready:
+            return          # 좌표계가 없으면 서 있는 차와 움직이는 차를 못 가린다
+
+        from logic.A01_parking_manager import take_departed_car
+
+        for trk in tracks:
+            track_id = trk["track_id"]
+            if track_id in self.track_to_car:
+                continue
+            if self.hit_counts.get(track_id, 0) < self.single['MIN_HITS']:
+                continue
+
+            moved, threshold = self._recent_movement(track_id, now)
+            if moved is None or moved < threshold:
+                continue        # 서 있는 차다. 자리에서 나온 차가 아니다.
+
+            car_id = take_departed_car(exclude=set(self.track_to_car.values()))
+            if car_id is None:
+                return          # 자리를 뜬 차가 없다. 다음 프레임에 다시 본다.
+
+            self._bind_car(track_id, car_id, now, mark=False)
+            print(f"[매칭] 대기열이 비어 자리를 뜬 차로 봅니다. "
+                  f"Track ID {track_id} <- 차량번호 '{car_id}'")
 
     def _bind_active(self, track_id, now):
         """활성 차량번호를 트랙에 붙이고, 이전 트랙에 남아 있던 흔적을 지운다."""
