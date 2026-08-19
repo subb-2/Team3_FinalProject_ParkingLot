@@ -58,7 +58,9 @@ from data.car_data import cars_info, get_car_type
 from logic.B02_car_mot import CONFIG as B02_CONFIG
 # 영상 위 상태 글자 on/off는 C_main이 들고 있다. 화면은 그 값을 읽기만 한다.
 from logic.C_main import CONFIG as C_MAIN_CONFIG
-from logic.C02_lot_layout import CONFIG as C02_CONFIG, SPOT_WORLD_POS
+from logic.C02_lot_layout import (
+    CONFIG as C02_CONFIG, SPOT_WORLD_POS, GATE2_WORLD_POS,
+)
 # 차 위치에서 시작하는 남은 경로. 4번 화면(D00)과 같은 선을 그려야 하므로
 # 계산은 C01 한 곳에서 가져다 쓴다.
 from logic.C01_path_planner import route_from_position
@@ -122,6 +124,24 @@ CONFIG = {
     # 지나가는 차까지 세면 통로를 지날 때마다 옆 자리가 찼다 비었다 한다.
     "OCCUPY_STILL_SEC": 2.0,
     "OCCUPY_MOVE_CM": 3.0,
+
+    # 안내를 받는 차의 점을 선 위로 올릴 때, 선에서 이만큼 넘게 떨어져
+    # 있으면 올리지 않고 실제 위치에 찍는다.
+    # C01의 재계획 기준(12cm)의 두 배. 그보다 벌어졌다면 경로가 곧 다시
+    # 짜일 상황이라, 억지로 선 위에 붙여 두면 차가 어디 있는지 알 수 없다.
+    "ON_ROUTE_SNAP_MAX_CM": 25.0,
+
+    # --- 출구에서 사라진 차 ---------------------------------------------
+    # 출구에서 이 거리(cm) 안에서 검출이 끊기면 나간 것으로 보고, 점을 그
+    # 자리에 붙들어 둔다.
+    #
+    # 그러지 않으면 점이 그 차의 기록에 적힌 주차 자리로 되돌아간다. 나가는
+    # 차가 출구에서 사라졌다가 자리로 튀어 오르니 화면이 어지럽다.
+    "EXIT_HOLD_RADIUS_CM": 25.0,
+
+    # 붙들어 둔 점을 이만큼 지나면 지운다 (초).
+    # 시연 한 판을 넘길 만큼 길게, 하루 종일 남지는 않을 만큼 짧게.
+    "EXIT_HOLD_SEC": 300.0,
 
     # 자리가 이 시간 동안 계속 비어 보여야 비운 것으로 친다.
     # 손으로 차를 옮기는 동안에는 검출이 흔들리므로 한두 프레임으로
@@ -599,18 +619,39 @@ def world_to_cell(world_cm):
             world_cm[0] / C02_CONFIG['CELL_W_CM'] + origin_col)
 
 
-def _build_cars_on_map(pipeline):
+# 마지막으로 본 자리. {키: {"world", "car_id", "at"}}
+# 출구 근처에서 검출이 끊긴 차의 점을 그 자리에 붙들어 두는 데 쓴다.
+_last_seen_dot = {}
+
+
+def _build_cars_on_map(pipeline, route_on_map=None):
     """
     3번 구간 격자 위에 찍을 차량 점 목록.
 
     픽셀 모드의 world_pos는 이미지 픽셀이므로 cm로 옮긴 뒤 격자 좌표로 바꾼다.
     (PillarMapper.pixel_to_cm)
 
+    Args:
+        route_on_map: _build_route_on_map의 결과. 안내를 받는 차의 점은 그
+                      선 위에 올린다.
+
     Returns:
         [{"key", "car_id", "row", "col", "parked", "target_spot"}, ...]
     """
     mapper = pipeline.navigator.mapper
+    now = time.time()
     cars = []
+
+    # 안내선 위의 시작점. 그 차의 점을 여기로 옮긴다.
+    #
+    # 차는 차선 한가운데를 정확히 밟지 않으므로, 실제 좌표에 찍으면 점이 선
+    # 옆에서 따라다닌다. 4번 화면의 화살표를 선 위에 세운 것과 같은 이유이고,
+    # 같은 값(경로 위로 내려 찍은 점)을 쓴다.
+    on_route, on_route_anchor, on_route_car = None, None, None
+    if route_on_map and route_on_map.get("points"):
+        on_route = route_on_map["points"][0]
+        on_route_anchor = route_on_map.get("anchor_cm")
+        on_route_car = route_on_map.get("car_id")
 
     for nav in pipeline.latest_nav:
         pos = nav.get("world_pos")
@@ -628,16 +669,62 @@ def _build_cars_on_map(pipeline):
 
         car_id = nav.get("car_id")
         info = cars_info.get(car_id) if car_id else None
+        key = car_id or f"#{nav.get('track_id')}"
+
+        # 지금 안내를 받는 차라면 선 위로 올린다.
+        #
+        # 단, 선에서 멀리 떨어져 있으면 올리지 않는다. 경로를 다시 짜기 전
+        # (REPLAN_TOLERANCE_CM)이나 안내 대상이 아닌 자리에 있을 때 그 차의
+        # 실제 위치를 숨기게 되기 때문이다. 화면은 그럴 때 있는 그대로를
+        # 보여야 한다.
+        if (on_route is not None and car_id and car_id == on_route_car
+                and on_route_anchor is not None
+                and math.dist(world, on_route_anchor)
+                <= CONFIG['ON_ROUTE_SNAP_MAX_CM']):
+            row, col = on_route["row"], on_route["col"]
+
+        _last_seen_dot[key] = {"world": world, "car_id": car_id, "at": now}
         cars.append({
             # 번호가 아직 안 붙은 차도 점은 찍는다. 화면에서 사라졌다 나타나면
             # 오히려 헷갈리기 때문이다. 대신 색을 달리한다.
-            "key": car_id or f"#{nav.get('track_id')}",
+            "key": key,
             "car_id": car_id,
             "row": round(row, 3),
             "col": round(col, 3),
             "parked": bool(info and info.get("parked")),
             "target_spot": nav.get("target_spot"),
             "tracked": True,
+        })
+
+    # 출구에서 사라진 차는 그 자리에 붙들어 둔다.
+    #
+    # 나가는 차는 출구를 지나면서 검출이 끊긴다. 그때 아무것도 하지 않으면
+    # 아래 '주차한 차' 규칙이 그 차를 기록에 적힌 자리로 되돌려 놓아서, 점이
+    # 출구에서 사라졌다가 주차 자리로 튀어 오른다.
+    #
+    # 마지막으로 본 자리가 출구 근처였다면 나간 것으로 보고 그 자리에 둔다.
+    keys = {c["key"] for c in cars}
+    exited = set()
+    for key, last in list(_last_seen_dot.items()):
+        if now - last["at"] > CONFIG['EXIT_HOLD_SEC']:
+            del _last_seen_dot[key]
+            continue
+        if key in keys or GATE2_WORLD_POS is None:
+            continue
+        if math.dist(last["world"], GATE2_WORLD_POS) > CONFIG['EXIT_HOLD_RADIUS_CM']:
+            continue
+
+        row, col = world_to_cell(last["world"])
+        exited.add(last["car_id"])
+        cars.append({
+            "key": key,
+            "car_id": last["car_id"],
+            "row": round(row, 3),
+            "col": round(col, 3),
+            "parked": False,
+            "target_spot": None,
+            "tracked": False,
+            "exited": True,
         })
 
     # 주차를 마친 차는 추적이 끊겨도 점을 유지한다.
@@ -648,7 +735,7 @@ def _build_cars_on_map(pipeline):
     # (자리를 뜨면 감시 스레드가 parked를 풀어 주므로 점도 같이 사라진다)
     seen = {c["car_id"] for c in cars if c["car_id"]}
     for car_id, info in list(cars_info.items()):
-        if car_id in seen or not info.get("parked"):
+        if car_id in seen or car_id in exited or not info.get("parked"):
             continue
         spot_pos = SPOT_WORLD_POS.get(info.get("spot_id"))
         if spot_pos is None:
@@ -747,6 +834,9 @@ def _build_route_on_map(pipeline, follow_car=None):
     return {
         "car_id": nav.get("car_id"),
         "target_spot": nav.get("target_spot"),
+        # 선 위의 시작점(cm). 차량 점을 이 자리로 올릴 때 쓴다.
+        # 화면은 아래 points만 쓰고 이 값은 보지 않는다.
+        "anchor_cm": points[0] if points else None,
         # 계획기가 역주행 구간을 물고 나왔다는 표시. 화면이 붉게 그린다.
         # (C00._check_one_way가 판정하고 터미널에도 한 번 남긴다)
         "wrong_way": bool(nav.get("route_wrong_way")),
@@ -786,6 +876,9 @@ def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
         if not info.get("parked") and info.get("spot_id"):
             assigned_pending[info["spot_id"]] = car_id
 
+    # 3번 구간의 안내 경로. 아래에서 차량 점을 이 선 위에 올리는 데도 쓴다.
+    route_on_map = _build_route_on_map(pipeline, follow_car)
+
     # 자리별 상태
     snapshot = list(cars_info.items())
     spots = {}
@@ -817,10 +910,12 @@ def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
 
         # --- 3번 구간 ---
         "spots": spots,
-        # 격자 위에 실시간으로 움직이는 차량 점
-        "cars_on_map": _build_cars_on_map(pipeline),
+        # 격자 위에 실시간으로 움직이는 차량 점.
+        # 안내 경로를 먼저 만들어 넘긴다. 안내를 받는 차의 점은 그 선 위에
+        # 올려야 하는데, 선 위의 어디인지는 경로 쪽이 이미 계산해 두었다.
+        "cars_on_map": _build_cars_on_map(pipeline, route_on_map),
         # 4번 구간이 안내하는 것과 같은 경로. 격자 위에 파란 선으로 깐다.
-        "route_on_map": _build_route_on_map(pipeline, follow_car),
+        "route_on_map": route_on_map,
         "assigned_pending": assigned_pending,
         "availability": {
             info["name"]: {"empty": info["empty"], "total": info["total"]}
@@ -1018,6 +1113,10 @@ FINAL_UI_HTML = r"""
       transition:left .4s linear, top .4s linear}
  #cars .car.parked{background:var(--ok);box-shadow:0 0 0 2px rgba(26,127,67,.4)}
  #cars .car.unknown{background:var(--warn);box-shadow:0 0 0 2px rgba(163,90,0,.4)}
+ /* 출구에서 검출이 끊긴 차. 지금 보고 있는 것이 아니라 마지막으로 본
+    자리이므로, 살아 있는 점과 같은 색으로 두면 아직 거기 있는 것으로 읽힌다. */
+ #cars .car.exited{background:var(--dim);box-shadow:0 0 0 2px rgba(102,110,122,.25);
+      opacity:.75}
  #cars .car > span{position:absolute;left:13px;top:-5px;font-size:10px;font-weight:700;
              color:var(--text);text-shadow:0 0 4px #fff,0 0 4px #fff;
              white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -1524,7 +1623,8 @@ function renderCars(st){
       carEls[c.key] = el;
       el.querySelector('span').textContent = c.key;
     }
-    el.className = 'car' + (c.parked ? ' parked' : '') + (c.car_id ? '' : ' unknown');
+    el.className = 'car' + (c.exited ? ' exited' : (c.parked ? ' parked' : ''))
+                 + (c.car_id ? '' : ' unknown');
     el.style.left = (c.col * (cw + LOT_GAP) + cw / 2) + 'px';
     el.style.top  = (c.row * (ch + LOT_GAP) + ch / 2) + 'px';
   });
