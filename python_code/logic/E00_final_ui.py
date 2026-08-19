@@ -235,6 +235,23 @@ class RxFeed:
             "source": "manual",
         })
 
+    def clear(self):
+        """
+        수신 목록을 비운다. 누적 개수도 0으로 되돌린다.
+
+        번호판을 잘못 읽어 들어온 값을 지울 때, 대기열만 비우면 수신 목록에는
+        그 번호가 그대로 남아 있어 무엇이 지워졌는지 알 수 없다. 화면에 보이는
+        것과 실제 상태가 같아야 한다.
+
+        Returns:
+            지운 건수.
+        """
+        with self._lock:
+            dropped = len(self._items)
+            self._items.clear()
+            self._total = {"entry": 0, "exit": 0}
+        return dropped
+
     def snapshot(self):
         with self._lock:
             return list(self._items), dict(self._total)
@@ -1742,7 +1759,8 @@ async function resetQueue(){
     const r = await (await fetch('/queue/reset')).json();
     b.textContent = r.cleared.length
       ? `${r.cleared.length}개 지움 (${r.cleared.join(', ')})`
-      : '대기열이 비어 있음';
+      : (r.rx_cleared ? '수신 목록만 비움' : '지울 것이 없음');
+    tick();          // 수신 목록과 자리 상태를 바로 다시 그린다
   } catch (e) {
     console.error('대기열 리셋 실패', e);
     b.textContent = '리셋 실패';

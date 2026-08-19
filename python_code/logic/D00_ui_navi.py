@@ -92,6 +92,21 @@ CONFIG = {
     "NAV_TURN_DEADBAND_DEG": 10.0,  # 이 안쪽의 방향 변화는 무시 (미세 떨림)
     "NAV_TURN_RATE_DEG": 2.5,   # 한 프레임에 돌릴 수 있는 최대 각도
     "NAV_HEADING_SMOOTH": 0.18, # 목표 각도로 다가가는 비율 (작을수록 부드러움)
+
+    # 안내 경로를 따라 화면을 돌릴 때의 최대 각도 (한 프레임).
+    #
+    # 위의 값들과 따로 두는 이유: 그쪽은 검출로 잰 진행 방향을 다루는 값이다.
+    # 그 각도는 상자가 몇 픽셀 흔들리는 것만으로도 튀기 때문에 느리게
+    # 따라가야 하고, 그래서 한 프레임에 2.5도씩만 돌린다.
+    #
+    # 경로 방향은 잴 필요가 없다. 계획된 선의 방향이라 정확하고, 모서리에서
+    # 한 번에 90도 바뀌는 것 말고는 변하지 않는다. 거를 잡음이 없는데 느리게
+    # 돌리면 그냥 굼뜬 화면이 된다. 실제로 코너를 돈 뒤 지나온 선이 3초쯤
+    # 걸려 천천히 쓸려 나갔다.
+    #
+    # 20fps에서 12도면 직각 한 번이 0.4초다. 눈으로 따라갈 만큼은 부드럽고,
+    # 기다린다는 느낌은 들지 않는다.
+    "NAV_ROUTE_TURN_RATE_DEG": 12.0,
     "NAV_FLIP_HOLD": 10,        # 180도 급반전은 이만큼 이어져야 인정한다
 
     "NAV_LABEL_RANGE_CM": 60.0, # 이 거리 안쪽 구역만 이름을 적는다
@@ -664,9 +679,14 @@ class NavigationView:
             return None
         return here, math.degrees(math.atan2(dy, dx))
 
-    def _view_heading(self, moving_deg):
+    def _view_heading(self, moving_deg, from_route=False):
         """
         지도를 어느 방향으로 세울지 결정. 정지 중에는 직전 값을 그대로 쓴다.
+
+        Args:
+            moving_deg: 목표 각도. 경로 방향이거나 검출로 잰 진행 방향이다.
+            from_route: 경로에서 온 각도인가. 그렇다면 잡음이 없으므로
+                        떨림을 거르는 장치를 걷어내고 빠르게 돌린다.
         """
         if self._display_heading is None:
             # 아직 한 번도 안 움직인 차를 임의 방향으로 돌려놓으면 어디가
@@ -679,6 +699,16 @@ class NavigationView:
             return self._display_heading
 
         diff = (moving_deg - self._display_heading + 180) % 360 - 180
+
+        if from_route:
+            # 경로 방향은 정확하다. 사각지대(deadband)도 급반전 대기도 두지
+            # 않고, 목표를 향해 최대 속도로 돌린다. 남은 각도가 작으면 그만큼만
+            # 돌아 한 프레임에 정확히 맞춘다.
+            rate = CONFIG['NAV_ROUTE_TURN_RATE_DEG']
+            step = max(-rate, min(rate, diff))
+            self._display_heading = (self._display_heading + step + 180) % 360 - 180
+            return self._display_heading
+
 
         # 180도 급반전. 후진이나 유턴이면 계속 이어지고, 검출 떨림이면
         # 다음 프레임에 사라진다. 이어질 때만 받아들인다.
@@ -757,7 +787,7 @@ class NavigationView:
             course = moving
         else:
             car_pos, course = anchor
-        heading = self._view_heading(course)
+        heading = self._view_heading(course, from_route=anchor is not None)
 
         # 1) 노면 레이어를 '위에서 본' 상태로 그린 뒤 원근 변환
         ground = np.full((self.height, self.width, 3), COLOR_NAV_GROUND, dtype=np.uint8)
