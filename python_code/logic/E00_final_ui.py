@@ -1,23 +1,28 @@
 """
 E00_final_ui : 최종 통합 관제 화면
 
-위에 1번 구간을 가로 띠로 깔고, 그 아래를 2·3·4번이 똑같이 3등분한다.
+네 구간을 십자로 4등분한다.
 
-    +------------------------------------------------------------------+
-    | 1) 차량 번호 수신 및 저장                                            |
-    |   [수신] -저장-> [차량 번호 대기열] -----> [안내 중] [주차완료]        |
-    +--------------------+-------------------+-------------------------+
-    | 2) 주차장 CCTV       | 3) 주차장 상태      | 4) 실시간 주차 안내        |
-    |                    |                   |                         |
-    |  카메라 원본 +       |  전체 자리 현황 +    |  차량 시점 내비게이션       |
-    |  검출/추적 오버레이   |  일방통행 화살표 +   |  (D00 재사용)            |
-    |  (B01/B02)         |  안내 경로(파란 선)  |                         |
-    +--------------------+-------------------+-------------------------+
+    +-----------------------------+-----------------------------+
+    | 1) 차량 번호 수신 및 저장       | 2) 주차장 CCTV               |
+    |   [수신]   -저장->  [대기열]   |                             |
+    |   [안내 중] -도착->  [주차완료] |  카메라 원본 +               |
+    |                             |  검출/추적 오버레이 (B01/B02)  |
+    +-----------------------------+-----------------------------+
+    | 3) 주차장 상태                | 4) 실시간 주차 안내            |
+    |                             |                             |
+    |  전체 자리 현황 +              |  차량 시점 내비게이션          |
+    |  안내 경로(파란 선)            |  (D00 재사용)                |
+    +-----------------------------+-----------------------------+
 
-1번을 가로 띠로 올린 이유는 이 구간이 보여주는 것이 '한 대의 차가 수신에서
-안내, 주차 완료까지 지나가는 흐름'이기 때문이다. B02의 CarNumberFIFO가 실제로
-하는 일(뒤로 쌓고 앞에서 꺼낸다)을 왼쪽에서 오른쪽으로 그대로 늘어놓는다.
-숫자 하나('대기 3대')로 줄이면 어느 차가 다음 차례인지가 화면에서 사라진다.
+왼쪽 위에서 시계 방향으로 '번호를 받는다 -> 차를 본다 -> 자리를 정한다 ->
+그 차에게 길을 알려준다'가 된다.
+
+1번 구간은 한 대의 차가 수신에서 안내, 주차 완료까지 지나가는 흐름을 그대로
+늘어놓는다. B02의 CarNumberFIFO가 실제로 하는 일이다. 화면의 4분의 1이라
+여섯 칸을 가로로 이을 수 없어 두 단 두 행으로 접었고, 읽는 순서는 그대로
+왼쪽에서 오른쪽, 위에서 아래다. 숫자 하나('대기 3대')로 줄이면 어느 차가
+다음 차례인지가 화면에서 사라진다.
 
 3번의 안내 경로는 4번이 그리는 것과 같은 경로다. 4번은 차 기준으로 돌려 원근을
 입힐 뿐이라, 일방통행을 지키는지는 화살표와 같은 평면인 3번에서 확인한다.
@@ -1035,10 +1040,17 @@ FINAL_UI_HTML = r"""
 
     아래 셋은 1fr씩 똑같이. 퍼센트로 주면 33%x3 + gap이 100%를 넘어
     오른쪽이 잘린다. */
- #app{display:grid;grid-template-rows:auto 1fr;
+ /* 네 구간을 십자로 4등분한다.
+      +----------------+----------------+
+      | 1 차량 번호 수신 | 2 주차장 CCTV   |
+      +----------------+----------------+
+      | 3 주차장 상태    | 4 실시간 안내    |
+      +----------------+----------------+
+    왼쪽 위에서 시작해 시계 방향으로 '번호를 받는다 -> 차를 본다 ->
+    자리를 정한다 -> 그 차에게 길을 알려준다'가 된다.
+    1fr 네 칸이라 어느 구간도 다른 구간에 밀리지 않는다. */
+ #app{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;
       gap:10px;padding:10px;height:100vh}
- #grid{display:grid;grid-template-columns:1fr 1fr 1fr;
-       gap:10px;min-height:0;min-width:0}
  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;
       display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
  .col > h2{margin:0;padding:11px 14px;font-size:15px;font-weight:600;
@@ -1053,26 +1065,25 @@ FINAL_UI_HTML = r"""
  /* ---- 1번 구간 : 수신 -> FIFO -> 안내 (가로 흐름) ----
     로직 순서 그대로 왼쪽에서 오른쪽으로 늘어놓는다.
       수신(A00) -> push -> 대기열(CarNumberFIFO) -> pop -> 안내 중(B02) -> 주차 완료 */
- /* 세로를 넉넉히 준다. 좁으면 대기열 카드와 안내문이 눌려 읽기 어렵다. */
- #pipe{display:flex;align-items:stretch;gap:0;padding:12px;
-       min-height:200px;overflow:hidden}
+ /* 한 구간이 화면의 4분의 1이라 여섯 칸을 가로로 늘어놓을 수 없다.
+    두 단 두 행으로 접는다. 읽는 순서는 그대로다.
+      [수신]  -저장->  [대기열]
+      [안내 중] -도착-> [주차 완료]  */
+ #pipe{display:grid;grid-template-columns:1fr auto 1fr;
+       grid-template-rows:1fr 1fr;gap:10px 6px;padding:12px;
+       min-height:0;overflow:hidden}
  .stg{background:var(--sunken);border:1px solid var(--line);border-radius:8px;
       padding:10px 13px;display:flex;flex-direction:column;min-width:0;
       justify-content:flex-start}
  .stg > .cap{font-size:11px;color:var(--dim);margin-bottom:8px;white-space:nowrap;
              display:flex;justify-content:space-between;gap:8px;align-items:baseline}
- .stg.rxbox{flex:0 0 230px}
- .stg.queue{flex:1;min-width:0;border-color:#a8c6e8;background:#eef5fd}
- /* '안내 중'과 '주차 완료'는 글이 길어 좁으면 줄이 잘린다.
-    안내문은 두 줄(자리 + 사유)이 다 보여야 한다. */
- .stg.act  {flex:0 0 250px}
- .stg.done {flex:0 0 420px}
+ .stg.queue{border-color:#a8c6e8;background:#eef5fd}
 
  /* 단계 사이 화살표. push / pop이 어느 쪽으로 도는지가 이 화면의 핵심이다. */
  /* 화살표 칸의 폭은 그 안의 글자가 한 줄로 들어갈 만큼이어야 한다.
     좁으면 '차량 번호 저장'이 두 줄로 접혀 화살표가 밀린다. 늘린 만큼은
     옆의 대기열(flex:1)에서 가져오므로 전체 폭은 그대로다. */
- .flowarw{flex:0 0 100px;display:flex;flex-direction:column;align-items:center;
+ .flowarw{width:100px;display:flex;flex-direction:column;align-items:center;
           justify-content:center;color:var(--dim);font-size:10px;gap:2px;
           white-space:nowrap}
  .flowarw b{font-size:11px;color:var(--accent);font-weight:700;white-space:nowrap}
@@ -1258,7 +1269,7 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 1번 구간 : 수신 -> 차량 번호 대기열 -> 안내 -> 주차 완료 (상단 가로 띠).
+  <!-- 1번 구간 : 수신 -> 차량 번호 대기열 -> 안내 -> 주차 완료 (왼쪽 위).
        B02의 CarNumberFIFO가 실제로 하는 일을 그대로 늘어놓은 것이다. -->
   <div class="col" id="top">
     <h2><span><span class="num">1</span>차량 번호 수신 및 저장</span>
@@ -1282,8 +1293,6 @@ FINAL_UI_HTML = r"""
         </div>
       </div>
 
-      <div class="flowarw"><div class="ln"></div><span>움직이는 차</span></div>
-
       <div class="stg act">
         <div class="cap"><span>안내 중</span></div>
         <div id="active"><div class="empty">없음</div></div>
@@ -1299,51 +1308,46 @@ FINAL_UI_HTML = r"""
     </div>
   </div>
 
-  <!-- 아래 3등분 : 2 CCTV / 3 주차장 상태 / 4 실시간 안내 -->
-  <div id="grid">
-
-    <!-- 2번 구간 : 주차장 CCTV (차량 검출/추적 오버레이) -->
-    <div class="col">
-      <h2><span><span class="num">2</span>주차장 CCTV 화면</span>
-          <span class="sub" id="camsub">-</span></h2>
-      <div id="camwrap">
-        <img id="camimg" src="/video_feed">
-        <div id="tracks"></div>
-      </div>
-      <div id="caminfo">
-        <span><button id="calbtn" onclick="location.href='/calibrate'"
-                      title="기둥을 다시 찍어 좌표계를 잡습니다">기둥 보정</button>
-              <button id="dbgbtn" onclick="toggleDebug()">디버그</button>
-              <button id="qrstbtn" onclick="resetQueue()"
-                      title="번호판을 잘못 읽어 들어온 번호를 지웁니다. 대기 중인 번호와 그 배정까지 되돌립니다"
-                      >차량 번호 대기열 리셋</button>
-              <span id="camdet">검출 대기 중</span></span>
-        <span><span class="pill" id="cammark">-</span>
-              <span class="pill" id="camfps">-</span></span>
-      </div>
+  <!-- 2번 구간 : 주차장 CCTV (차량 검출/추적 오버레이) -->
+  <div class="col">
+    <h2><span><span class="num">2</span>주차장 CCTV 화면</span>
+        <span class="sub" id="camsub">-</span></h2>
+    <div id="camwrap">
+      <img id="camimg" src="/video_feed">
+      <div id="tracks"></div>
     </div>
-
-    <!-- 3번 구간 : 주차장 상태 -->
-    <div class="col">
-      <h2><span><span class="num">3</span>주차장 상태</span>
-          <span class="sub"><span id="lotroute"></span>
-          <span id="lottime">-</span></span></h2>
-      <div id="lotwrap"><div id="lot"></div></div>
-      <div id="avail"></div>
+    <div id="caminfo">
+      <span><button id="calbtn" onclick="location.href='/calibrate'"
+                    title="기둥을 다시 찍어 좌표계를 잡습니다">기둥 보정</button>
+            <button id="dbgbtn" onclick="toggleDebug()">디버그</button>
+            <button id="qrstbtn" onclick="resetQueue()"
+                    title="번호판을 잘못 읽어 들어온 번호를 지웁니다. 대기 중인 번호와 그 배정까지 되돌립니다"
+                    >차량 번호 대기열 리셋</button>
+            <span id="camdet">검출 대기 중</span></span>
+      <span><span class="pill" id="cammark">-</span>
+            <span class="pill" id="camfps">-</span></span>
     </div>
+  </div>
 
-    <!-- 4번 구간 : 실시간 주차 안내 -->
-    <div class="col">
-      <h2><span><span class="num">4</span>실시간 주차 안내</span>
-          <span class="sub" id="navsub">-</span></h2>
-      <div id="navwrap"><img id="navimg" src="/nav_feed"></div>
-      <div id="navinfo">
-        <span id="navguide">대기 중</span>
-        <span><span class="pill" id="navhomo">-</span>
-              <span class="pill" id="navfps">-</span></span>
-      </div>
+  <!-- 3번 구간 : 주차장 상태 -->
+  <div class="col">
+    <h2><span><span class="num">3</span>주차장 상태</span>
+        <span class="sub"><span id="lotroute"></span>
+        <span id="lottime">-</span></span></h2>
+    <div id="lotwrap"><div id="lot"></div></div>
+    <div id="avail"></div>
+  </div>
+
+  <!-- 4번 구간 : 실시간 주차 안내 -->
+  <div class="col">
+    <h2><span><span class="num">4</span>실시간 주차 안내</span>
+        <span class="sub" id="navsub">-</span></h2>
+    <div id="navwrap"><img id="navimg" src="/nav_feed"></div>
+    <div id="navinfo">
+      <span id="navguide">대기 중</span>
+      <span><span class="pill" id="navhomo">-</span>
+            <span class="pill" id="navfps">-</span></span>
     </div>
-
   </div>
 
 </div>
