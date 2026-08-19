@@ -60,7 +60,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from data.map_data import (
-    grid_map, coord_to_spot, PILL_MARKER_ID, spot_type as SPOT_TYPE_OF,
+    grid_map, coord_to_spot, spot_map, PILL_MARKER_ID, spot_type as SPOT_TYPE_OF,
     SPOT_TYPE_NAME, SPOT_CELLS, ROAD, PILL, GATE1, GATE2,
     SPOT1, SPOT2, SPOT3, SPOT4, get_rows, get_cols, one_way_segments,
 )
@@ -140,6 +140,18 @@ CONFIG = {
     # C01의 재계획 기준(12cm)의 두 배. 그보다 벌어졌다면 경로가 곧 다시
     # 짜일 상황이라, 억지로 선 위에 붙여 두면 차가 어디 있는지 알 수 없다.
     "ON_ROUTE_SNAP_MAX_CM": 25.0,
+
+    # 주차를 마친 차의 점을 자리 칸 한가운데로 옮길 때, 실제 위치가 그 칸에서
+    # 이만큼(칸 수) 넘게 떨어져 있으면 옮기지 않는다.
+    #
+    # 세워둔 차의 점이 칸 경계에 걸쳐 있으면 어느 자리에 선 것인지 화면만
+    # 보고는 알 수 없다. 기록은 이미 그 자리라고 말하고 있으므로 점도 그
+    # 칸에 앉히는 것이 맞다.
+    #
+    # 다만 통로 한가운데에 세운 차(오주차 판정에서 자리를 못 찾은 경우)까지
+    # 끌어다 놓으면, 화면이 있지도 않은 곳에 차가 선 것처럼 말하게 된다.
+    # 그래서 그 칸 언저리에 있을 때만 옮긴다.
+    "PARKED_SNAP_MAX_CELL": 1.5,
 
     # --- 출구에서 사라진 차 ---------------------------------------------
     # 출구에서 이 거리(cm) 안에서 검출이 끊기면 나간 것으로 보고, 점을 그
@@ -690,6 +702,33 @@ def world_to_cell(world_cm):
             world_cm[0] / C02_CONFIG['CELL_W_CM'] + origin_col)
 
 
+def spot_dot_cell(spot_id, world=None):
+    """
+    주차를 마친 차의 점을 찍을 칸 (행, 열). 정수로 돌려준다.
+
+    3번 격자는 정수 좌표를 칸 한가운데로 그리므로(renderCars), 이 값을 그대로
+    넘기면 점이 칸 중앙에 앉는다.
+
+    대형 자리처럼 두 칸이 한 자리인 경우에는 차가 실제로 있던 쪽 칸을 고른다.
+    자리 중심(SPOT_WORLD_POS)을 쓰면 두 칸 사이 경계선 위에 점이 걸린다.
+    위치를 모르면 첫 칸에 둔다.
+
+    Args:
+        spot_id: 구역 ID
+        world:   그 차의 실제 위치 (cm). 없으면 None.
+
+    Returns:
+        (row, col). 배치에 없는 구역이면 None.
+    """
+    cells = spot_map.get(spot_id)
+    if not cells:
+        return None
+    if world is None or len(cells) == 1:
+        return cells[0]
+    row, col = world_to_cell(world)
+    return min(cells, key=lambda rc: (rc[0] - row) ** 2 + (rc[1] - col) ** 2)
+
+
 # 마지막으로 본 자리. {키: {"world", "car_id", "at"}}
 # 출구 근처에서 검출이 끊긴 차의 점을 그 자리에 붙들어 두는 데 쓴다.
 _last_seen_dot = {}
@@ -754,6 +793,18 @@ def _build_cars_on_map(pipeline, route_on_map=None):
                 <= CONFIG['ON_ROUTE_SNAP_MAX_CM']):
             row, col = on_route["row"], on_route["col"]
 
+        # 주차를 마친 차는 그 자리 칸 한가운데에 앉힌다.
+        #
+        # 차는 칸에 딱 맞춰 서지 않으므로 실제 좌표에 찍으면 점이 칸 경계에
+        # 걸친다. 어느 자리에 선 것인지 화면만 보고는 알 수 없고, 미리
+        # 세워둔 차들도 옆 칸에 들어가 있는 것처럼 보인다. 주차가 끝났다는
+        # 것은 이미 판정이 났으므로(parked), 점은 그 판정을 따르면 된다.
+        # 안내 중인 차는 해당하지 않는다. 그 차는 실제로 움직이는 중이다.
+        if info and info.get("parked"):
+            cell = spot_dot_cell(info.get("spot_id"), world)
+            if cell and math.dist(cell, (row, col)) <= CONFIG['PARKED_SNAP_MAX_CELL']:
+                row, col = cell
+
         _last_seen_dot[key] = {"world": world, "car_id": car_id, "at": now}
         cars.append({
             # 번호가 아직 안 붙은 차도 점은 찍는다. 화면에서 사라졌다 나타나면
@@ -808,10 +859,18 @@ def _build_cars_on_map(pipeline, route_on_map=None):
     for car_id, info in list(cars_info.items()):
         if car_id in seen or car_id in exited or not info.get("parked"):
             continue
-        spot_pos = SPOT_WORLD_POS.get(info.get("spot_id"))
-        if spot_pos is None:
-            continue
-        row, col = world_to_cell(spot_pos)
+        # 추적이 없으니 자리 기록만으로 정한다. 두 칸짜리 자리는 마지막으로
+        # 본 위치가 있으면 그쪽 칸을 고른다.
+        last = _last_seen_dot.get(car_id)
+        cell = spot_dot_cell(info.get("spot_id"),
+                             last["world"] if last else None)
+        if cell is not None:
+            row, col = cell
+        else:
+            spot_pos = SPOT_WORLD_POS.get(info.get("spot_id"))
+            if spot_pos is None:
+                continue
+            row, col = world_to_cell(spot_pos)
         cars.append({
             "key": car_id,
             "car_id": car_id,
