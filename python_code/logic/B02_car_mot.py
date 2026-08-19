@@ -151,6 +151,19 @@ CONFIG = {
         # ARRIVAL_RADIUS_CM보다 넉넉하게 둔다. 실제로 세워둔 위치가 자리
         # 중심에서 조금 벗어나 있어도 잡아야 하기 때문이다.
         "PARKED_BIND_RADIUS_CM": 15.0,
+
+        # 위 반경 안에 후보가 둘 이상이면, 1등과 2등의 거리 차가 이만큼은
+        # 나야 붙인다. 그보다 붙어 있으면 어느 차인지 가릴 수 없으므로
+        # 아무 번호도 붙이지 않는다.
+        #
+        # 자리 간격이 세로 17.5cm, 가로 20cm다. 반경 15cm는 옆자리까지
+        # 닿으므로, 두 자리 사이에 선 차가 옆자리 번호를 가져갈 수 있었다.
+        # 8935를 C-2에 세웠는데 그 번호가 옆 차와 뒤바뀐 것이 이 경우다.
+        # 한 번 잘못 붙으면 그 뒤의 자리 기록과 출차까지 전부 어긋난다.
+        #
+        # 번호가 잠깐 'WAIT'로 뜨는 것이 잘못 붙는 것보다 낫다. 차가 자리에
+        # 제대로 들어가면 거리 차가 벌어져 그때 붙는다.
+        "PARKED_BIND_MARGIN_CM": 5.0,
     },
 
     # ---------------------------------------------------------------------
@@ -545,6 +558,8 @@ class CarMOT:
         self._free_spots = {}
         # 길에 멈춰 있다고 이미 알린 차량번호. 같은 줄을 매 프레임 찍지 않는다.
         self._stuck_warned = set()
+        # 두 자리 사이에 있어 번호를 못 붙인다고 이미 알린 Track ID.
+        self._bind_ambiguous_warned = set()
 
         # 지금 안내 중인 차량번호. 주차를 마치면 None으로 돌아간다.
         self.active_car_id = None
@@ -860,8 +875,9 @@ class CarMOT:
             if world is None:
                 continue        # 좌표계가 아직 없으면 판단 불가
 
-            # 반경 안에서 가장 가까운 '아직 안 묶인' 주차 차량
-            best_car, best_dist = None, None
+            # 반경 안에서 가장 가까운 '아직 안 묶인' 주차 차량.
+            # 2등까지 재 둔다. 1등과 붙어 있으면 가릴 수 없다는 뜻이다.
+            best_car, best_dist, second_dist = None, None, None
             for car_id, pos in parked_positions.items():
                 if car_id in taken:
                     continue
@@ -874,10 +890,27 @@ class CarMOT:
                 if dist > radius:
                     continue
                 if best_dist is None or dist < best_dist:
-                    best_car, best_dist = car_id, dist
+                    best_car, best_dist, second_dist = car_id, dist, best_dist
+                elif second_dist is None or dist < second_dist:
+                    second_dist = dist
 
             if best_car is None:
                 continue
+
+            # 두 자리 사이에 서 있어 어느 차인지 가릴 수 없다. 붙이지 않는다.
+            #
+            # 여기서 억지로 고르면 옆 차의 번호를 가져가고, 그 뒤로는
+            # 자리 기록도 출차도 전부 그 잘못된 짝을 따라간다. 잠깐 WAIT로
+            # 두었다가 차가 자리에 제대로 들어가면 그때 붙이는 편이 낫다.
+            margin = self.single.get('PARKED_BIND_MARGIN_CM', 0)
+            if second_dist is not None and second_dist - best_dist < margin:
+                if track_id not in self._bind_ambiguous_warned:
+                    self._bind_ambiguous_warned.add(track_id)
+                    print(f"[주차 결합] Track ID {track_id}는 두 자리 사이에 있어 "
+                          f"번호를 붙이지 않습니다. "
+                          f"({best_car} {best_dist:.1f}cm / 다음 후보 {second_dist:.1f}cm)")
+                continue
+            self._bind_ambiguous_warned.discard(track_id)
 
             # 이미 다른 번호를 달고 있는 트랙이라면, 그 번호가 잘못 나간 것이다.
             #
@@ -1316,6 +1349,7 @@ class CarMOT:
         self.ghosts.clear()
         self.rebound_at.clear()
         self._stuck_warned.clear()
+        self._bind_ambiguous_warned.clear()
 
         self.active_car_id = None
         self._arrived_since = None

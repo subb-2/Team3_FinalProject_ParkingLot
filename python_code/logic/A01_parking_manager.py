@@ -284,6 +284,33 @@ def find_nearest_spot(world_pos, exclude=None, max_distance_cm=None):
     return best_id, best_dist
 
 
+# 기록된 자리에서 다른 자리로 기록을 옮기려면 이만큼은 더 가까워야 한다.
+#
+# 자리 간격이 세로 17.5cm다. 두 자리 사이에 걸쳐 선 차는 거리가 엇비슷해
+# 프레임마다 어느 쪽으로도 읽힐 수 있고, 그때마다 기록이 옮겨 다니면
+# 옆 차의 기록과 뒤바뀐다. 손으로 차를 옮긴 경우에는 자리 하나만큼
+# 차이가 나므로 이 값에 걸리지 않는다.
+RELOCATE_MARGIN_CM = 5.0
+
+# 애매해서 기록을 안 옮겼다고 알린 시각. {(차량번호, 자리): 시각}
+# 감시는 0.2초마다 도는데 같은 줄을 매번 찍으면 터미널을 덮는다.
+_ambiguous_warned = {}
+_AMBIGUOUS_WARN_SEC = 10.0
+
+
+def _warn_ambiguous_spot(car_id, old_spot, old_dist, new_spot, new_dist):
+    """두 자리 사이에 걸쳐 있어 기록을 옮기지 않았다고 알린다. (10초에 한 번)"""
+    key = (car_id, new_spot)
+    now = time.monotonic()
+    last = _ambiguous_warned.get(key)
+    if last is not None and now - last < _AMBIGUOUS_WARN_SEC:
+        return
+    _ambiguous_warned[key] = now
+    print(f"[자리 유지] '{car_id}'가 {old_spot}({old_dist:.0f}cm)와 "
+          f"{new_spot}({new_dist:.0f}cm) 사이에 있습니다. "
+          f"기록은 {old_spot} 그대로 둡니다.")
+
+
 # 자리가 언제부터 비어 보였는지. sync_spot_occupancy만 쓴다.
 _spot_empty_since = {}
 
@@ -350,6 +377,7 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
     # 채우는 것은 radius_cm 안, 비우는 것은 그 1.5배 밖일 때만이다.
     release_cm = radius_cm * 1.5
     occupied = {}
+    seen_at = {}            # {차량번호: 그 차를 본 위치} 아래 판정에 쓴다
     near = set()
     for car_id, world_pos in observations:
         if car_id in guided:
@@ -365,6 +393,33 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
         # 잡히는 일이 있는데, 그때 번호 쪽을 버리면 출차를 못 한다.
         if occupied.get(spot_id) is None:
             occupied[spot_id] = car_id
+            if car_id:
+                seen_at[car_id] = world_pos
+
+    # 1-b) 기록된 자리와 본 자리 사이가 애매하면 옮기지 않는다.
+    #
+    # 자리 간격이 세로 17.5cm인데 자리로 인정하는 반경은 그 절반을 넘는다.
+    # 두 자리 사이에 걸쳐 선 차는 어느 쪽으로도 읽힐 수 있고, 그때 기록을
+    # 옆자리로 옮겨 버리면 그 자리에 있던 차의 기록과 뒤바뀐다. 그 뒤로는
+    # 출차도 뒤바뀐 짝을 따라간다. (8935를 세웠는데 옆 차가 출차된 경우)
+    #
+    # 그래서 지금 기록된 자리보다 뚜렷하게 가까울 때만 옮긴다. 손으로 차를
+    # 옮긴 경우에는 자리 하나만큼 차이가 나므로 그대로 걸린다.
+    for spot_id in list(occupied):
+        car_id = occupied[spot_id]
+        old_spot = cars_info.get(car_id, {}).get("spot_id") if car_id else None
+        if not old_spot or old_spot == spot_id:
+            continue
+
+        new_dist = distance_to_spot(seen_at[car_id], spot_id)
+        old_dist = distance_to_spot(seen_at[car_id], old_spot)
+        if old_dist - new_dist >= RELOCATE_MARGIN_CM:
+            continue        # 옮길 근거가 뚜렷하다
+
+        # 자리는 찼다고 두되 누구인지는 정하지 않는다. 기록을 건드리지
+        # 않으므로 원래 자리도 그대로 남는다.
+        occupied[spot_id] = None
+        _warn_ambiguous_spot(car_id, old_spot, old_dist, spot_id, new_dist)
 
     # 2) 기록을 실제 자리에 맞춘다.
     #
@@ -749,6 +804,7 @@ def reset_all():
 
     _spot_empty_since.clear()
     _orphan_cars.clear()
+    _ambiguous_warned.clear()
     last_entry_result = None
 
     # 시작할 때와 같은 함수로 다시 채운다. 여기서 따로 채우면 시작 상태와
