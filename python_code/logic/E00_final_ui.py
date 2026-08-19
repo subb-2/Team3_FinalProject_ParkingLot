@@ -4,8 +4,8 @@ E00_final_ui : 최종 통합 관제 화면
 위에 1번 구간을 가로 띠로 깔고, 그 아래를 2·3·4번이 똑같이 3등분한다.
 
     +------------------------------------------------------------------+
-    | 1) Zybo 수신 & 차량번호 FIFO                                        |
-    |   [수신] -push-> [FIFO 대기열 front→back] -pop-> [안내 중] [주차완료]  |
+    | 1) 차량 번호 수신 및 저장                                            |
+    |   [수신] -저장-> [차량 번호 대기열] -----> [안내 중] [주차완료]        |
     +--------------------+-------------------+-------------------------+
     | 2) 주차장 CCTV       | 3) 주차장 상태      | 4) 실시간 주차 안내        |
     |                    |                   |                         |
@@ -1121,34 +1121,34 @@ FINAL_UI_HTML = r"""
 </style></head><body>
 <div id="app">
 
-  <!-- 1번 구간 : Zybo 수신 -> FIFO 대기열 -> 안내 -> 주차 완료 (상단 가로 띠).
+  <!-- 1번 구간 : 수신 -> 차량 번호 대기열 -> 안내 -> 주차 완료 (상단 가로 띠).
        B02의 CarNumberFIFO가 실제로 하는 일을 그대로 늘어놓은 것이다. -->
   <div class="col" id="top">
-    <h2><span><span class="num">1</span>Zybo 수신 &amp; 차량번호 FIFO</span>
+    <h2><span><span class="num">1</span>차량 번호 수신 및 저장</span>
         <span class="sub" id="rxcount">-</span></h2>
     <div id="pipe">
 
       <div class="stg rxbox">
-        <div class="cap"><span>수신 (A00)</span><span>2바이트</span></div>
+        <div class="cap"><span>수신</span><span>2바이트</span></div>
         <div id="rxlist">
-          <div class="empty">Zybo 수신 대기 중</div>
+          <div class="empty">차량 번호 수신 대기 중</div>
         </div>
       </div>
 
-      <div class="flowarw"><b>push</b><div class="ln"></div><span>배정 성공만</span></div>
+      <div class="flowarw"><b>차량 번호 저장</b><div class="ln"></div><span>배정 성공만</span></div>
 
       <div class="stg queue">
-        <div class="cap"><span>FIFO 대기열 (front → back)</span>
+        <div class="cap"><span>차량 번호 대기열</span>
                          <span id="qcount">대기 0대</span></div>
         <div class="qrow" id="queue">
           <div class="qempty">대기 중인 차량번호가 없습니다.</div>
         </div>
       </div>
 
-      <div class="flowarw"><b>pop</b><div class="ln"></div><span>움직이는 차</span></div>
+      <div class="flowarw"><div class="ln"></div><span>움직이는 차</span></div>
 
       <div class="stg act">
-        <div class="cap"><span>안내 중 (B02)</span></div>
+        <div class="cap"><span>안내 중</span></div>
         <div id="active"><div class="empty">없음</div></div>
       </div>
 
@@ -1393,7 +1393,7 @@ function renderRx(rx){
 
   const box = document.getElementById('rxlist');
   if (!rx.items.length){
-    box.innerHTML = '<div class="empty">Zybo 수신 대기 중</div>';
+    box.innerHTML = '<div class="empty">차량 번호 수신 대기 중</div>';
     return;
   }
 

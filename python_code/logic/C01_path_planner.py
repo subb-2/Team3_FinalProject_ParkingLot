@@ -149,22 +149,28 @@ CONFIG = {
         "LANE_FREE_CM": 6.0,
 
         # -----------------------------------------------------------------
-        # 목적지 근처에서는 일방통행을 풀어준다
+        # 목적지 앞 통로에서는 일방통행을 풀어준다
         # -----------------------------------------------------------------
-        # 목적지에서 이 거리(cm) 안에서는 역주행 벌점과 차선 인력을 모두 끈다.
+        # 목적지가 있는 열에서 통로 쪽으로 이 칸 수만큼이 예외 구역이다.
+        # 그 안에서는 역주행 벌점과 차선 인력을 모두 끈다.
         #
-        # 자리가 통로 흐름의 '조금 지나친' 쪽에 있으면(자리 중심이 기준선보다
-        # 몇 cm 아래에 있다든지) 규칙만 지켜서는 주차장을 한 바퀴 돌아 다시
+        # 자리를 조금만 지나쳐도 규칙만 지켜서는 주차장을 한 바퀴 돌아 다시
         # 들어오는 경로가 나온다. 계산은 맞지만 눈앞의 자리를 두고 한 바퀴
-        # 도는 안내라 사람이 따르지 않는다.
+        # 도는 안내라 사람이 따르지 않는다. 실제 주차장에서도 자리 앞
+        # 통로에서는 조금 물러서거나 비스듬히 들어가는 것이 허용된다.
         #
-        # 실제 주차장에서도 자리 앞에서는 한두 걸음 물러서거나 비스듬히
-        # 들어가는 것이 허용되므로, 목적지 주변만 예외로 둔다.
+        # 왜 원이 아니라 '열 묶음'인가: 자리로 들어가려면 그 자리가 면한
+        # 통로에 서야 하는데, 원으로 자르면 통로를 따라 얼마나 지나쳤는지에
+        # 따라 예외가 됐다 말았다 한다. 통로 한 줄을 통째로 예외로 두면
+        # 그 통로 안에서는 어디에 있든 바로 자리로 들어갈 수 있다.
         #
-        # 크기: 자리 한 칸(가로 10cm, 세로 17.5cm)을 조금 넘는 정도. 이보다
-        # 크게 잡으면 통로 하나가 통째로 풀려서 진짜 역주행이 나온다.
-        # 0으로 두면 예전 동작(주차장 전체에 규칙 적용)으로 돌아간다.
-        "GOAL_RELAX_CM": 25.0,
+        # 어느 쪽 3줄인지는 자동으로 정해진다. 그 자리에서 가장 가까운 세로
+        # 차선 쪽이다. A열(col 0)은 오른쪽 1~3, B열(col 5)은 왼쪽 4~2,
+        # C열(col 7)은 오른쪽 8~10, D열(col 12)은 왼쪽 11~9가 된다.
+        #
+        # 통로 폭(네 칸)보다 크게 잡으면 건너편 통로까지 풀려서 진짜 역주행이
+        # 나온다. 0으로 두면 주차장 전체에 규칙을 적용한다.
+        "GOAL_RELAX_COLUMNS": 3,
 
         # 계획이 끝난 경로를 차선 위로 붙일 때, 이 거리(cm) 안의 차선까지
         # 끌어당긴다. (SNAP_TO_CELL_CENTERS)
@@ -626,7 +632,8 @@ class RoutePlanner:
     # 8방향 이동 (대각선 포함). 모듈 상단의 MOVES와 같은 것을 쓴다.
     _MOVES = MOVES
 
-    def __init__(self, lot_map, simplify=True, one_way=None, goal_relax_cm=None):
+    def __init__(self, lot_map, simplify=True, one_way=None,
+                 goal_relax_columns=None):
         """
         RoutePlanner 초기화.
 
@@ -635,8 +642,8 @@ class RoutePlanner:
             simplify: True면 직선 구간을 합쳐 경유점을 줄인다
             one_way:  OneWayField 인스턴스. None이면 CONFIG['ONE_WAY']에 따라
                       만든다. False를 주면 일방통행을 끈다. (비교 시험용)
-            goal_relax_cm: 목적지에서 이 거리 안이면 일방통행을 풀어준다.
-                      None이면 CONFIG['ONE_WAY']['GOAL_RELAX_CM'].
+            goal_relax_columns: 목적지가 면한 통로 몇 줄까지 일방통행을
+                      풀어줄지. None이면 CONFIG['ONE_WAY']['GOAL_RELAX_COLUMNS'].
         """
         self.lot_map = lot_map
         self.simplify = simplify
@@ -646,33 +653,56 @@ class RoutePlanner:
                        if CONFIG['ONE_WAY']['ENABLE'] else False)
         self.one_way = one_way or None
 
-        self.goal_relax_cm = (CONFIG['ONE_WAY']['GOAL_RELAX_CM']
-                              if goal_relax_cm is None else goal_relax_cm)
+        self.goal_relax_columns = (CONFIG['ONE_WAY']['GOAL_RELAX_COLUMNS']
+                                   if goal_relax_columns is None
+                                   else goal_relax_columns)
 
-    def _relax_radius_cells(self):
-        """목적지 예외 반경을 격자 칸 수로. 0이면 예외 없음."""
-        if not self.goal_relax_cm or self.one_way is None:
-            return 0.0
-        return self.goal_relax_cm / self.lot_map.resolution
-
-    def _make_relaxed(self, goal_cell):
+    def _relax_side(self, goal_world):
         """
-        '이 칸은 목적지 근처라 일방통행을 묻지 않는다'를 판정하는 함수를 만든다.
+        목적지에서 어느 쪽으로 예외 구역을 펼칠지. (+1 오른쪽, -1 왼쪽)
+
+        그 자리에서 가장 가까운 세로 차선 쪽이다. 자리로 들어가려면 결국 그
+        차선을 타고 와야 하므로, 예외를 둘 곳도 그쪽이다. 중앙 섬처럼 양옆이
+        모두 통로인 자리도 이 기준이면 한쪽으로 정해진다.
+        """
+        best, best_d = None, None
+        for a, b in (self.one_way.segments if self.one_way else ()):
+            if abs(a[0] - b[0]) > self.lot_map.resolution:
+                continue        # 가로 차선. 열을 정하는 데는 쓰지 않는다.
+            d = abs(a[0] - goal_world[0])
+            if best_d is None or d < best_d:
+                best, best_d = a[0], d
+        if best is None:
+            return 1
+        return 1 if best >= goal_world[0] else -1
+
+    def _make_relaxed(self, goal_world):
+        """
+        '이 칸은 목적지 앞 통로라 일방통행을 묻지 않는다'를 판정하는 함수.
+
+        목적지가 있는 열부터 통로 쪽으로 GOAL_RELAX_COLUMNS칸까지가 예외
+        구역이다. 세로로는 자르지 않는다. 그 통로 안이면 자리를 지나쳤든
+        아직 못 미쳤든 바로 들어갈 수 있어야 하기 때문이다.
 
         예외를 두지 않을 때는 None을 돌려주어, 호출부가 판정 자체를 건너뛰게
         한다. (A* 안쪽 반복문이라 함수 호출 한 번도 아깝다)
         """
-        radius = self._relax_radius_cells()
-        if radius <= 0.0:
+        columns = self.goal_relax_columns
+        if not columns or self.one_way is None:
             return None
 
-        gc, gr = goal_cell
-        r2 = radius * radius
+        cell_w = self.lot_map.cell_w
+        side = self._relax_side(goal_world)
+        # 자리 칸의 중심에서 반 칸 바깥부터, 통로 쪽으로 columns칸까지.
+        near = goal_world[0] - side * cell_w / 2.0
+        far = goal_world[0] + side * (columns + 0.5) * cell_w
+
+        lo, hi = sorted((near, far))
+        c_lo, _ = self.lot_map.world_to_cell((lo, goal_world[1]), clamp=True)
+        c_hi, _ = self.lot_map.world_to_cell((hi, goal_world[1]), clamp=True)
 
         def relaxed(cell):
-            dc = cell[0] - gc
-            dr = cell[1] - gr
-            return dc * dc + dr * dr <= r2
+            return c_lo <= cell[0] <= c_hi
 
         return relaxed
 
@@ -704,9 +734,9 @@ class RoutePlanner:
         if start_cell is None or goal_cell is None:
             return None
 
-        # 목적지 근처에서는 일방통행을 풀어준다.
-        # (CONFIG['ONE_WAY']['GOAL_RELAX_CM'] 주석 참고)
-        relaxed = self._make_relaxed(goal_cell)
+        # 목적지가 면한 통로에서는 일방통행을 풀어준다.
+        # (CONFIG['ONE_WAY']['GOAL_RELAX_COLUMNS'] 주석 참고)
+        relaxed = self._make_relaxed(goal_world)
 
         cells = self._astar(start_cell, goal_cell, relaxed)
         if cells is None:
@@ -931,7 +961,7 @@ class RoutePlanner:
 
         # 옮기다가 역주행을 만들면 안 된다. 차선을 통로 한가운데로 옮겼으므로
         # 자리로 들어가는 구간이 그만큼 길어졌고, 그 구간이 목적지 예외 구역
-        # (GOAL_RELAX_CM)을 벗어나면 역주행으로 잡힌다. 계획 결과보다 나빠지면
+        # (GOAL_RELAX_COLUMNS)을 벗어나면 역주행으로 잡힌다. 계획 결과보다 나빠지면
         # 그 구간만 되돌린다.
         wrong_before = len(self.wrong_way_legs([tuple(p) for p in pts]))
 
@@ -1270,15 +1300,14 @@ class RoutePlanner:
 
         Returns:
             [(구간 인덱스, 시작점, 끝점), ...]. 비어 있으면 일방통행을 지킨 것.
-            목적지 예외 구역(GOAL_RELAX_CM) 안은 세지 않는다. 계획기가 일부러
+            목적지 예외 구역(GOAL_RELAX_COLUMNS) 안은 세지 않는다. 계획기가 일부러
             봐준 곳이므로, 여기서 세면 정상 경로가 실패로 나온다.
         """
         if self.one_way is None or not route or len(route) < 2:
             return []
 
         # 경로의 끝점이 목적지다. 계획기가 쓴 것과 같은 예외 구역을 만든다.
-        relaxed = self._make_relaxed(
-            self.lot_map.world_to_cell(route[-1], clamp=True))
+        relaxed = self._make_relaxed(route[-1])
 
         # 차가 주행 불가 칸(주차 구역이나 여유 영역) 안에 있으면 plan()이
         # 출발점을 가장 가까운 통로 칸으로 옮긴다. 그 결과 첫 구간은 '차의 실제
