@@ -9,6 +9,7 @@ from datetime import datetime
 from data.car_data import (
     cars_info, spot_status, get_empty_spots,
     get_car_type, get_required_spot_type, describe_car,
+    billed_minutes, TIME_SCALE,
 )
 from data.map_data import (
     spot_type as SPOT_TYPE_OF, SPOT_TYPE_NAME, SPOT_PRIORITY, get_spot_ids_by_type,
@@ -748,18 +749,23 @@ def remove_car(car_id):
     spot_id = info["spot_id"]
     entry_time = info["entry_time"]
     exit_time = datetime.now()
-    
-    # 주차 시간 계산 (분 단위)
-    duration = exit_time - entry_time
-    duration_minutes = int(duration.total_seconds() / 60)
-    
+
+    # 주차 시간 계산 (분 단위).
+    # 시연 배속(car_data.TIME_SCALE)이 여기에 들어간다. 계산은 그 한 곳에만
+    # 두어야 화면에 찍히는 시간과 청구하는 시간이 어긋나지 않는다.
+    duration_minutes = billed_minutes(entry_time, exit_time)
+
     # 요금 계산
     fee = calculate_fee(duration_minutes)
-    
+
+    real_sec = (exit_time - entry_time).total_seconds()
+    scale_note = (f" (실제 {real_sec:.0f}초 x{TIME_SCALE:g})"
+                  if TIME_SCALE != 1 else "")
+
     print(f"[출차 완료] 구역: {spot_id} | 차량번호: {car_id}")
     print(f"           입차: {entry_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"           출차: {exit_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"           주차시간: {duration_minutes}분 | 요금: {fee:,}원")
+    print(f"           주차시간: {duration_minutes}분{scale_note} | 요금: {fee:,}원")
     
     # 저장소에서 제거 및 상태 변경
     del cars_info[car_id]

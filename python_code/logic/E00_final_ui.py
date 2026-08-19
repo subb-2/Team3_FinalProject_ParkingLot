@@ -64,7 +64,7 @@ from data.map_data import (
     SPOT_TYPE_NAME, SPOT_CELLS, ROAD, PILL, GATE1, GATE2,
     SPOT1, SPOT2, SPOT3, SPOT4, get_rows, get_cols, one_way_segments,
 )
-from data.car_data import cars_info, get_car_type
+from data.car_data import cars_info, get_car_type, TIME_SCALE
 from logic.B02_car_mot import CONFIG as B02_CONFIG
 # 영상 위 상태 글자 on/off는 C_main이 들고 있다. 화면은 그 값을 읽기만 한다.
 from logic.C_main import CONFIG as C_MAIN_CONFIG
@@ -1400,7 +1400,7 @@ FINAL_UI_HTML = r"""
 
       <div class="stg pay" id="pay">
         <div class="cap"><span>출차 완료 및 정산</span></div>
-        <div class="hint"><span id="paycount">출차 0대</span></div>
+        <div class="hint"><span id="paycount">출차 0대</span>__TIME_SCALE_HINT__</div>
         <div id="paybody"><div class="empty">출차 수신을 기다리는 중입니다.</div></div>
       </div>
 
@@ -1987,7 +1987,11 @@ def render_page():
             # 차가 자리에 들어갔는데 아직 완료로 안 뜰 때, 이 시간을 화면에
             # 적어 두면 기다리면 되는 것인지 무언가 잘못된 것인지 갈린다.
             .replace("__ARRIVAL_SEC__",
-                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_HOLD_SEC']:g}"))
+                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_HOLD_SEC']:g}")
+            # 시간을 배속으로 흘리고 있으면 화면에도 적는다. 적지 않으면
+            # '1분 세웠는데 20분 요금'이 계산 오류로 보인다.
+            .replace("__TIME_SCALE_HINT__",
+                     f" &middot; 시연 {TIME_SCALE:g}배속" if TIME_SCALE != 1 else ""))
 
 
 # 단독 실행 : 배치 JSON 확인

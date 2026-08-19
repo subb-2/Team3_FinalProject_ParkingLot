@@ -277,7 +277,10 @@ def _apply_initial_parked():
 
         cars_info[car_id] = {
             "spot_id": spot_id,
-            "entry_time": now - timedelta(minutes=elapsed_min),
+            # 적어둔 값은 '주차 시간 45분'이라는 뜻이다. 시간이 배속으로
+            # 흐르므로 실제 시각은 그만큼 나누어 앞당긴다. 그래야 배속을
+            # 바꿔도 시작 상태의 주차 시간은 적어둔 그대로다.
+            "entry_time": now - timedelta(minutes=elapsed_min / TIME_SCALE),
             "car_type": get_car_type(car_id),
             # 이미 자리에 세워져 있는 차다. 안내 대상이 아니며, B02가 그 자리에
             # 서 있는 트랙을 찾아 이 차량번호로 묶는다. (아래 parked 필드 설명 참고)
@@ -292,6 +295,47 @@ def _apply_initial_parked():
 # 실제 적용은 cars_info가 만들어진 뒤(파일 맨 아래)에 한다.
 # 그 호출을 빠뜨리면 여기 적어둔 자리가 계속 '빈자리'로 남아 새 차에게
 # 그대로 배정된다. 반드시 파일 끝의 호출과 짝을 이룰 것.
+
+# =====================================================================
+# 시연용 시간 배속
+# =====================================================================
+# 실제 1초를 주차 시간 TIME_SCALE초로 친다.
+#
+#   20  : 실제 1분이 지나면 20분 주차한 것으로 정산된다. (시연 기본값)
+#    1  : 실제 시간 그대로. 실제 운영이라면 이 값이어야 한다.
+#
+# 요금표(get_fee_config)는 30분 기본, 10분마다 추가라서 실제 시간으로는
+# 요금이 오르는 것을 보여주는 데만 몇십 분이 걸린다. 시연에서 그만큼
+# 기다릴 수 없어 시간만 빠르게 흐르게 한다. 요금표 자체는 손대지 않는다.
+# 그래야 화면에 찍히는 '주차 N분 -> M원'이 실제 규칙과 같은 계산이 된다.
+#
+# 미리 세워둔 차(INITIAL_PARKED)의 경과 시간도 이 눈금으로 읽는다.
+# 45분이라고 적었으면 배속과 무관하게 처음부터 45분 주차한 것으로 잡힌다.
+# (_apply_initial_parked가 실제 시각을 그만큼 앞당겨 둔다)
+TIME_SCALE = 20.0
+
+
+def billed_minutes(entry_time, exit_time=None):
+    """
+    입차 시각부터 지금까지를 '정산에 쓸 주차 시간(분)'으로 바꾼다.
+
+    시간 계산은 여기 한 곳에서만 한다. 두 곳에서 하면 배속을 바꿨을 때
+    화면에 찍히는 시간과 실제로 청구하는 시간이 어긋난다.
+
+    Args:
+        entry_time: 입차 시각 (datetime)
+        exit_time:  출차 시각. None이면 지금.
+
+    Returns:
+        주차 시간 (분, 정수)
+    """
+    from datetime import datetime as _datetime
+
+    if exit_time is None:
+        exit_time = _datetime.now()
+    elapsed = (exit_time - entry_time).total_seconds() * TIME_SCALE
+    return int(elapsed / 60)
+
 
 # 요금 설정
 def get_fee_config():
@@ -352,6 +396,11 @@ def get_car_info(car_id):
 # cars_info가 만들어진 뒤에 불러야 하므로 파일 맨 아래에 둔다.
 # INITIAL_PARKED에 적은 자리를 여기서 "full"로 막고 차량 정보를 채운다.
 # 이 호출이 없으면 미리 세워둔 자리가 빈자리로 남아 새 차에게 배정된다.
+if TIME_SCALE != 1:
+    print(f"[시연 배속] 실제 1초를 주차 {TIME_SCALE:g}초로 칩니다. "
+          f"(실제 1분 -> {TIME_SCALE:g}분 정산)")
+    print(f"           실제 시간으로 돌리려면 car_data.TIME_SCALE = 1")
+
 _apply_initial_parked()
 
 
