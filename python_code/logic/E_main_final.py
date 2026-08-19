@@ -372,8 +372,9 @@ def main():
         않는 채로 막혀 있고 화면에서도 계속 깜빡인다. 그래서 아직 도착하지
         않은 차의 배정도 함께 되돌린다.
 
-        왼쪽 수신 목록도 함께 비운다. 지웠는데 화면에 그 번호가 그대로 남아
-        있으면 무엇이 지워진 것인지 알 수 없다.
+        왼쪽 수신 목록과 오른쪽 주차 완료 / 오주차 안내문도 함께 비운다.
+        지웠는데 화면에 그 번호가 그대로 남아 있으면 무엇이 지워진 것인지 알
+        수 없고, 없던 일로 한 번호가 남긴 안내문이 계속 떠 있게 된다.
 
         이미 안내를 받고 있는 차와 주차를 마친 차는 건드리지 않는다. 그쪽은
         실제로 움직이고 있거나 자리에 서 있다.
@@ -384,8 +385,10 @@ def main():
         released = [spot for spot in
                     (cancel_assignment(car_id) for car_id in dropped) if spot]
         rx_cleared = rx_feed.clear()
+        notice_cleared = watcher.clear()
         return {"cleared": dropped, "released": released,
-                "rx_cleared": rx_cleared, "waiting": car_number_fifo.size()}
+                "rx_cleared": rx_cleared, "notice_cleared": notice_cleared,
+                "waiting": car_number_fifo.size()}
 
     @app.route('/recalibrate')
     def recalibrate():

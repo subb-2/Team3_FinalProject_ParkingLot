@@ -477,6 +477,23 @@ class ParkingWatcher:
         print(f"[화면안내] {car_id} {spot_id or '-'} : {head}"
               + (f"  ({note})" if note else ""))
 
+    def clear(self):
+        """
+        주차 완료 / 오주차 안내문을 비운다.
+
+        번호를 잘못 읽어 들어온 차 때문에 뜬 오주차 안내가 그대로 남아 있으면,
+        지운 뒤에도 화면은 계속 그 이야기를 하고 있다. 대기열 리셋은 '그 번호는
+        없던 일로' 하는 것이므로 그 번호가 남긴 안내문도 같이 지운다.
+
+        Returns:
+            지운 건수.
+        """
+        with self._lock:
+            dropped = len(self._events)
+            self._events.clear()
+            self._latest = None
+        return dropped
+
     def snapshot(self):
         with self._lock:
             return list(self._events), self._latest
@@ -1759,7 +1776,7 @@ async function resetQueue(){
     const r = await (await fetch('/queue/reset')).json();
     b.textContent = r.cleared.length
       ? `${r.cleared.length}개 지움 (${r.cleared.join(', ')})`
-      : (r.rx_cleared ? '수신 목록만 비움' : '지울 것이 없음');
+      : ((r.rx_cleared || r.notice_cleared) ? '화면 기록 비움' : '지울 것이 없음');
     tick();          // 수신 목록과 자리 상태를 바로 다시 그린다
   } catch (e) {
     console.error('대기열 리셋 실패', e);
