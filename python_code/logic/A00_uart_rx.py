@@ -107,6 +107,11 @@ ROLE_RESOLVE = {
     # 여기 적으면, 그 IP에서 온 것은 어느 포트로 왔든 적힌 역할로 처리된다.
     #   'ROLE_BY_IP': {'192.168.0.31': 'exit'},
     'ROLE_BY_IP': {},
+
+    # 출차 번호의 앞뒤 두 자리가 뒤집혀 들어왔을 때 되돌릴지 여부.
+    # 뒤집은 번호가 기록에 있을 때만 걸린다. BYTE_ORDER가 맞으면 쓰이지
+    # 않는 안전장치다. (resolve_packet 참고)
+    'SWAPPED_HALVES_FALLBACK': True,
 }
 
 
@@ -151,6 +156,17 @@ def build_car_packet(car_id, role='entry'):
     return bytes([high, low])
 
 
+def _swapped_halves(car_id):
+    """
+    앞 두 자리와 뒤 두 자리를 맞바꾼 번호. ("8935" -> "3589")
+
+    바이트 순서를 반대로 읽었을 때 나오는 값이다. 두 바이트 중 어느 쪽을
+    먼저 보내는지가 보드마다 다르므로(BYTE_ORDER), 잘못 잡으면 늘 이 모양이
+    된다. 어느 쪽이 맞는지는 기록에 있는 번호인가로 가린다.
+    """
+    return car_id[2:] + car_id[:2]
+
+
 def _is_inside(car_id):
     """
     그 번호가 지금 자리에 세워져 있는가.
@@ -187,8 +203,26 @@ def resolve_packet(port_role, raw_data, peer_ip=None):
     pinned = ROLE_RESOLVE['ROLE_BY_IP'].get(peer_ip)
     role = pinned or port_role
     car_id, first, second = parse_car_id(raw_data, role)
+    swapped = _swapped_halves(car_id)
 
-    if pinned or not ROLE_RESOLVE['KNOWN_CAR_IS_EXIT'] or role != 'entry':
+    if role == 'exit':
+        # 출차인데 그 번호의 입차 기록이 없다. 앞뒤를 뒤집은 번호가 기록에
+        # 있다면 바이트 순서를 잘못 잡은 것이므로 있는 쪽으로 처리한다.
+        #
+        # BYTE_ORDER를 맞춰 두면 여기까지 오지 않는다. 그래도 두는 이유는
+        # 순서가 틀렸을 때 출차가 통째로 막히기 때문이다. 기록에 있는
+        # 번호일 때만 걸리므로, 맞게 읽은 번호를 건드리는 일은 없다.
+        if (ROLE_RESOLVE['SWAPPED_HALVES_FALLBACK']
+                and car_id not in cars_info and swapped in cars_info):
+            print(f"[출차] {car_id}로 읽혔지만 기록에 있는 것은 {swapped}입니다. "
+                  f"바이트 순서가 뒤집힌 것으로 보고 {swapped}로 처리합니다.")
+            print(f"       계속 이러면 BYTE_ORDER['exit']를 "
+                  f"'{'high_first' if BYTE_ORDER['exit'] == 'low_first' else 'low_first'}'로 "
+                  f"바꾸세요. (A00_uart_rx.py)")
+            return role, swapped, first, second, role != port_role
+        return role, car_id, first, second, role != port_role
+
+    if pinned or not ROLE_RESOLVE['KNOWN_CAR_IS_EXIT']:
         return role, car_id, first, second, role != port_role
 
     # 이미 주차장 안에 있는 차의 번호다. 나가는 중으로 본다.
@@ -197,11 +231,10 @@ def resolve_packet(port_role, raw_data, peer_ip=None):
 
     # 출차 보드가 입차 포트로 붙은 경우까지 본다. 두 보드는 바이트 순서가
     # 반대라(BYTE_ORDER) 입차 순서로 읽으면 앞뒤 두 자리가 뒤집힌, 등록되지
-    # 않은 번호가 나온다. 반대 순서로 읽었을 때만 주차장 안의 차와 맞는다면
-    # 그쪽이 진짜 번호다.
-    other, first_o, second_o = parse_car_id(raw_data, 'exit')
-    if other != car_id and _is_inside(other):
-        return 'exit', other, first_o, second_o, True
+    # 않은 번호가 나온다. 뒤집어야만 주차장 안의 차와 맞는다면 그쪽이
+    # 진짜 번호다.
+    if _is_inside(swapped):
+        return 'exit', swapped, first, second, True
 
     return 'entry', car_id, first, second, False
 
