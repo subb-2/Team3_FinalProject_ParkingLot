@@ -1280,6 +1280,9 @@ FINAL_UI_HTML = r"""
         <span><button id="calbtn" onclick="location.href='/calibrate'"
                       title="기둥을 다시 찍어 좌표계를 잡습니다">기둥 보정</button>
               <button id="dbgbtn" onclick="toggleDebug()">디버그</button>
+              <button id="qrstbtn" onclick="resetQueue()"
+                      title="번호판을 잘못 읽어 들어온 번호를 지웁니다. 대기 중인 번호와 그 배정까지 되돌립니다"
+                      >차량 번호 대기열 리셋</button>
               <span id="camdet">검출 대기 중</span></span>
         <span><span class="pill" id="cammark">-</span>
               <span class="pill" id="camfps">-</span></span>
@@ -1727,6 +1730,24 @@ async function toggleDebug(){
   } catch (e) {
     console.error('디버그 토글 실패', e);
   }
+}
+
+// 대기 중인 차량번호를 전부 지운다. 번호판을 잘못 읽었을 때 쓴다.
+// 결과를 버튼에 잠깐 적어 준다. 눌렀는데 아무 반응이 없으면 눌린 것인지
+// 알 수 없고, 대기열이 원래 비어 있었는지도 구별되지 않는다.
+async function resetQueue(){
+  const b = document.getElementById('qrstbtn');
+  const label = b.textContent;
+  try {
+    const r = await (await fetch('/queue/reset')).json();
+    b.textContent = r.cleared.length
+      ? `${r.cleared.length}개 지움 (${r.cleared.join(', ')})`
+      : '대기열이 비어 있음';
+  } catch (e) {
+    console.error('대기열 리셋 실패', e);
+    b.textContent = '리셋 실패';
+  }
+  setTimeout(() => { b.textContent = label; }, 2500);
 }
 
 // ---- 4번 구간 ----

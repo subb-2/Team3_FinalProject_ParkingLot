@@ -288,6 +288,20 @@ class CarNumberFIFO:
             print(f"[FIFO] 차량번호 '{car_id}' 반납 (대기 {len(self._queue)}대)")
 
 
+    def clear(self):
+        """
+        대기 중인 차량번호를 전부 버린다. 버린 번호 목록을 돌려준다.
+
+        번호판을 잘못 읽어 엉뚱한 번호가 들어왔을 때 쓴다. 그대로 두면 다음에
+        들어오는 차가 그 번호를 달고 안내를 받기 시작한다.
+        """
+        with self._lock:
+            dropped = list(self._queue)
+            self._queue.clear()
+        if dropped:
+            print(f"[FIFO] 대기열을 비웠습니다. (버린 번호 {', '.join(dropped)})")
+        return dropped
+
     def size(self):
         """큐에 대기 중인 차량 번호 개수."""
         with self._lock:
@@ -297,11 +311,6 @@ class CarNumberFIFO:
         """현재 대기 중인 차량 번호 목록을 리스트로 반환. (모니터링용)"""
         with self._lock:
             return list(self._queue)
-
-    def clear(self):
-        """큐를 비움."""
-        with self._lock:
-            self._queue.clear()
 
 # 검출 결과 -> 추적기 입력 어댑터
 class DetectionResults:

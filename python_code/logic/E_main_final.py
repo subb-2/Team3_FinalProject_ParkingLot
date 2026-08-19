@@ -359,6 +359,30 @@ def main():
             C_CONFIG['DRAW_STATUS_TEXT'] = not C_CONFIG['DRAW_STATUS_TEXT']
         return {"debug": C_CONFIG['DRAW_STATUS_TEXT']}
 
+    @app.route('/queue/reset')
+    def queue_reset():
+        """
+        대기 중인 차량번호를 전부 지운다.
+
+        번호판을 잘못 읽어 엉뚱한 번호가 들어왔을 때 쓴다. 2번 구간의
+        [대기열 리셋] 버튼이 이 주소를 부른다.
+
+        대기열만 비우면 모자란다. 번호는 받는 즉시 자리를 하나 배정받으므로
+        (A00 -> A01.handle_car_entry), 큐에서만 지우면 그 자리는 아무도 오지
+        않는 채로 막혀 있고 화면에서도 계속 깜빡인다. 그래서 아직 도착하지
+        않은 차의 배정도 함께 되돌린다.
+
+        이미 안내를 받고 있는 차와 주차를 마친 차는 건드리지 않는다. 그쪽은
+        실제로 움직이고 있거나 자리에 서 있다.
+        """
+        from logic.A01_parking_manager import cancel_assignment
+
+        dropped = car_number_fifo.clear()
+        released = [spot for spot in
+                    (cancel_assignment(car_id) for car_id in dropped) if spot]
+        return {"cleared": dropped, "released": released,
+                "waiting": car_number_fifo.size()}
+
     @app.route('/recalibrate')
     def recalibrate():
         """

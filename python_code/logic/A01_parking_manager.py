@@ -590,6 +590,33 @@ def park_car(spot_id, car_id, entry_time=None):
     return True
 
 # 출차 처리 및 요금 계산
+def cancel_assignment(car_id):
+    """
+    아직 도착하지 않은 차의 자리 배정을 취소한다.
+
+    번호를 잘못 읽어 들어온 차를 지울 때 쓴다. 그 번호는 이미 자리를 하나
+    받아 두었으므로(handle_car_entry), 대기열에서만 지우면 그 자리는 아무도
+    오지 않는 채로 계속 막혀 있고 화면에서도 깜빡인다.
+
+    출차(remove_car)와 다르다. 이쪽은 요금을 계산하지 않는다. 들어온 적이
+    없던 것으로 되돌리는 것이기 때문이다. 이미 주차를 마친 차는 건드리지
+    않는다. 그 차는 실제로 자리에 있다.
+
+    Returns:
+        비운 구역 ID. 취소할 것이 없으면 None.
+    """
+    info = cars_info.get(car_id)
+    if info is None or info.get("parked"):
+        return None
+
+    spot_id = info.get("spot_id")
+    del cars_info[car_id]
+    if spot_id in spot_status:
+        spot_status[spot_id] = "empty"
+    print(f"[배정 취소] 차량 '{car_id}'의 {spot_id} 배정을 되돌렸습니다.")
+    return spot_id
+
+
 def remove_car(car_id):
     """
     차량 번호로 출차 처리를 하고, 주차 요금을 계산하여 반환.
