@@ -1,3 +1,17 @@
+import sys
+import os
+
+# 이 파일을 직접 실행할 수 있게 상위 디렉토리(python_code)를 import 경로에 넣는다.
+#   python data/car_data.py        -> 등록한 차량 종류를 표로 확인
+# 이 두 줄이 없으면 'No module named data'로 죽는다. 파이썬이 패키지 안의
+# 파일을 직접 실행할 때는 그 파일이 있는 폴더(data/)만 경로에 넣어 주기
+# 때문에, data 패키지 자체를 찾지 못한다. 표를 고친 뒤 확인해 보는 것이
+# 자연스러운 일이라 막아 둘 이유가 없다.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+# SPOT_TYPE_NAME은 구역 종류를 사람이 읽는 이름으로 바꾸는 표다. 경고문과
+# 초기 주차 로그가 쓴다. 여기서 빼면 그때 가서야 NameError로 죽는다.
+# CAR_TYPE_TO_SPOT은 map_data가 아니라 이 파일 아래쪽에서 정의한다.
 from data.map_data import spot_status, SPOT1, SPOT2, SPOT3, SPOT4, SPOT_TYPE_NAME
 
 # 주차 차량 데이터 관리
@@ -68,6 +82,13 @@ car_types = {
     "0828": CAR_HANDICAP,   # 장애인 자리 A-4로 간다
     "1234": CAR_EV,         # 남은 전기차 자리 C-1로 간다 (B-1, C-2는 미리 채워져 있음)
     "1998": CAR_EV,         # 그다음 전기차 자리 B-2로 간다
+
+    # --- 실물 번호판 (Zybo가 보내는 번호) ---
+    "9805": CAR_NORMAL,
+    "8935": CAR_EV,
+    "4291": CAR_EV,
+    "1026": CAR_HANDICAP,
+    "3567": CAR_LARGE,
 }
 
 # 등록부 검증 (오타로 조용히 일반 차량이 되는 것을 막는다)
@@ -332,4 +353,36 @@ def get_car_info(car_id):
 # INITIAL_PARKED에 적은 자리를 여기서 "full"로 막고 차량 정보를 채운다.
 # 이 호출이 없으면 미리 세워둔 자리가 빈자리로 남아 새 차에게 배정된다.
 _apply_initial_parked()
+
+
+# =====================================================================
+# 직접 실행하면 등록 상태를 확인한다
+# =====================================================================
+#   python data/car_data.py
+# 차량 종류를 추가한 뒤 오타나 빠진 곳이 없는지 보는 용도다.
+# (위쪽 검증이 이미 경고를 찍지만, 표로 한 번에 보는 편이 빠르다)
+if __name__ == '__main__':
+    from data.map_data import get_spot_ids_by_type
+
+    print()
+    print("=" * 52)
+    print(" 차량 종류 등록부")
+    print("=" * 52)
+    for car_type, spot_kind in CAR_TYPE_TO_SPOT.items():
+        print()
+        plates = sorted(c for c, t in car_types.items() if t == car_type)
+        spots = sorted(get_spot_ids_by_type(spot_kind))
+        print(f"  {car_type} -> {SPOT_TYPE_NAME.get(spot_kind, '?')} 구역 "
+              f"{len(spots)}자리 {spots}")
+        print(f"    등록 번호 {len(plates)}개: {', '.join(plates) or '없음'}")
+
+    unknown = [c for c, t in car_types.items() if t not in CAR_TYPE_TO_SPOT]
+    if unknown:
+        print(f"  [경고] 종류를 알 수 없는 번호: {', '.join(sorted(unknown))}")
+
+    print()
+    print(f"  기본 종류(등록 안 된 번호): {DEFAULT_CAR_TYPE}")
+    print(f"  미리 세워둔 차 {len(INITIAL_PARKED)}대, "
+          f"UART 없이 넣을 번호 {len(TEST_PRESET_CAR_NUMBERS)}개")
+    print("=" * 52)
 
