@@ -164,13 +164,14 @@ CONFIG = {
         # 따라 예외가 됐다 말았다 한다. 통로 한 줄을 통째로 예외로 두면
         # 그 통로 안에서는 어디에 있든 바로 자리로 들어갈 수 있다.
         #
-        # 어느 쪽 3줄인지는 자동으로 정해진다. 그 자리에서 가장 가까운 세로
-        # 차선 쪽이다. A열(col 0)은 오른쪽 1~3, B열(col 5)은 왼쪽 4~2,
-        # C열(col 7)은 오른쪽 8~10, D열(col 12)은 왼쪽 11~9가 된다.
+        # 어느 쪽인지는 자동으로 정해진다. 그 자리에서 가장 가까운 세로
+        # 차선 쪽이다. A열(col 0)은 오른쪽 1~4, B열(col 5)은 왼쪽 4~1,
+        # C열(col 7)은 오른쪽 8~11, D열(col 12)은 왼쪽 11~8이 된다.
+        # 네 줄이면 그 자리가 면한 통로 하나가 통째로 예외가 된다.
         #
         # 통로 폭(네 칸)보다 크게 잡으면 건너편 통로까지 풀려서 진짜 역주행이
         # 나온다. 0으로 두면 주차장 전체에 규칙을 적용한다.
-        "GOAL_RELAX_COLUMNS": 3,
+        "GOAL_RELAX_COLUMNS": 4,
 
         # 계획이 끝난 경로를 차선 위로 붙일 때, 이 거리(cm) 안의 차선까지
         # 끌어당긴다. (SNAP_TO_CELL_CENTERS)
@@ -810,13 +811,18 @@ class RoutePlanner:
                 # 벌점이 아니라 인력이라 값이 늘 0 이상이므로, 휴리스틱
                 # (직선거리)은 그대로 하한으로 남는다. (A* 전제 유지)
                 #
-                # 목적지 코앞은 예외다. 거기서까지 규칙을 지키게 하면 몇 cm
-                # 때문에 한 바퀴 도는 경로가 나온다.
+                # 목적지가 면한 통로에서는 역주행 벌점만 빼준다. 차선 인력은
+                # 거기서도 그대로 둔다. 둘 다 빼면 그 통로 안에서 끌어당기는
+                # 것이 없어져, 자리로 갈 때 차선을 버리고 아무 데로나 질러
+                # 간다. 실제로 D열로 갈 때 통로 한가운데(col 10)가 아니라
+                # 입구에서 그대로 직진하는 경로가 나왔다. 역주행이 아니라고
+                # 해서 차선을 안 타도 되는 것은 아니다.
                 penalty = 0.0
-                if self.one_way is not None and not (relaxed and relaxed(current)):
-                    penalty = self.one_way.step_penalty(current, dc, dr)
-                    if penalty is None:
-                        continue
+                if self.one_way is not None:
+                    if not (relaxed and relaxed(current)):
+                        penalty = self.one_way.step_penalty(current, dc, dr)
+                        if penalty is None:
+                            continue
                     penalty += self.one_way.lane_cost(nxt) * step
 
                 new_cost = cost + step + penalty
@@ -850,7 +856,7 @@ class RoutePlanner:
         if self.one_way is not None:
             prefix = [0.0]
             for cell in cells[1:]:
-                prefix.append(prefix[-1] + self._lane_cost(cell, relaxed))
+                prefix.append(prefix[-1] + self.one_way.lane_cost(cell))
         else:
             prefix = None
 
@@ -1350,12 +1356,6 @@ class RoutePlanner:
                 bad.append((i, a, b))
         return bad
 
-    def _lane_cost(self, cell, relaxed=None):
-        """차선 인력. 목적지 예외 구역 안이면 0. (A*가 매긴 것과 같아야 한다)"""
-        if relaxed is not None and relaxed(cell):
-            return 0.0
-        return self.one_way.lane_cost(cell)
-
     def _can_shortcut(self, cells, i, j, prefix=None, relaxed=None):
         """
         경로의 i번째 칸에서 j번째 칸까지를 직선 하나로 대신할 수 있는지.
@@ -1399,13 +1399,13 @@ class RoutePlanner:
         if prefix is not None:
             lane_before = prefix[j] - prefix[i]
         else:
-            lane_before = sum(self._lane_cost(c, relaxed) for c in cells[i + 1:j + 1])
+            lane_before = sum(self.one_way.lane_cost(c) for c in cells[i + 1:j + 1])
         before = (j - i) + lane_before
 
         # 지름길의 비용. 직선 길이를 지나온 칸 수로 나눠 칸마다 배분한다.
         length = math.hypot(dc, dr)
         per_cell = length / max(len(line) - 1, 1)
-        after = length + sum(self._lane_cost(c, relaxed) for c in line[1:]) * per_cell
+        after = length + sum(self.one_way.lane_cost(c) for c in line[1:]) * per_cell
 
         return after <= before + CONFIG['ONE_WAY']['LANE_SHORTCUT_TOLERANCE_CM']
 
