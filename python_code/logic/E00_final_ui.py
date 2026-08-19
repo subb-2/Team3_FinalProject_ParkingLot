@@ -702,20 +702,20 @@ def world_to_cell(world_cm):
             world_cm[0] / C02_CONFIG['CELL_W_CM'] + origin_col)
 
 
-def spot_dot_cell(spot_id, world=None):
+def spot_dot_cell(spot_id):
     """
-    주차를 마친 차의 점을 찍을 칸 (행, 열). 정수로 돌려준다.
+    주차를 마친 차의 점을 찍을 격자 좌표 (행, 열). 그 자리의 한가운데다.
 
-    3번 격자는 정수 좌표를 칸 한가운데로 그리므로(renderCars), 이 값을 그대로
-    넘기면 점이 칸 중앙에 앉는다.
+    3번 격자는 정수 좌표를 칸 한가운데로 그리므로(renderCars), 한 칸짜리
+    자리는 그 칸의 정수 좌표가 그대로 중앙이 된다.
 
-    대형 자리처럼 두 칸이 한 자리인 경우에는 차가 실제로 있던 쪽 칸을 고른다.
-    자리 중심(SPOT_WORLD_POS)을 쓰면 두 칸 사이 경계선 위에 점이 걸린다.
-    위치를 모르면 첫 칸에 둔다.
+    대형 자리처럼 두 칸이 한 자리인 경우에는 두 칸을 합한 크기의 중심에
+    찍는다. 차 한 대가 두 칸을 함께 쓰고 있으므로 어느 한 칸에 몰아 찍으면
+    실제로 서 있는 자리와 어긋나 보인다. 행이 4와 5면 4.5가 되고, 화면에서는
+    두 칸 사이의 한가운데다.
 
     Args:
         spot_id: 구역 ID
-        world:   그 차의 실제 위치 (cm). 없으면 None.
 
     Returns:
         (row, col). 배치에 없는 구역이면 None.
@@ -723,10 +723,8 @@ def spot_dot_cell(spot_id, world=None):
     cells = spot_map.get(spot_id)
     if not cells:
         return None
-    if world is None or len(cells) == 1:
-        return cells[0]
-    row, col = world_to_cell(world)
-    return min(cells, key=lambda rc: (rc[0] - row) ** 2 + (rc[1] - col) ** 2)
+    return (sum(rc[0] for rc in cells) / len(cells),
+            sum(rc[1] for rc in cells) / len(cells))
 
 
 # 마지막으로 본 자리. {키: {"world", "car_id", "at"}}
@@ -801,7 +799,7 @@ def _build_cars_on_map(pipeline, route_on_map=None):
         # 것은 이미 판정이 났으므로(parked), 점은 그 판정을 따르면 된다.
         # 안내 중인 차는 해당하지 않는다. 그 차는 실제로 움직이는 중이다.
         if info and info.get("parked"):
-            cell = spot_dot_cell(info.get("spot_id"), world)
+            cell = spot_dot_cell(info.get("spot_id"))
             if cell and math.dist(cell, (row, col)) <= CONFIG['PARKED_SNAP_MAX_CELL']:
                 row, col = cell
 
@@ -859,11 +857,8 @@ def _build_cars_on_map(pipeline, route_on_map=None):
     for car_id, info in list(cars_info.items()):
         if car_id in seen or car_id in exited or not info.get("parked"):
             continue
-        # 추적이 없으니 자리 기록만으로 정한다. 두 칸짜리 자리는 마지막으로
-        # 본 위치가 있으면 그쪽 칸을 고른다.
-        last = _last_seen_dot.get(car_id)
-        cell = spot_dot_cell(info.get("spot_id"),
-                             last["world"] if last else None)
+        # 추적이 없으니 자리 기록만으로 정한다.
+        cell = spot_dot_cell(info.get("spot_id"))
         if cell is not None:
             row, col = cell
         else:
@@ -1397,7 +1392,7 @@ FINAL_UI_HTML = r"""
 
       <div class="stg done" id="notice">
         <div class="cap"><span>주차 완료 안내</span></div>
-        <div class="hint">도착 반경 __ARRIVAL_CM__cm</div>
+        <div class="hint">도착 반경 __ARRIVAL_CM__cm &middot; __ARRIVAL_SEC__초 유지</div>
         <div id="noticebody"><div class="nt-idle">주차 완료를 기다리는 중입니다.</div></div>
       </div>
 
@@ -1987,7 +1982,12 @@ def render_page():
     return (FINAL_UI_HTML
             .replace("__POLL_MS__", str(CONFIG['POLL_INTERVAL_MS']))
             .replace("__ARRIVAL_CM__",
-                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_RADIUS_CM']:g}"))
+                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_RADIUS_CM']:g}")
+            # 판정 조건이 반경만이 아니라 '그 안에 얼마나 머물렀는가'까지다.
+            # 차가 자리에 들어갔는데 아직 완료로 안 뜰 때, 이 시간을 화면에
+            # 적어 두면 기다리면 되는 것인지 무언가 잘못된 것인지 갈린다.
+            .replace("__ARRIVAL_SEC__",
+                     f"{B02_CONFIG['SINGLE_ACTIVE']['ARRIVAL_HOLD_SEC']:g}"))
 
 
 # 단독 실행 : 배치 JSON 확인
