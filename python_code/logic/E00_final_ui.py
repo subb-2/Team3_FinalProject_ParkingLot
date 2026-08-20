@@ -64,7 +64,7 @@ from data.map_data import (
     SPOT_TYPE_NAME, SPOT_CELLS, ROAD, PILL, GATE1, GATE2,
     SPOT1, SPOT2, SPOT3, SPOT4, get_rows, get_cols, one_way_segments,
 )
-from data.car_data import cars_info, get_car_type, TIME_SCALE
+from data.car_data import cars_info, get_car_type, TIME_SCALE, billed_seconds
 from logic.B02_car_mot import CONFIG as B02_CONFIG
 # 영상 위 상태 글자 on/off는 C_main이 들고 있다. 화면은 그 값을 읽기만 한다.
 from logic.C_main import CONFIG as C_MAIN_CONFIG
@@ -161,9 +161,17 @@ CONFIG = {
     # 차가 출구에서 사라졌다가 자리로 튀어 오르니 화면이 어지럽다.
     "EXIT_HOLD_RADIUS_CM": 25.0,
 
-    # 붙들어 둔 점을 이만큼 지나면 지운다 (초).
-    # 시연 한 판을 넘길 만큼 길게, 하루 종일 남지는 않을 만큼 짧게.
-    "EXIT_HOLD_SEC": 300.0,
+    # 출구에 머문 점을 이만큼 지나면 지운다 (초).
+    #
+    # 두 경우에 쓴다.
+    #   1. 출구에서 검출이 끊긴 차 : 붙들어 둔 점을 이만큼 뒤에 지운다
+    #   2. 출구에 그대로 서 있는 차 : 기록에 없는 차(정산이 끝났거나 번호를
+    #      못 읽은 트랙)라면 이만큼 머문 뒤 지운다
+    #
+    # 나간 차를 매트 밖에 놓아두면 카메라에는 계속 잡힌다. 그 점이 화면에
+    # 남아 있으면 주차장 안에 있는 차와 구별되지 않는다. 나가는 장면을
+    # 눈으로 확인할 만큼만 두고 치운다.
+    "EXIT_HOLD_SEC": 20.0,
 
     # 자리가 이 시간 동안 계속 비어 보여야 비운 것으로 친다.
     # 손으로 차를 옮기는 동안에는 검출이 흔들리므로 한두 프레임으로
@@ -539,6 +547,10 @@ class ParkingWatcher:
             self._last_world.clear()
             self._still_since.clear()
             self._parked_seen.clear()
+        # 격자 위 점이 들고 있던 것도 함께 비운다. 나간 차를 붙들어 둔 점이나
+        # 출구에 머문 시간이 남아 있으면 초기화한 화면에 옛 점이 다시 뜬다.
+        _last_seen_dot.clear()
+        _exit_dwell.clear()
         # 지금 cars_info에 있는 차(다시 세워둔 차)를 '본 것'으로 표시한다.
         self.prime()
         return dropped
@@ -731,6 +743,41 @@ def spot_dot_cell(spot_id):
 # 출구 근처에서 검출이 끊긴 차의 점을 그 자리에 붙들어 두는 데 쓴다.
 _last_seen_dot = {}
 
+# 출구에 머무르기 시작한 때. {키: (위치, 시각)}
+_exit_dwell = {}
+
+
+def _lingering_at_exit(key, world, info, now):
+    """
+    출구에 계속 서 있는 점을 지울 때가 됐는가.
+
+    나간 차를 매트 밖에 놓아두면 카메라에는 그대로 잡힌다. 기록에 없는
+    차(정산이 끝났거나 번호를 못 읽은 트랙)인데 점은 남아 있어서, 주차장
+    안에 있는 차와 구별되지 않는다. 출구에서 EXIT_HOLD_SEC만큼 머물면
+    나간 것으로 보고 화면에서 치운다.
+
+    기록이 있는 차는 지우지 않는다. 안내를 받는 중이거나 자리에 세워둔
+    차라면 출구 근처에 있어도 아직 주차장 안의 차다.
+
+    Args:
+        key:   점의 키 (차량번호 또는 '#트랙ID')
+        world: 지금 위치 (cm)
+        info:  cars_info의 기록. 없으면 None.
+        now:   현재 시각 (time.time())
+    """
+    if info is not None or GATE2_WORLD_POS is None:
+        _exit_dwell.pop(key, None)
+        return False
+    if math.dist(world, GATE2_WORLD_POS) > CONFIG['EXIT_HOLD_RADIUS_CM']:
+        _exit_dwell.pop(key, None)
+        return False
+
+    since = _exit_dwell.get(key)
+    if since is None or math.dist(since[0], world) > CONFIG['OCCUPY_MOVE_CM']:
+        _exit_dwell[key] = (world, now)     # 방금 왔거나 아직 움직이는 중
+        return False
+    return now - since[1] >= CONFIG['EXIT_HOLD_SEC']
+
 
 def _build_cars_on_map(pipeline, route_on_map=None):
     """
@@ -749,6 +796,7 @@ def _build_cars_on_map(pipeline, route_on_map=None):
     mapper = pipeline.navigator.mapper
     now = time.time()
     cars = []
+    lingering = set()       # 출구에 머물러 지운 점. 아래 정리에서 살려 둔다.
 
     # 안내선 위의 시작점. 그 차의 점을 여기로 옮긴다.
     #
@@ -778,6 +826,12 @@ def _build_cars_on_map(pipeline, route_on_map=None):
         car_id = nav.get("car_id")
         info = cars_info.get(car_id) if car_id else None
         key = car_id or f"#{nav.get('track_id')}"
+
+        # 출구에 계속 서 있는, 기록에 없는 차는 나간 것으로 보고 지운다.
+        if _lingering_at_exit(key, world, info, now):
+            _last_seen_dot.pop(key, None)
+            lingering.add(key)
+            continue
 
         # 지금 안내를 받는 차라면 선 위로 올린다.
         #
@@ -815,6 +869,15 @@ def _build_cars_on_map(pipeline, route_on_map=None):
             "target_spot": nav.get("target_spot"),
             "tracked": True,
         })
+
+    # 이번에 보이지 않은 트랙의 머문 기록은 버린다 (표가 계속 자라지 않게).
+    #
+    # 방금 지운 점(lingering)은 남겨야 한다. 지우면서 기록까지 없애면 다음
+    # 프레임에 시간이 0부터 다시 시작해, 점이 사라졌다 나타났다 한다.
+    live = {c["key"] for c in cars} | lingering
+    for key in list(_exit_dwell):
+        if key not in live:
+            del _exit_dwell[key]
 
     # 출구에서 사라진 차는 그 자리에 붙들어 둔다.
     #
@@ -970,6 +1033,28 @@ def _build_route_on_map(pipeline, follow_car=None):
 
 
 # 화면 상태 (0.5초마다 브라우저가 가져간다)
+def _build_parked_now():
+    """
+    지금 주차 중인 차들의 '여태 주차한 시간과 그 시점의 요금'.
+
+    Returns:
+        {차량번호: {"sec": 초, "minutes": 분, "fee": 원}}
+    """
+    from logic.fee_calculator import calculate_fee
+
+    now = datetime.now()
+    out = {}
+    for car_id, info in list(cars_info.items()):
+        entry_time = info.get("entry_time")
+        if entry_time is None:
+            continue
+        seconds = billed_seconds(entry_time, now)
+        minutes = seconds // 60
+        out[car_id] = {"sec": seconds, "minutes": minutes,
+                       "fee": calculate_fee(minutes)}
+    return out
+
+
 def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
     """
     세 구간이 그릴 내용을 한 번에 담아 반환.
@@ -1048,6 +1133,13 @@ def build_ui_state(pipeline, rx_feed, watcher, follow_car=None):
         },
         "latest_event": latest,
         "events": events,
+        # 지금 세워져 있는 차들의 주차 시간과 그 시점의 요금.
+        #
+        # 매 요청마다 다시 잰다. 시간이 배속으로 흐르므로(car_data.TIME_SCALE)
+        # 화면이 0.4초마다 새 값을 받아 초 단위로 흘러가는 것이 보인다.
+        # 요금 계산은 파이썬에서만 한다. 화면에서 또 계산하면 요금표를 고쳤을 때
+        # 화면과 실제 청구가 어긋난다.
+        "parked_now": _build_parked_now(),
 
         # --- 2번 구간 + 공통 ---
         "vehicles": [
@@ -1785,7 +1877,12 @@ const NOTICE_CLASS = {
   relocate_failed:  'warn',
 };
 
-function renderNotice(ev){
+// 주차 시간을 '12분 30초'로. 초는 서버가 배속을 곱해 보낸 값이다.
+function parkedText(sec){
+  return `${Math.floor(sec / 60)}분 ${String(sec % 60).padStart(2, '0')}초`;
+}
+
+function renderNotice(ev, parkedNow){
   // 겉칸(#notice)은 1번 띠의 카드라서 stg/done 클래스를 잃으면 안 된다.
   // 상태 색만 갈아 끼우고 내용은 안쪽(#noticebody)에 쓴다.
   const card = document.getElementById('notice');
@@ -1797,11 +1894,21 @@ function renderNotice(ev){
   }
   card.className = 'stg done ' + (NOTICE_CLASS[ev.kind] || '');
   const where = ev.spot_id ? `${esc(ev.spot_id)}` : '위치 미확인';
+
+  // 세워둔 뒤로 시간이 흐르는 것을 여기서 보여준다. 요금이 어느 시점에
+  // 얼마인지 출차해 보기 전에 알 수 있어야, 정산 화면의 숫자가 갑자기
+  // 튀어나온 값으로 보이지 않는다. 계산은 서버가 한다.
+  const live = parkedNow && parkedNow[ev.car_id];
+  const ticking = live
+    ? `<div class="nt-note">주차 ${parkedText(live.sec)} &middot;
+         현재 요금 ${live.fee.toLocaleString()}원</div>`
+    : '';
+
   box.innerHTML =
     `<div class="nt-head"><span>차량 ${esc(ev.car_id)} · ${where}</span>
        <span>${esc(ev.time)}</span></div>` +
     ev.lines.map(l => `<div class="nt-line">${esc(l)}</div>`).join('') +
-    (ev.note ? `<div class="nt-note">${esc(ev.note)}</div>` : '');
+    (ev.note ? `<div class="nt-note">${esc(ev.note)}</div>` : '') + ticking;
 }
 
 // 출차 완료 및 정산 (1번 구간의 마지막 칸).
@@ -1957,7 +2064,7 @@ async function tick(){
     renderLot(st);
     renderCars(st);
     renderRoute(st);
-    renderNotice(st.latest_event);
+    renderNotice(st.latest_event, st.parked_now);
     renderPay(st.rx);
     renderCam(st);
     renderNav(st);

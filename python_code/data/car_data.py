@@ -301,7 +301,8 @@ def _apply_initial_parked():
 # =====================================================================
 # 실제 1초를 주차 시간 TIME_SCALE초로 친다.
 #
-#   20  : 실제 1분이 지나면 20분 주차한 것으로 정산된다. (시연 기본값)
+#   30  : 실제 1분이 지나면 30분 주차한 것으로 정산된다. (시연 기본값)
+#         실제 1초가 주차 30초라, 실제 30초를 세워두면 15분이 된다.
 #    1  : 실제 시간 그대로. 실제 운영이라면 이 값이어야 한다.
 #
 # 요금표(get_fee_config)는 30분 기본, 10분마다 추가라서 실제 시간으로는
@@ -312,15 +313,39 @@ def _apply_initial_parked():
 # 미리 세워둔 차(INITIAL_PARKED)의 경과 시간도 이 눈금으로 읽는다.
 # 45분이라고 적었으면 배속과 무관하게 처음부터 45분 주차한 것으로 잡힌다.
 # (_apply_initial_parked가 실제 시각을 그만큼 앞당겨 둔다)
-TIME_SCALE = 20.0
+TIME_SCALE = 30.0
+
+
+def billed_seconds(entry_time, exit_time=None):
+    """
+    입차 시각부터 지금까지를 '주차 시간(초)'으로 바꾼다.
+
+    시간 계산은 여기 한 곳에서만 한다. 두 곳에서 하면 배속을 바꿨을 때
+    화면에 찍히는 시간과 실제로 청구하는 시간이 어긋난다.
+
+    초 단위로 돌려주는 이유는 화면이 흐르는 것을 보여주기 위해서다. 분으로만
+    주면 배속이 30일 때 2초에 한 번씩 값이 튀고, 그동안 화면은 멈춰 있는
+    것처럼 보인다. 요금은 분 단위로 매기므로 계산에는 billed_minutes를 쓴다.
+
+    Args:
+        entry_time: 입차 시각 (datetime)
+        exit_time:  출차 시각. None이면 지금.
+
+    Returns:
+        주차 시간 (초, 정수)
+    """
+    from datetime import datetime as _datetime
+
+    if exit_time is None:
+        exit_time = _datetime.now()
+    return int((exit_time - entry_time).total_seconds() * TIME_SCALE)
 
 
 def billed_minutes(entry_time, exit_time=None):
     """
     입차 시각부터 지금까지를 '정산에 쓸 주차 시간(분)'으로 바꾼다.
 
-    시간 계산은 여기 한 곳에서만 한다. 두 곳에서 하면 배속을 바꿨을 때
-    화면에 찍히는 시간과 실제로 청구하는 시간이 어긋난다.
+    요금표가 분 단위라 초는 버린다. (10분 이하 무료, 30분까지 기본요금...)
 
     Args:
         entry_time: 입차 시각 (datetime)
@@ -329,12 +354,7 @@ def billed_minutes(entry_time, exit_time=None):
     Returns:
         주차 시간 (분, 정수)
     """
-    from datetime import datetime as _datetime
-
-    if exit_time is None:
-        exit_time = _datetime.now()
-    elapsed = (exit_time - entry_time).total_seconds() * TIME_SCALE
-    return int(elapsed / 60)
+    return billed_seconds(entry_time, exit_time) // 60
 
 
 # 요금 설정
