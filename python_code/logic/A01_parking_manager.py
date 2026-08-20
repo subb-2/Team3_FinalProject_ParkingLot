@@ -312,6 +312,25 @@ def _warn_ambiguous_spot(car_id, old_spot, old_dist, new_spot, new_dist):
           f"기록은 {old_spot} 그대로 둡니다.")
 
 
+# 방금 정산하고 나간 차. {차량번호: 출차 시각(monotonic)}
+#
+# 출차한 차도 자리에서 빠져나가기까지는 카메라에 그대로 잡힌다. 그동안
+# sync_spot_occupancy가 '기록 없는 차가 서 있다'며 기록을 새로 만들면
+# 그 차는 방금 나갔는데 다시 들어온 것이 되고, 요금도 0원부터 다시 쌓인다.
+# 그 틈에 출차 수신이 한 번 더 오면 한 대가 두 번 정산된다.
+_recent_exits = {}
+_EXIT_COOLDOWN_SEC = 60.0
+
+
+def _just_exited(car_id):
+    """방금 정산하고 나간 차인가. (오래된 기록은 지운다)"""
+    now = time.monotonic()
+    for cid, at in list(_recent_exits.items()):
+        if now - at > _EXIT_COOLDOWN_SEC:
+            del _recent_exits[cid]
+    return car_id in _recent_exits
+
+
 # 자리가 언제부터 비어 보였는지. sync_spot_occupancy만 쓴다.
 _spot_empty_since = {}
 
@@ -444,6 +463,14 @@ def sync_spot_occupancy(observations, radius_cm, empty_sec=3.0, sensing=True):
             continue
 
         info = cars_info.get(car_id)
+        if info is None and _just_exited(car_id):
+            # 방금 정산하고 나간 차다. 아직 자리에서 빠져나가지 않았을 뿐이다.
+            # 여기서 기록을 새로 만들면 그 차가 다시 입차한 것이 되고, 곧이어
+            # 또 출차 수신이 오면 한 대가 두 번 정산된다. 실제로 그랬다.
+            # 자리는 찼다고 두되(차가 서 있는 것은 사실이다) 기록은 만들지 않는다.
+            spot_status[spot_id] = "full"
+            continue
+
         if info is None:
             # 입차 기록이 없는 차가 자리에 서 있다. 시스템이 켜지기 전부터
             # 있었거나 수신을 놓친 차다. 요금 계산이 가능하도록 기록을
@@ -769,6 +796,8 @@ def remove_car(car_id):
     
     # 저장소에서 제거 및 상태 변경
     del cars_info[car_id]
+    # 자리에서 빠져나가는 동안 카메라가 다시 입차시키지 않도록 적어 둔다.
+    _recent_exits[car_id] = time.monotonic()
     # 자리를 뜬 채 통로에 있던 차는 spot_id가 비어 있다. (sync_spot_occupancy)
     # 그때 spot_status를 건드리면 남의 자리를 비우거나 KeyError가 난다.
     if spot_id in spot_status:
@@ -811,6 +840,7 @@ def reset_all():
     _spot_empty_since.clear()
     _orphan_cars.clear()
     _ambiguous_warned.clear()
+    _recent_exits.clear()
     last_entry_result = None
 
     # 시작할 때와 같은 함수로 다시 채운다. 여기서 따로 채우면 시작 상태와

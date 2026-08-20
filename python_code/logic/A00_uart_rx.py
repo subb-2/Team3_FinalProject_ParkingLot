@@ -110,6 +110,17 @@ ROLE_RESOLVE = {
     #   'ROLE_BY_IP': {'192.168.0.31': 'exit'},
     'ROLE_BY_IP': {},
 
+    # 같은 번호가 이 시간(초) 안에 또 들어오면 두 번째는 버린다.
+    #
+    # 한 대의 차가 몇 초 만에 두 번 들어오거나 두 번 나갈 수는 없다. 그렇게
+    # 보이면 보드가 같은 값을 두 번 보냈거나, 회선에 잡음이 섞여 우연히
+    # 같은 번호로 읽힌 것이다. 실제로 8888(0x88 0x88)이 8초 간격으로 두 번
+    # 들어와 A-3에 세워둔 차가 두 번 정산됐다. 첫 번째로 자리가 비고,
+    # 카메라가 그 자리의 차를 보고 기록을 새로 만들자 두 번째가 또 먹혔다.
+    #
+    # 시연에서 같은 차를 연달아 넣어볼 일이 있으므로 길게 두지는 않는다.
+    'DUPLICATE_IGNORE_SEC': 10.0,
+
     # 출차 번호의 앞뒤 두 자리가 뒤집혀 들어왔을 때 되돌릴지 여부.
     # (BYTE_ORDER가 실제 펌웨어와 어긋난 동안 출차가 아예 막히지 않게 하는 장치)
     # 뒤집은 번호가 기록에 있을 때만 걸린다. BYTE_ORDER가 맞으면 쓰이지
@@ -377,9 +388,50 @@ def set_byte_order(role, order):
     return order
 
 
+# 마지막으로 처리한 시각. {차량번호: time.monotonic()}
+_last_handled = {}
+
+
+def _is_duplicate(car_id):
+    """
+    방금 처리한 번호가 또 들어왔는가. (ROLE_RESOLVE['DUPLICATE_IGNORE_SEC'])
+
+    역할은 보지 않는다. 번호판이 카메라 앞에 머무는 동안 보드가 같은 값을
+    여러 번 보내는데, 그중 첫 번째가 출차로 처리되면 나머지는 '없는 차'가
+    되어 입차로 들어온다. 그러면 방금 나간 차가 다시 자리를 배정받는다.
+    한 번호는 한 번만 처리하고 나머지는 버리는 편이 맞다.
+
+    같으면 True를 돌려주고, 아니면 이번 것을 '방금 처리한 것'으로 적어 둔다.
+    """
+    window = ROLE_RESOLVE.get('DUPLICATE_IGNORE_SEC', 0)
+    if not window:
+        return False
+
+    now = time.monotonic()
+    key = car_id
+    last = _last_handled.get(key)
+
+    # 표가 계속 자라지 않게 오래된 것은 버린다
+    for old_key, at in list(_last_handled.items()):
+        if now - at > window:
+            del _last_handled[old_key]
+
+    if last is not None and now - last < window:
+        return True
+    _last_handled[key] = now
+    return False
+
+
 def _process_packet(port_role, raw_data, peer_ip=None):
     """수신한 2바이트를 파싱해서 입차/출차 로직으로 넘긴다."""
     role, car_id, b1, b2, rerouted = resolve_packet(port_role, raw_data, peer_ip)
+
+    if _is_duplicate(car_id):
+        label = '입차' if role == 'entry' else '출차'
+        print(f"\n[{label}수신] {car_id} (Hex: 0x{b1:02X} 0x{b2:02X}) — "
+              f"방금 처리한 번호라 무시합니다. "
+              f"({ROLE_RESOLVE['DUPLICATE_IGNORE_SEC']:g}초 안 중복)")
+        return
 
     if rerouted:
         label = '입차' if port_role == 'entry' else '출차'
